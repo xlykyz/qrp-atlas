@@ -13,6 +13,9 @@ requires-python = ">=3.13"
 dependencies = [
     "pandas",
     "duckdb",
+    "akshare",
+    "tushare",
+    "python-dotenv",
 ]
 
 # ==========================

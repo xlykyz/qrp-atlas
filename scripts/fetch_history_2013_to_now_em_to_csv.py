@@ -58,7 +58,7 @@ def fetch_one_stock(ticker: str):
             df = ak.stock_zh_a_hist(
                 symbol=ticker,
                 period="daily",
-                start_date="20130101",
+                start_date="20260218",
                 end_date=datetime.now().strftime("%Y%m%d"),
                 adjust="",  # 不复权
             )

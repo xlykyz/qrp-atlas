@@ -9,6 +9,9 @@ DB_DIR = DATA_DIR / "db"
 
 DB_PATH = DB_DIR / "quant.db"
 
+DAILY_SNAPSHOT_RAW_DIR = RAW_DIR / "daily_snapshot"
+DAILY_MARKET_SNAPSHOT_CANONICAL_DIR = CANONICAL_DIR / "daily_market_snapshot"
+
 WEB_DIR = PROJECT_ROOT / "web"
 
 

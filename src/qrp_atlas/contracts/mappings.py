@@ -30,7 +30,7 @@ from typing import Dict
 from .fields import (
     TICKER, TRADE_DATE, NAME,
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP,
+    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
 )
 
 
@@ -88,11 +88,40 @@ AKSHARE_REALTIME: Dict[str, str] = {
     "流通市值": FLOAT_CAP,
 }
 
+SINA_REALTIME: Dict[str, str] = {
+    "代码": TICKER,
+    "名称": NAME,
+    "最新价": CLOSE,
+    "涨跌额": "change",
+    "涨跌幅": PCT_CHANGE,
+    "昨收": PRE_CLOSE,
+    "今开": OPEN,
+    "最高": HIGH,
+    "最低": LOW,
+    "成交量": VOLUME,
+    "成交额": AMOUNT,
+}
+
+TUSHARE_DAILY: Dict[str, str] = {
+    "ts_code": TICKER,
+    "trade_date": TRADE_DATE,
+    "open": OPEN,
+    "high": HIGH,
+    "low": LOW,
+    "close": CLOSE,
+    "pre_close": PRE_CLOSE,
+    "pct_chg": PCT_CHANGE,
+    "vol": VOLUME,
+    "amount": AMOUNT,
+}
+
 SOURCE_MAPPINGS = {
     "eastmoney_daily_bar": EASTMONEY_DAILY_BAR,
     "eastmoney_snapshot": EASTMONEY_SNAPSHOT,
     "akshare_daily_bar": AKSHARE_DAILY_BAR,
     "akshare_realtime": AKSHARE_REALTIME,
+    "sina_realtime": SINA_REALTIME,
+    "tushare_daily": TUSHARE_DAILY,
 }
 
 
