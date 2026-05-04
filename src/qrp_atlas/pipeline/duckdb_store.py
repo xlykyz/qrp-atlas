@@ -41,7 +41,7 @@ def save_daily_market_snapshot(df: pd.DataFrame, replace: bool = False) -> None:
 
     Args:
         df: 包含行情数据的 DataFrame
-        replace: 是否替换现有数据（按主键）
+        replace: 是否替换现有数据(按主键)
     """
     df = quick_validate(df, "daily_market_snapshot")
     con = get_connection()
@@ -69,8 +69,8 @@ def get_daily_market_snapshot(
     Args:
         trade_date: 单个交易日期
         ticker: 单个股票代码
-        start_date: 起始日期（范围查询）
-        end_date: 结束日期（范围查询）
+        start_date: 起始日期(范围查询)
+        end_date: 结束日期(范围查询)
 
     Returns:
         行情数据 DataFrame
@@ -183,7 +183,7 @@ def get_trade_execution(trade_id: Optional[str] = None) -> pd.DataFrame:
     """获取交易执行记录
 
     Args:
-        trade_id: 交易ID（可选）
+        trade_id: 交易ID(可选)
 
     Returns:
         交易执行记录 DataFrame

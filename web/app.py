@@ -1,4 +1,4 @@
-"""Streamlit 入口（本地可视化）"""
+"""Streamlit 入口(本地可视化)"""
 import streamlit as st
 
 

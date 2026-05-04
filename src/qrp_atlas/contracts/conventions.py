@@ -25,8 +25,8 @@ conventions.py - 通用约定
 
 约定内容:
     - 日期格式: DATE_FORMAT, DATE_FORMAT_COMPACT, DATETIME_FORMAT
-    - Ticker规则: 长度6位，交易所前缀识别
-    - 涨跌停幅度: 普通股10%，ST股5%
+    - Ticker规则: 长度6位, 交易所前缀识别
+    - 涨跌停幅度: 普通股10%, ST股5%
     - 字段类型集合: NUMERIC_COLUMNS, BOOLEAN_COLUMNS, DATE_COLUMNS
 """
 
@@ -205,7 +205,7 @@ def calc_limit_up_pct(is_st: bool = False) -> float:
         is_st: 是否为 ST 股票
 
     Returns:
-        涨停幅度百分比（普通股10%，ST股5%）
+        涨停幅度百分比(普通股10%, ST股5%)
 
     Example:
         calc_limit_up_pct()        # -> 10.0
@@ -221,7 +221,7 @@ def calc_limit_down_pct(is_st: bool = False) -> float:
         is_st: 是否为 ST 股票
 
     Returns:
-        跌停幅度百分比（普通股-10%，ST股-5%）
+        跌停幅度百分比(普通股-10%, ST股-5%)
 
     Example:
         calc_limit_down_pct()      # -> -10.0

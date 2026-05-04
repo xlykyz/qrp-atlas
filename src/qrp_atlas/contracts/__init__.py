@@ -1,16 +1,16 @@
 """
-qrp_atlas.contracts - 全项目唯一字段/规则来源（SSOT）
+qrp_atlas.contracts - 全项目唯一字段/规则来源(SSOT)
 
 contracts 成为全项目唯一字段/规则来源
-CSV→清洗→入库→查询→可视化→回测 全都引用 contracts
-避免未来"字段改一次，改一堆脚本"的灾难
+CSV->清洗->入库->查询->可视化->回测 全都引用 contracts
+避免未来"字段改一次, 改一堆脚本"的灾难
 
-模块说明：
-- fields.py: 全项目字段名常量（SSOT）
-- schema.py: 表结构（列清单 + 主键 + duckdb建表SQL）
-- mappings.py: 各数据源字段映射（东财/AKShare/自有CSV等）
-- conventions.py: 通用约定：日期格式、ticker规则、数值列集合等
-- validate.py: 极简校验函数：缺列/多列/类型转换（MVP级）
+模块说明:
+- fields.py: 全项目字段名常量(SSOT)
+- schema.py: 表结构(列清单 + 主键 + duckdb建表SQL)
+- mappings.py: 各数据源字段映射(东财/AKShare/自有CSV等)
+- conventions.py: 通用约定: 日期格式, ticker规则, 数值列集合等
+- validate.py: 极简校验函数: 缺列/多列/类型转换(MVP级)
 """
 
 from .fields import (

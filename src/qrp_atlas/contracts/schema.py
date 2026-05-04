@@ -45,7 +45,7 @@ class ColumnSpec:
     """列规格定义
 
     Attributes:
-        name: 列名（使用 fields.py 中的常量）
+        name: 列名(使用 fields.py 中的常量)
         dtype: DuckDB 数据类型
         nullable: 是否允许 NULL，默认 True
     """

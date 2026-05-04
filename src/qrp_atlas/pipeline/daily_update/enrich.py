@@ -1,8 +1,8 @@
 """
 enrich.py - 增补缺失数据
 
-职责：
-1. 补全缺失股票（从上一交易日复制）
+职责:
+1. 补全缺失股票(从上一交易日复制)
 2. 计算缺失字段
 3. 派生 is_st, is_limit_up, is_limit_down
 
@@ -81,7 +81,7 @@ def _derive_is_st(df: pd.DataFrame) -> pd.DataFrame:
     """
     派生 is_st 字段
 
-    规则：股票名称包含 "ST" 或 "*ST"
+    规则: 股票名称包含 "ST" 或 "*ST"
 
     Args:
         df: DataFrame
@@ -101,10 +101,10 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
     """
     派生 is_limit_up, is_limit_down 字段
 
-    规则：
-    - 普通股票：涨跌幅 >= 9.9% 或 <= -9.9%
-    - ST 股票：涨跌幅 >= 4.9% 或 <= -4.9%
-    - 科创板/创业板：涨跌幅 >= 19.9% 或 <= -19.9%
+    规则:
+    - 普通股票: 涨跌幅 >= 9.9% 或 <= -9.9%
+    - ST 股票: 涨跌幅 >= 4.9% 或 <= -4.9%
+    - 科创板/创业板: 涨跌幅 >= 19.9% 或 <= -19.9%
 
     Args:
         df: DataFrame
@@ -143,7 +143,7 @@ def _calculate_pct_change(df: pd.DataFrame) -> pd.DataFrame:
     """
     计算缺失的 pct_change 字段
 
-    公式：(close - pre_close) / pre_close * 100
+    公式: (close - pre_close) / pre_close * 100
 
     Args:
         df: DataFrame
@@ -216,8 +216,8 @@ def enrich_daily_snapshot(
     """
     增补缺失数据
 
-    执行步骤：
-    1. 补全缺失股票（从上一交易日复制）
+    执行步骤:
+    1. 补全缺失股票(从上一交易日复制)
     2. 计算缺失的 pct_change
     3. 派生 is_st
     4. 派生 is_limit_up, is_limit_down
@@ -225,7 +225,7 @@ def enrich_daily_snapshot(
     Args:
         df: 清洗后的 DataFrame
         trade_date: 交易日期
-        con: DuckDB 连接（可选，用于获取历史数据）
+        con: DuckDB 连接(可选, 用于获取历史数据)
 
     Returns:
         增补后的 DataFrame
@@ -248,7 +248,7 @@ def enrich_with_db_path(
     db_path: Optional[str] = None
 ) -> pd.DataFrame:
     """
-    使用数据库路径增补数据（便捷函数）
+    使用数据库路径增补数据(便捷函数)
 
     Args:
         df: 清洗后的 DataFrame

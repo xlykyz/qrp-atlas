@@ -1,7 +1,7 @@
 """
 validate.py - 极简校验函数
 
-提供MVP级别的数据校验功能：
+提供MVP级别的数据校验功能:
 - 缺列检测: 检查 DataFrame 是否缺少必需列
 - 多列检测: 检查 DataFrame 是否有多余列
 - 类型转换: 自动转换数值/布尔/日期类型
@@ -24,7 +24,7 @@ validate.py - 极简校验函数
 异常类型:
     - ValidationError: 校验异常基类
     - MissingColumnsError: 缺少必需列
-    - ExtraColumnsError: 存在多余列（strict模式）
+    - ExtraColumnsError: 存在多余列(strict模式)
     - TypeConversionError: 类型转换失败
 """
 
@@ -45,7 +45,7 @@ class MissingColumnsError(ValidationError):
 
     Attributes:
         missing: 缺少的列名集合
-        table: 表名（可选）
+        table: 表名(可选)
     """
     def __init__(self, missing: Set[str], table: str = None):
         self.missing = missing
@@ -57,11 +57,11 @@ class MissingColumnsError(ValidationError):
 
 
 class ExtraColumnsError(ValidationError):
-    """存在多余列异常（strict模式）
+    """存在多余列异常(strict模式)
 
     Attributes:
         extra: 多余的列名集合
-        table: 表名（可选）
+        table: 表名(可选)
     """
     def __init__(self, extra: Set[str], table: str = None):
         self.extra = extra
@@ -79,7 +79,7 @@ class TypeConversionError(ValidationError):
         column: 列名
         dtype: 目标类型
         errors: 错误数量
-        table: 表名（可选）
+        table: 表名(可选)
     """
     def __init__(self, column: str, dtype: str, errors: int, table: str = None):
         self.column = column
@@ -102,7 +102,7 @@ def check_missing_columns(
     Args:
         df: pandas DataFrame
         required: 必需列名集合
-        table_name: 表名（用于错误信息，可选）
+        table_name: 表名(用于错误信息, 可选)
 
     Returns:
         (是否有缺失, 缺失列集合) - 无缺失时返回 (False, set())
@@ -131,8 +131,8 @@ def check_extra_columns(
     Args:
         df: pandas DataFrame
         expected: 期望列名集合
-        table_name: 表名（用于错误信息，可选）
-        strict: 严格模式，存在多余列时抛出异常
+        table_name: 表名(用于错误信息, 可选)
+        strict: 严格模式, 存在多余列时抛出异常
 
     Returns:
         (是否有多余, 多余列集合)
@@ -206,7 +206,7 @@ def convert_numeric(
         errors: 错误处理方式，"coerce"转为NaN，"raise"抛出异常
 
     Returns:
-        转换后的 DataFrame（副本）
+        转换后的 DataFrame(副本)
 
     Example:
         df = convert_numeric(df)
@@ -235,7 +235,7 @@ def convert_boolean(
         false_values: False 值集合，默认 {"0", "false", "False", ...}
 
     Returns:
-        转换后的 DataFrame（副本）
+        转换后的 DataFrame(副本)
 
     Example:
         df = convert_boolean(df)
@@ -266,7 +266,7 @@ def convert_date(
         format: 日期格式，默认自动检测
 
     Returns:
-        转换后的 DataFrame（副本）
+        转换后的 DataFrame(副本)
 
     Example:
         df = convert_date(df)
@@ -294,7 +294,7 @@ def canonicalize(
 
     Args:
         df: pandas DataFrame
-        table_name: 表名（仅用于日志，可选）
+        table_name: 表名(仅用于日志, 可选)
         numeric_columns: 数值列，默认 NUMERIC_COLUMNS
         boolean_columns: 布尔列，默认 BOOLEAN_COLUMNS
         date_columns: 日期列，默认 DATE_COLUMNS

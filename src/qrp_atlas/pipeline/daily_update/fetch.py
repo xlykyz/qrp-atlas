@@ -203,7 +203,7 @@ def save_raw_snapshot(
 
 
 def main() -> None:
-    """主函数：获取并保存原始数据"""
+    """主函数: 获取并保存原始数据"""
     trade_date = get_latest_trade_date()
     print(f"[FETCH] 目标交易日: {trade_date}")
 

@@ -58,14 +58,14 @@ def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> 
     """
     清洗每日快照数据
     
-    只做：
-    - 列名标准化（对齐 contracts）
+    只做:
+    - 列名标准化(对齐 contracts)
     - 类型转换
     - 按 (trade_date, ticker) 去重
     
     Args:
-        df: 原始数据 DataFrame（已包含 trade_date）
-        source: 数据源类型，支持 "akshare_realtime" 或 "tushare_daily"
+        df: 原始数据 DataFrame(已包含 trade_date)
+        source: 数据源类型, 支持 "akshare_realtime" 或 "tushare_daily"
         
     Returns:
         清洗后的 DataFrame

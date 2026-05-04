@@ -2,7 +2,7 @@
 
 > 本文档定义 qrp-atlas 在 MVP 阶段的唯一项目结构标准。
 > 基于原始版本，仅对齐最新讨论的 **Dual‑SSOT 与 scripts/src
-> 职责边界**，不改变原有结构表达方式。
+> 职责边界**，不改变原有的结构表达方式。
 
 ------------------------------------------------------------------------
 
@@ -50,22 +50,32 @@ qrp-atlas/
       ├─ config/
       │  ├─ __init__.py
       │  ├─ paths.py
-      │  └─ settings.py
+      │  ├─ settings.py
+      │  └─ tushare.py
       ├─ contracts/
       │  ├─ __init__.py
-      │  ├─ snapshot_schema.py
-      │  ├─ daily_bar_schema.py
+      │  ├─ fields.py
+      │  ├─ schema.py
+      │  ├─ mappings.py
+      │  ├─ validate.py
       │  └─ conventions.py
-      ├─ sources/
+      ├─ sources/                     # 数据源适配器（待扩展）
       │  ├─ __init__.py
       │  └─ eastmoney.py
       └─ pipeline/
          ├─ __init__.py
-         ├─ raw_store.py
-         ├─ canonical_store.py
-         ├─ canonicalize_snapshot.py
-         ├─ canonicalize_daily_bar.py
-         └─ duckdb_store.py
+         ├─ duckdb_store.py
+         ├─ raw_store.py              # TODO
+         ├─ canonical_store.py        # TODO
+         ├─ canonicalize_snapshot.py  # TODO
+         ├─ canonicalize_daily_bar.py # TODO
+         └─ daily_update/             # ⭐ 每日更新工作流（已实现）
+            ├─ __init__.py
+            ├─ run.py
+            ├─ fetch.py
+            ├─ clean.py
+            ├─ enrich.py
+            └─ load_duckdb.py
 ```
 
 ------------------------------------------------------------------------
@@ -73,13 +83,15 @@ qrp-atlas/
 # 三、数据流（Runtime Flow）
 
 ``` text
-daily_update_module (src)
-        ↓
-data/raw/daily_snapshot
-        ↓
-src/qrp_atlas/pipeline
-        ↓
+daily_update/run.py (src)
+        ↓  fetch()
+data/raw/daily_snapshot/{date}_{source}.csv
+        ↓  clean()
+data/canonical/daily_market_snapshot/{date}.csv
+        ↓  enrich() + load_duckdb()
 data/db/quant.db   ← Runtime SSOT
+        ↓
+web/app.py  →  Streamlit 交互可视化
 ```
 
 ------------------------------------------------------------------------
@@ -147,11 +159,15 @@ src：
 
 # 七、未来扩展（暂不实现）
 
--   tests/
--   apps/streamlit/
--   features/
--   多数据源 adapter
+-   tests/                          # 单元测试与集成测试
+-   features/                       # 策略/因子模块
+-   多数据源 adapter 完善            # sources/ 层适配器正式化
+-   Multi-Agent 协同层               # Sentinel / Narrative / Integrity Agent
 -   微服务 / 容器化
+
+---
+
+> **已落地**：Streamlit 可视化层已实现在 `web/`，多源数据采集（tushare/新浪/东方财富）已在 `daily_update/` 中通过 akshare 直接实现，`sources/` 层为后续 adapter 抽象预留。
 
 ------------------------------------------------------------------------
 

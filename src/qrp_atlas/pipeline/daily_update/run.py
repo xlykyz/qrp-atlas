@@ -26,7 +26,7 @@ def run() -> None:
     """
     执行日更数据管道
     
-    流程：
+    流程:
     1. fetch -> 保存 raw csv
     2. clean -> 保存 canonical csv
     3. enrich -> 增补缺失数据

@@ -9,7 +9,7 @@ def load_daily_market_snapshot(df: pd.DataFrame, trade_date: str) -> int:
     """
     加载清洗后的数据到 DuckDB
     
-    行为：
+    行为:
     - BEGIN
     - DELETE FROM daily_market_snapshot WHERE trade_date = ?
     - INSERT 数据
