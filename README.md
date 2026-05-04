@@ -7,7 +7,7 @@ A human-in-the-loop research platform that deconstructs the market into clean, o
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/downloads/)
 [![DuckDB](https://img.shields.io/badge/DuckDB-0.10+-orange.svg)](https://duckdb.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)](https://streamlit.io/)
-[![AI Pipeline](https://img.shields.io/badge/AI–Ready-MiMo%20Powered-green.svg)](https://100t.xiaomimimo.com/)
+[![AI Pipeline](https://img.shields.io/badge/AI–Ready-OpenAI%20Compatible-blue.svg)]()
 
 ---
 
@@ -123,7 +123,7 @@ This architecture is under active research and prototyping. Our goal is to ship 
 | Data Processing | Pandas | Universal DataFrame interface |
 | Visualization | Streamlit | Fastest path from data to interactive UI |
 | Data Sources | akshare + tushare | Multi-source A-share coverage with auto-failover |
-| AI Inference (Planned) | MiMo API / OpenAI-compatible | Flexible LLM backend for agent reasoning |
+| AI Inference (Planned) | OpenAI-compatible API | Flexible LLM backend for agent reasoning |
 
 ### Project Structure
 
@@ -239,6 +239,4 @@ Personal project. All rights reserved.
 
 *Last updated: 2026-05-04*
 
----
 
-*Built with insights from the [Xiaomi MiMo 100T Token Initiative](https://100t.xiaomimimo.com/) — enabling AI-augmented research at scale.*
