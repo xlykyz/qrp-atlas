@@ -1,107 +1,138 @@
-# qrp-atlas 🚀
+# qrp-atlas
 
-**Market Deconstruction Toolkit 🧭**
+**Market Deconstruction Toolkit for Quantitative Analysis**
 
-一个用于量化分析与复盘的个人工具，用来把市场拆解成清晰可观察的结构，而不是做自动交易。
+A personal toolkit for quantitative analysis and market review, designed to deconstruct market structures into clear, observable components — without automated trading.
 
-------------------------------------------------------------------------
+[![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/downloads/)
+[![DuckDB](https://img.shields.io/badge/DuckDB-0.10+-orange.svg)](https://duckdb.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)](https://streamlit.io/)
 
-## 🧩 What is this?
+---
 
-**qrp-atlas** 是一个围绕 **数据结构 + 可视化复盘** 构建的研究工具。
+## Overview
 
-### ✅ 它负责：
+**qrp-atlas** is a research-focused tool built around **data infrastructure + visual market review**.
 
--   📊 市场数据整理
--   📈 基础量化分析
--   👀 复盘与观察界面
+### Capabilities
 
-### ❌ 它不负责：
+| Scope | Implementation |
+|-------|---------------|
+| Market Data Processing | Automated ingestion from EastMoney sources |
+| Quantitative Analysis | Daily bar canonicalization and enrichment |
+| Visual Review Interface | Streamlit-based interactive dashboards |
 
--   🤖 自动交易
--   🧪 策略回测框架
--   🎯 交易决策
+### Out of Scope
 
-> 🧠 Machine handles structure. Human handles narrative.
+- Automated trading execution
+- Strategy backtesting frameworks
+- Trading signal generation
 
-------------------------------------------------------------------------
+> **Philosophy**: Machine handles structure. Human handles narrative.
 
-## 🌌 Why it exists
+---
 
-市场信息越来越复杂。
+## Architecture
 
-目标不是预测市场，而是：
+```
+Data Flow: daily_snapshot → ingestion → DuckDB
 
--   🔎 更清晰地看到结构
--   🧱 更稳定地记录变化
--   ⚡ 更高效地进行复盘
+Key Principles:
+- Reusable components live in src/
+- One-time scripts confined to scripts/
+- Local data (data/) excluded from version control
+```
 
-这是一个帮助「解构市场」的工具，而不是替代主观交易的系统。
+### Technology Stack
 
-------------------------------------------------------------------------
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Language | Python 3.13 | Core implementation |
+| Database | DuckDB | OLAP analytical queries |
+| Data Processing | Pandas | DataFrame operations |
+| Visualization | Streamlit | Interactive web interface |
+| Data Source | EastMoney API | Market data ingestion |
 
-## 🗂 Project Structure
+### Project Structure
 
-``` text
+```
 qrp-atlas/
-├─ src/qrp_atlas/    # 核心模块
-├─ scripts/          # 一次性脚本
-├─ web/              # Streamlit 界面
-├─ docs/             # 文档
-├─ data/             # 本地数据（.gitignore）
-└─ pyproject.toml
+├── src/qrp_atlas/          # Core library modules
+│   ├── config/             # Configuration management (SSOT)
+│   ├── contracts/          # Database schema definitions (SSOT)
+│   ├── pipeline/           # Data processing pipelines
+│   │   └── daily_update/   # Daily update workflow
+│   └── sources/            # External data source adapters
+├── scripts/                # One-time utility scripts
+├── web/                    # Streamlit application
+│   └── pages/              # Multi-page navigation
+├── docs/                   # Architecture documentation
+├── data/                   # Local DuckDB storage (gitignored)
+└── pyproject.toml          # Project metadata
 ```
 
-**📌 原则：**
+---
 
--   可复用功能只写在 `src/`
--   `scripts/` 仅临时使用
--   `data/` 本地存储，不同步到 GitHub
+## Data Pipeline
 
-------------------------------------------------------------------------
+### Daily Update Workflow
 
-## 🔄 Data Flow
+1. **Fetch**: Retrieve daily snapshot from EastMoney API
+2. **Clean**: Standardize field names and formats
+3. **Enrich**: Cross-reference with existing canonical data
+4. **Load**: Persist to DuckDB for analytical queries
 
-``` text
-daily_snapshot → ingestion → DuckDB
+### Data Conventions
+
+- All table schemas defined in `qrp_atlas.contracts`
+- All filesystem paths managed via `qrp_atlas.config`
+- No schema modifications without contract updates
+
+---
+
+## Development Status
+
+**Early Development** — Core infrastructure in progress
+
+Current milestones:
+- [x] Data ingestion from EastMoney
+- [x] DuckDB storage layer
+- [x] Daily update pipeline
+- [x] Basic Streamlit interface
+- [ ] Advanced visualization features
+- [ ] Extended analytical tools
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.13+
+- DuckDB
+
+### Installation
+
+```bash
+pip install -e .
 ```
 
-进入日常阶段后：
+### Configuration
 
--   ♻️ 不重复抓历史
--   📅 只做每日更新
+Copy `.env.example` to `.env` and configure data source credentials if required.
 
-------------------------------------------------------------------------
+### Running the Application
 
-## ⚙️ Tech Stack
+```bash
+streamlit run web/app.py
+```
 
--   🐍 Python 3.13
--   🦆 DuckDB
--   🐼 Pandas
--   🌐 Streamlit
+---
 
-保持最小可用，不追求复杂架构。
+## License
 
-------------------------------------------------------------------------
+Personal project. All rights reserved.
 
-## 🎯 Current Goal
+---
 
-建立一个 **可持续迭代的市场解构工具**，包括：
-
--   🧱 数据底座
--   📐 量化辅助分析
--   🖥 可视化复盘界面
-
-------------------------------------------------------------------------
-
-## 📝 Notes
-
-这是一个长期个人项目。
-
-它会慢慢成长，而不是一次完成。
-
-------------------------------------------------------------------------
-
-## 🚧🚧🚧 Project Status 🚧🚧🚧
-
-Still at an extremely early stage --- maybe around 0.001%.
+*Last updated: 2026-05-04*
