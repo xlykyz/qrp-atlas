@@ -1,138 +1,244 @@
 # qrp-atlas
 
-**市场解构工具包 · 量化分析与复盘**
+**Market Deconstruction Toolkit — AI-Augmented Quant Analysis & Daily Recon**
 
-一个用于量化分析与复盘的个人工具，用于将市场拆解成清晰可观察的结构，而非自动交易系统。
+A human-in-the-loop research platform that deconstructs the market into clean, observable structures. Designed for the analyst who believes machines handle the data while humans own the narrative.
 
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/downloads/)
 [![DuckDB](https://img.shields.io/badge/DuckDB-0.10+-orange.svg)](https://duckdb.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.0+-red.svg)](https://streamlit.io/)
+[![AI Pipeline](https://img.shields.io/badge/AI–Ready-MiMo%20Powered-green.svg)](https://100t.xiaomimimo.com/)
 
 ---
 
-## 项目概述
+## Overview
 
-**qrp-atlas** 是一个围绕 **数据结构 + 可视化复盘** 构建的研究工具。
+**qrp-atlas** reimagines the daily trading workflow as a **human–AI collaborative cockpit**. It is not an automated trading system — it is a *deconstruction engine* that ingests raw market data, enriches it with computed intelligence, and surfaces it through an interactive interface where the human analyst makes the final call.
 
-### 核心能力
+### Core Philosophy
 
-| 能力范围 | 实现方式 |
-|---------|---------|
-| 市场数据处理 | 多源数据自动采集（tushare / 新浪 / 东方财富） |
-| 量化分析 | 日线数据规范化与 enrichment |
-| 可视化复盘 | Streamlit 交互式仪表盘 |
+```
+Market Data → Machine Processing → Structured Intelligence → Human Judgement → Decision
+```
 
-### 不涉及领域
+We build the pipeline; you bring the narrative.
 
-- 自动交易执行
-- 策略回测框架
-- 交易信号生成
+### What It Does
 
-> **理念**：机器处理结构，人类负责叙事。
+| Capability | Implementation |
+|-----------|---------------|
+| Multi-Source Data Ingestion | Automatic failover across tushare / Sina / East Money |
+| Daily Market Intelligence | Raw → Cleaned → Enriched → Indexed pipeline |
+| Interactive Visualization | Streamlit dashboard with charting & screening |
+| Human-in-the-Loop Design | Every output is a *proposition*, not a decision |
+
+### What It Is Not
+
+- ❌ An auto-trading bot
+- ❌ A black-box signal generator
+- ❌ A backtesting framework
+
+> **The machine structures. The human decides.**
 
 ---
 
-## 技术架构
+## Human–AI Interaction Design
+
+qrp-atlas is built from the ground up around a **collaborative intelligence** model:
+
+### Phase 1 — Machine Does the Grunt Work
+- Automated multi-source data collection with intelligent failover
+- Schema-enforced cleaning and canonicalization
+- Computed enrichments: limit-up/down detection, ST classification, sector-aware P&L
+- All data lands in a structured, query-optimized DuckDB store — the **single source of truth** for the day's session
+
+### Phase 2 — Analyst Takes the Helm
+- Interactive Streamlit dashboards expose the structured intelligence
+- The analyst navigates, filters, contextualizes, and interprets
+- Visual patterns trigger human insight — the machine *shows*, the human *sees*
+
+### Phase 3 — AI-Augmented Exploration *(Roadmap)*
+- Natural-language query interface against the DuckDB store
+- AI-suggested anomaly detection (volume spikes, price gaps, sector rotation signals)
+- Conversational drill-down: ask the system "what moved in semis today?" and get a structured answer
+
+This three-phase loop ensures the human remains the locus of judgment while the machine handles scale, speed, and structure.
+
+---
+
+## Multi-Agent Collaboration Vision
+
+We are actively designing a **multi-agent orchestration layer** that transforms qrp-atlas from a single-pipeline tool into a **collaborative analyst swarm**. Each agent is a specialized reasoning unit, coordinated through a shared memory layer (DuckDB) and a human supervisory loop.
+
+### Planned Agent Roles
+
+| Agent | Responsibility | Interface |
+|-------|---------------|-----------|
+| **Sentinel Agent** | Real-time market anomaly detection: unusual volume, price gaps, limit-up clusters | Streamlit alert feed + notification |
+| **Sector Rotator Agent** | Tracks capital flows across industry groups, flags rotation signals | Dashboard overlay + summary card |
+| **Narrative Agent** | Summarizes cross-market activity into natural-language daily briefs | AI-generated morning/evening report |
+| **Integrity Agent** | Validates pipeline health: data completeness, schema compliance, source freshness | Status panel + alert on failure |
+| **Orchestrator Agent** | Routes tasks, manages inter-agent context, escalates to human when confidence is low | Central coordination hub |
+
+### Coordination Model
 
 ```
-数据流程：daily_snapshot → ingestion → DuckDB
-
-核心原则：
-- 可复用组件位于 src/
-- 一次性脚本限于 scripts/
-- 本地数据（data/）不纳入版本控制
+                         ┌─────────────────┐
+                         │   Orchestrator   │
+                         │      Agent       │
+                         └────────┬────────┘
+                                  │
+          ┌───────────────┬───────┼───────┬───────────────┐
+          │               │       │       │               │
+    ┌─────▼─────┐  ┌─────▼────┐ ┌▼────┐ ┌▼────────┐ ┌───▼────────┐
+    │  Sentinel │  │  Sector  │ │Narra│ │Integrity│ │   Human    │
+    │   Agent   │  │ Rotator  │ │tive │ │  Agent  │ │  Overseer  │
+    └─────┬─────┘  └─────┬────┘ └──┬──┘ └──┬───────┘ └───┬────────┘
+          │               │        │        │             │
+          └───────────────┴────────┴────────┴─────────────┘
+                                  │
+                        ┌─────────▼─────────┐
+                        │   Shared Memory   │
+                        │   (DuckDB Store)  │
+                        └───────────────────┘
 ```
 
-### 技术栈
+### Key Design Principles
 
-| 组件 | 技术选型 | 用途 |
-|-----|---------|-----|
-| 编程语言 | Python 3.13 | 核心实现 |
-| 数据库 | DuckDB | OLAP 分析查询 |
-| 数据处理 | Pandas | DataFrame 操作 |
-| 可视化 | Streamlit | 交互式 Web 界面 |
-| 数据源 | akshare + tushare | A 股市场数据采集（多源自动切换） |
+- **Human-overridden, never overridden-by** — Every agent output is a proposal; the human can accept, reject, or modify before any action
+- **Shared fact layer** — All agents read from and write to the same DuckDB schema, ensuring a consistent world model
+- **Bounded autonomy** — Agents operate within well-defined scopes; cross-boundary decisions escalate to the human
+- **Observability by default** — Every agent's reasoning trace is logged and inspectable through the Streamlit interface
 
-### 项目结构
+This architecture is under active research and prototyping. Our goal is to ship the **Sentinel Agent** and **Integrity Agent** as the first production-ready modules, providing immediate value for daily monitoring workflows.
+
+---
+
+## Technology Stack
+
+| Component | Choice | Rationale |
+|-----------|--------|-----------|
+| Language | Python 3.13 | Ecosystem depth for data & AI |
+| Database | DuckDB | OLAP-optimized, embedded, zero-config |
+| Data Processing | Pandas | Universal DataFrame interface |
+| Visualization | Streamlit | Fastest path from data to interactive UI |
+| Data Sources | akshare + tushare | Multi-source A-share coverage with auto-failover |
+| AI Inference (Planned) | MiMo API / OpenAI-compatible | Flexible LLM backend for agent reasoning |
+
+### Project Structure
 
 ```
 qrp-atlas/
-├── src/qrp_atlas/          # 核心库模块
-│   ├── config/             # 配置管理（SSOT）
-│   ├── contracts/          # 数据库 Schema 定义（SSOT）
-│   ├── pipeline/           # 数据处理管道
-│   │   └── daily_update/   # 每日更新工作流
-│   └── sources/            # 外部数据源适配器
-├── scripts/                # 一次性工具脚本
-├── web/                    # Streamlit 应用
-│   └── pages/              # 多页面导航
-├── docs/                   # 架构文档
-├── data/                   # 本地 DuckDB 存储（gitignored）
-└── pyproject.toml          # 项目元数据
+├── src/qrp_atlas/          # Core library
+│   ├── config/             # Path & settings SSOT
+│   ├── contracts/          # Schema definitions (field names, table specs, mappings)
+│   ├── pipeline/           # Data processing pipeline
+│   │   └── daily_update/   # Daily market snapshot workflow
+│   └── sources/            # External data adapters
+├── web/                    # Streamlit application
+│   ├── app.py              # Entry point
+│   └── pages/              # Multi-page navigation
+├── docs/                   # Architecture documentation
+├── data/                   # Local DuckDB storage (gitignored)
+└── pyproject.toml          # Project metadata
 ```
 
 ---
 
-## 数据管道
+## Data Pipeline
 
-### 每日更新工作流
+### Daily Update Workflow
 
-1. **采集（Fetch）**：从东方财富 API 获取每日快照
-2. **清洗（Clean）**：标准化字段名和格式
-3. ** Enrich（Enrich）**：与现有规范数据交叉引用
-4. **加载（Load）**：持久化到 DuckDB 进行分析查询
+```
+Fetch ──▶ Clean ──▶ Enrich ──▶ Load ──▶ Visualize
+  │          │          │          │
+  ▼          ▼          ▼          ▼
+ Raw CSV   Cleaned   Canonical   DuckDB
+ (backup)   CSV       CSV         (runtime
+            (audit)   (recovery   SSOT)
+                       SSOT)
+```
 
-### 数据规范
+1. **Fetch** — Multi-source auto-failover (tushare → Sina akshare → East Money akshare). Automatic trading-day detection with post-15:00 CST cutoff.
+2. **Clean** — Schema-enforced column mapping via `contracts.mappings`, type canonicalization, deduplication.
+3. **Enrich** — Cross-reference with prior session, compute P&L, detect limit-up/down, classify ST status.
+4. **Load** — Transactional upsert into DuckDB with rollback on failure. Every write passes `quick_validate()`.
 
-- 所有表结构定义在 `qrp_atlas.contracts`
-- 所有文件路径通过 `qrp_atlas.config` 管理
-- 不经 contracts 更新则不修改数据库 schema
+### Data Contracts (SSOT)
+
+| Contract Layer | Location | Purpose |
+|----------------|----------|---------|
+| Path SSOT | `config/paths.py` | All filesystem paths defined once |
+| Field SSOT | `contracts/fields.py` | All column name constants |
+| Table SSOT | `contracts/schema.py` | All table structures (18-column `daily_market_snapshot`, plus `market_phase` and `trade_execution`) |
+| Mapping SSOT | `contracts/mappings.py` | Source-to-canonical field mappings for 6 source types |
+| Validation | `contracts/validate.py` | `quick_validate()` enforces schema before every write |
 
 ---
 
-## 开发进度
+## Development Roadmap
 
-**早期开发阶段** — 核心基础设施进行中
+### Current Milestone — Core Pipeline (Complete)
+- [x] Multi-source data ingestion with auto-failover
+- [x] DuckDB storage layer with transactional writes
+- [x] Daily update pipeline (fetch → clean → enrich → load)
+- [x] Schema-enforced data contracts & validation
+- [x] Basic Streamlit page framework
 
-当前里程碑：
-- [x] 东方财富数据采集
-- [x] DuckDB 存储层
-- [x] 每日更新管道
-- [x] 基础 Streamlit 界面
-- [ ] 高级可视化功能
-- [ ] 扩展分析工具
+### Next Milestone — Interactive Visualization (In Progress)
+- [ ] Individual stock K-line with MA overlays
+- [ ] Daily market-wide overview with screening & filtering
+- [ ] Sector/industry grouping and relative strength visualization
+- [ ] Limit-up/down heatmap
+
+### Future Milestone — Multi-Agent Intelligence
+- [ ] Sentinel Agent — real-time anomaly detection
+- [ ] Integrity Agent — pipeline health monitoring
+- [ ] Narrative Agent — AI-generated daily market brief
+- [ ] Natural-language query interface against DuckDB
+- [ ] Multi-agent coordination dashboard
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Prerequisites
 
 - Python 3.13+
-- DuckDB
+- DuckDB (bundled via Python package)
 
-### 安装
+### Installation
 
 ```bash
 pip install -e .
 ```
 
-### 配置
+### Configuration
 
-复制 `.env.example` 为 `.env`，根据需要配置数据源凭证。
+Copy `.env.example` to `.env` and configure data source credentials (tushare token, etc.).
 
-### 运行
+### Run
 
 ```bash
 streamlit run web/app.py
 ```
 
+### Daily Pipeline
+
+```bash
+python -m qrp_atlas.pipeline.daily_update.run
+```
+
 ---
 
-## 许可证
+## License
 
-个人项目，保留所有权利。
+Personal project. All rights reserved.
 
 ---
 
-*最后更新：2026-05-04*
+*Last updated: 2026-05-04*
+
+---
+
+*Built with insights from the [Xiaomi MiMo 100T Token Initiative](https://100t.xiaomimimo.com/) — enabling AI-augmented research at scale.*
