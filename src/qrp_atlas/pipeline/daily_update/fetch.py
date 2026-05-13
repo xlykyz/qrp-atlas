@@ -27,7 +27,7 @@ from typing import Literal
 import akshare as ak
 import pandas as pd
 
-from qrp_atlas.config import DAILY_SNAPSHOT_RAW_DIR, _try_both_tokens
+from qrp_atlas.config import DAILY_SNAPSHOT_RAW_DIR, get_tushare_pro
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -72,7 +72,7 @@ def _fetch_from_tushare(trade_date: date) -> pd.DataFrame:
     Returns:
         DataFrame，包含当日所有 A 股行情数据
     """
-    pro = _try_both_tokens()
+    pro = get_tushare_pro()
     date_str = trade_date.strftime("%Y%m%d")
     df = pro.daily(trade_date=date_str)
     return df

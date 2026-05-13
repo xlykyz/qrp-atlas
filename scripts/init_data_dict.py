@@ -23,7 +23,7 @@ import pandas as pd
 
 from datetime import datetime, date
 from qrp_atlas.contracts import STOCK_INFO, TRADING_CALENDAR, init_database
-from qrp_atlas.config.tushare_client import _try_both_tokens
+from qrp_atlas.config.tushare_client import get_tushare_pro
 
 
 def _try_import_akshare():
@@ -202,7 +202,7 @@ def main():
 
     # 获取 tushare 客户端
     print("🔑 获取 tushare 客户端...")
-    pro = _try_both_tokens()
+    pro = get_tushare_pro()
     print("   ✅ tushare 客户端就绪")
 
     # 拉取数据
