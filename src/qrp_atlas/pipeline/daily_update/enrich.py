@@ -97,6 +97,53 @@ def _fill_names_from_stock_info(
     return df
 
 
+def _fill_pre_close_from_db(
+    df: pd.DataFrame,
+    trade_date: date,
+    con: duckdb.DuckDBPyConnection,
+) -> pd.DataFrame:
+    """从数据库补全缺失的 pre_close
+
+    对于 pre_close 为空的股票，查该 ticker 在 trade_date 之前
+    最近一个交易日的 close 作为 pre_close。
+
+    只有数据库完全没有该股票历史数据时才会留空（新股首日）。
+    """
+    if PRE_CLOSE not in df.columns or df[PRE_CLOSE].notna().all():
+        return df
+
+    missing_mask = df[PRE_CLOSE].isna()
+    missing_tickers = df.loc[missing_mask, TICKER].unique().tolist()
+    if not missing_tickers:
+        return df
+
+    filled = 0
+    still_missing = []
+    for idx in df.index[missing_mask]:
+        ticker = df.at[idx, TICKER]
+        row = con.execute(
+            "SELECT close FROM daily_market_snapshot "
+            "WHERE ticker = ? AND trade_date < ? "
+            "AND close IS NOT NULL "
+            "ORDER BY trade_date DESC LIMIT 1",
+            [ticker, trade_date],
+        ).fetchone()
+        if row and row[0] is not None:
+            df.at[idx, PRE_CLOSE] = row[0]
+            filled += 1
+        else:
+            still_missing.append(ticker)
+
+    if still_missing:
+        print(f"[WARN] 以下 {len(still_missing)} 只股票无历史数据，pre_close 留空:")
+        print(f"       {still_missing[:10]}{'...' if len(still_missing) > 10 else ''}")
+
+    if filled > 0:
+        print(f"[ENRICH] 从数据库历史 close 补全 {filled} 只股票 pre_close")
+
+    return df
+
+
 def _get_previous_trade_date(con: duckdb.DuckDBPyConnection, trade_date: date) -> Optional[date]:
     """
     获取上一交易日
@@ -295,6 +342,8 @@ def enrich_daily_snapshot(
         df = _fill_missing_stocks(df, trade_date, con)
 
     df = _fill_names_from_stock_info(df, con)
+
+    df = _fill_pre_close_from_db(df, trade_date, con)
 
     df = _calculate_pct_change(df)
     df = _derive_is_st(df)
