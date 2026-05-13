@@ -20,6 +20,7 @@ from qrp_atlas.contracts import (
     TUSHARE_DAILY,
     SINA_REALTIME,
 )
+from qrp_atlas.contracts.conventions import normalize_ticker
 
 
 AKSHARE_REALTIME_MAPPING = {
@@ -74,10 +75,14 @@ def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> 
     
     mapping = SOURCE_MAPPINGS[source]
     df = df.rename(columns=mapping)
-    
+
     if source == "tushare_daily":
         df[TRADE_DATE] = pd.to_datetime(df[TRADE_DATE], format="%Y%m%d")
-    
+
+    # 统一 ticker 格式：去除前缀/补齐6位+交易所后缀
+    if TICKER in df.columns:
+        df[TICKER] = df[TICKER].apply(lambda x: normalize_ticker(x) if pd.notna(x) else x)
+
     schema = get_table("daily_market_snapshot")
     required_cols = list(schema.column_names())
     

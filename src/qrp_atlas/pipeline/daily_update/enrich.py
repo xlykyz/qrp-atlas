@@ -38,6 +38,65 @@ from qrp_atlas.contracts import (
 )
 
 
+def _fill_names_from_stock_info(
+    df: pd.DataFrame,
+    con: duckdb.DuckDBPyConnection,
+) -> pd.DataFrame:
+    """从本地 stock_info 表补全缺失的股票名称
+
+    对于 name 为空的股票，在 stock_info 中查找并填入。
+    查不到时保留空值并打印警告。
+
+    Args:
+        df: DataFrame
+        con: DuckDB 连接
+
+    Returns:
+        补全 name 后的 DataFrame
+    """
+    if NAME not in df.columns or df[NAME].notna().all():
+        return df
+
+    # 检查 stock_info 表是否存在
+    tables = con.execute("SHOW TABLES").fetchall()
+    table_names = [t[0] for t in tables]
+    if "stock_info" not in table_names:
+        print("[WARN] stock_info 表不存在，跳过名称补全")
+        return df
+
+    missing_mask = df[NAME].isna()
+    missing_tickers = df.loc[missing_mask, TICKER].unique().tolist()
+    if not missing_tickers:
+        return df
+
+    # 从 stock_info 批量查
+    placeholders = ", ".join(["?"] * len(missing_tickers))
+    lookup = con.execute(
+        f"SELECT ticker, name FROM stock_info WHERE ticker IN ({placeholders})",
+        missing_tickers,
+    ).fetchall()
+    name_map = {row[0]: row[1] for row in lookup if row[1] is not None}
+
+    filled = 0
+    still_missing = []
+    for idx in df.index[missing_mask]:
+        ticker = df.at[idx, TICKER]
+        if ticker in name_map:
+            df.at[idx, NAME] = name_map[ticker]
+            filled += 1
+        else:
+            still_missing.append(ticker)
+
+    if still_missing:
+        print(f"[WARN] stock_info 中找不到以下 {len(still_missing)} 只股票的 name:")
+        print(f"       {still_missing[:10]}{'...' if len(still_missing) > 10 else ''}")
+
+    if filled > 0:
+        print(f"[ENRICH] 从 stock_info 补全 {filled} 只股票名称")
+
+    return df
+
+
 def _get_previous_trade_date(con: duckdb.DuckDBPyConnection, trade_date: date) -> Optional[date]:
     """
     获取上一交易日
@@ -234,7 +293,9 @@ def enrich_daily_snapshot(
     
     if con is not None:
         df = _fill_missing_stocks(df, trade_date, con)
-    
+
+    df = _fill_names_from_stock_info(df, con)
+
     df = _calculate_pct_change(df)
     df = _derive_is_st(df)
     df = _derive_limit_flags(df)

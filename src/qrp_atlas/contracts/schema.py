@@ -23,6 +23,8 @@ schema.py - 表结构定义
     - daily_market_snapshot: 每日全市场行情快照，主键(trade_date, ticker)
     - market_phase: 每日市场阶段判断，主键(trade_date)
     - trade_execution: 交易执行记录，主键(trade_id)
+    - stock_info: 股票基础信息，主键(ticker)
+    - trading_calendar: 交易日历，主键(trade_date)
 """
 
 from dataclasses import dataclass
@@ -37,6 +39,8 @@ from .fields import (
     TRADE_ID, ENTRY_DATE, ENTRY_PRICE, PATH_TYPE,
     HALF_SELL_TRIGGER, HALF_SELL_DATE, HALF_SELL_PRICE,
     EXIT_DATE, EXIT_PRICE, POSITION_PCT,
+    EXCHANGE, MARKET, LIST_DATE, DELIST_DATE, IS_ACTIVE, UPDATED_AT,
+    IS_OPEN, YEAR_FIELD, MONTH_FIELD, QUARTER,
 )
 
 
@@ -150,7 +154,34 @@ TRADE_EXECUTION = TableSchema(
     primary_key=(TRADE_ID,),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION)
+STOCK_INFO = TableSchema(
+    name="stock_info",
+    columns=(
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(EXCHANGE, "VARCHAR"),
+        ColumnSpec(MARKET, "VARCHAR"),
+        ColumnSpec(LIST_DATE, "DATE"),
+        ColumnSpec(DELIST_DATE, "DATE"),
+        ColumnSpec(IS_ACTIVE, "BOOLEAN"),
+        ColumnSpec(UPDATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TICKER,),
+)
+
+TRADING_CALENDAR = TableSchema(
+    name="trading_calendar",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(IS_OPEN, "BOOLEAN"),
+        ColumnSpec(YEAR_FIELD, "INTEGER"),
+        ColumnSpec(MONTH_FIELD, "INTEGER"),
+        ColumnSpec(QUARTER, "INTEGER"),
+    ),
+    primary_key=(TRADE_DATE,),
+)
+
+ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 

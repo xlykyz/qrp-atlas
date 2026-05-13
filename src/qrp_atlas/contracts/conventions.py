@@ -162,6 +162,33 @@ def get_exchange(ticker: str) -> str:
     return "UNKNOWN"
 
 
+def normalize_ticker(raw: str) -> str:
+    """将 ticker 统一为标准格式 6位代码.交易所
+
+    输入: '000001' '000001.SZ' 'bj920000' '600000.SH'
+    输出: '000001.SZ' '000001.SZ' '920000.BJ' '600000.SH'
+
+    Args:
+        raw: 原始 ticker（可能含 .SZ/.SH/.BJ 后缀，或不带后缀）
+
+    Returns:
+        标准化后的 ticker
+    """
+    raw = str(raw).strip().upper()
+    # 去掉后缀
+    if "." in raw:
+        code = raw.split(".")[0]
+    else:
+        code = raw
+    # 去掉 bj/sh/sz 前缀（新浪北交所数据如 bj920000）
+    code = code.lstrip("BJSHSZ")
+    code = format_ticker(code)
+    exchange = get_exchange(code)
+    if exchange == "UNKNOWN":
+        return code  # 无法识别时原样返回
+    return f"{code}.{exchange}"
+
+
 def is_sh_ticker(ticker: str) -> bool:
     """判断是否为上海交易所股票
 

@@ -37,7 +37,10 @@ def load_daily_market_snapshot(df: pd.DataFrame, trade_date: str) -> int:
         )
         
         con.register("tmp_df", df)
-        con.execute("INSERT INTO daily_market_snapshot SELECT * FROM tmp_df")
+        # 按列名匹配插入，避免 DataFrame 列顺序与 schema 不一致
+        cols = [desc[0] for desc in con.execute("DESCRIBE daily_market_snapshot").fetchall()]
+        col_names = ", ".join(cols)
+        con.execute(f"INSERT INTO daily_market_snapshot ({col_names}) SELECT {col_names} FROM tmp_df")
         
         con.execute("COMMIT")
         
