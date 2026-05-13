@@ -1,0 +1,19 @@
+[Unit]
+Description=QRP Atlas API - Market data backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claire
+WorkingDirectory=/home/claire/projects/qrp-atlas
+ExecStart=/home/claire/projects/qrp-atlas/.venv/bin/uvicorn qrp_atlas.api.server:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -36,6 +36,9 @@ Thumbs.db
 *.tmp
 *.temp
 
+# 开发流转记录
+handoffs/
+
 # 其他
 *.csv
 *.xlsx
