@@ -42,6 +42,9 @@ Thumbs.db
 # 开发流转记录
 handoffs/
 
+# 部署脚本（机器相关，不同步）
+deploy/*.sh
+
 # 其他
 *.csv
 *.xlsx
