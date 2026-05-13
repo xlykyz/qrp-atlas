@@ -48,7 +48,6 @@ AKSHARE_REALTIME_MAPPING = {
 
 SOURCE_MAPPINGS = {
     "akshare_realtime": AKSHARE_REALTIME_MAPPING,
-    "eastmoney_realtime": AKSHARE_REALTIME_MAPPING,
     "sina_realtime": SINA_REALTIME,
     "tushare_daily": TUSHARE_DAILY,
 }

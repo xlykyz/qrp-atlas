@@ -1,17 +1,17 @@
 """
 mappings.py - 各数据源字段映射
 
-定义东财/AKShare/自有CSV等数据源字段到标准字段的映射。
+mappings.py - 各数据源字段映射
 数据清洗时使用这些映射进行字段转换。
 
 使用示例:
-    from qrp_atlas.contracts import apply_mapping, EASTMONEY_DAILY_BAR
+    from qrp_atlas.contracts import apply_mapping, AKSHARE_DAILY_BAR
 
     # 方式1: 使用预定义映射
-    df = apply_mapping(df, "eastmoney_daily_bar")
+    df = apply_mapping(df, "akshare_daily_bar")
 
     # 方式2: 获取映射字典自行处理
-    mapping = get_mapping("eastmoney_daily_bar")
+    mapping = get_mapping("akshare_daily_bar")
     df = df.rename(columns=mapping)
 
     # 方式3: 自定义映射
@@ -19,8 +19,6 @@ mappings.py - 各数据源字段映射
     df = df.rename(columns=custom_mapping)
 
 支持的数据源:
-    - eastmoney_daily_bar: 东方财富日线行情
-    - eastmoney_snapshot: 东方财富实时快照
     - akshare_daily_bar: AKShare日线行情
     - akshare_realtime: AKShare实时行情
 """
@@ -33,35 +31,6 @@ from .fields import (
     PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
 )
 
-
-EASTMONEY_DAILY_BAR: Dict[str, str] = {
-    "代码": TICKER,
-    "日期": TRADE_DATE,
-    "股票名称": NAME,
-    "开盘": OPEN,
-    "最高": HIGH,
-    "最低": LOW,
-    "收盘": CLOSE,
-    "成交量": VOLUME,
-    "成交额": AMOUNT,
-    "涨跌幅": PCT_CHANGE,
-    "换手率": TURNOVER,
-}
-
-EASTMONEY_SNAPSHOT: Dict[str, str] = {
-    "代码": TICKER,
-    "股票名称": NAME,
-    "最新价": CLOSE,
-    "涨跌幅": PCT_CHANGE,
-    "成交量": VOLUME,
-    "成交额": AMOUNT,
-    "换手率": TURNOVER,
-    "总市值": MARKET_CAP,
-    "流通市值": FLOAT_CAP,
-    "今开": OPEN,
-    "最高": HIGH,
-    "最低": LOW,
-}
 
 AKSHARE_DAILY_BAR: Dict[str, str] = {
     "代码": TICKER,
@@ -116,8 +85,6 @@ TUSHARE_DAILY: Dict[str, str] = {
 }
 
 SOURCE_MAPPINGS = {
-    "eastmoney_daily_bar": EASTMONEY_DAILY_BAR,
-    "eastmoney_snapshot": EASTMONEY_SNAPSHOT,
     "akshare_daily_bar": AKSHARE_DAILY_BAR,
     "akshare_realtime": AKSHARE_REALTIME,
     "sina_realtime": SINA_REALTIME,
@@ -129,7 +96,7 @@ def get_mapping(source: str) -> Dict[str, str]:
     """根据数据源名称获取字段映射
 
     Args:
-        source: 数据源名称，如 "eastmoney_daily_bar"
+        source: 数据源名称，如 "akshare_daily_bar"
 
     Returns:
         字段映射字典 {源字段名: 标准字段名}
@@ -156,8 +123,8 @@ def apply_mapping(df, source: str, drop_extra: bool = False):
         转换后的 DataFrame
 
     Example:
-        df = apply_mapping(df, "eastmoney_daily_bar")
-        df = apply_mapping(df, "eastmoney_daily_bar", drop_extra=True)
+        df = apply_mapping(df, "akshare_daily_bar")
+        df = apply_mapping(df, "akshare_daily_bar", drop_extra=True)
     """
     mapping = get_mapping(source)
     reverse_mapping = {v: k for k, v in mapping.items()}

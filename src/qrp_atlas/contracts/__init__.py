@@ -8,7 +8,7 @@ CSV->清洗->入库->查询->可视化->回测 全都引用 contracts
 模块说明:
 - fields.py: 全项目字段名常量(SSOT)
 - schema.py: 表结构(列清单 + 主键 + duckdb建表SQL)
-- mappings.py: 各数据源字段映射(东财/AKShare/自有CSV等)
+mappings.py - 各数据源字段映射(AKShare/自有CSV等)
 - conventions.py: 通用约定: 日期格式, ticker规则, 数值列集合等
 - validate.py: 极简校验函数: 缺列/多列/类型转换(MVP级)
 """
@@ -69,8 +69,6 @@ from .schema import (
 )
 
 from .mappings import (
-    EASTMONEY_DAILY_BAR,
-    EASTMONEY_SNAPSHOT,
     AKSHARE_DAILY_BAR,
     AKSHARE_REALTIME,
     SINA_REALTIME,
@@ -174,8 +172,6 @@ __all__ = [
     "TABLE_BY_NAME",
     "get_table",
     "init_database",
-    "EASTMONEY_DAILY_BAR",
-    "EASTMONEY_SNAPSHOT",
     "AKSHARE_DAILY_BAR",
     "AKSHARE_REALTIME",
     "SINA_REALTIME",

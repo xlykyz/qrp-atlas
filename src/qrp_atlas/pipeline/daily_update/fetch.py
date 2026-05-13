@@ -4,7 +4,6 @@ fetch.py - 获取 A 股实时行情原始数据
 数据源优先级:
 1. tushare daily 接口 (首选) - 需要 token，获取指定交易日数据
 2. 新浪财经接口 (次选) - akshare.stock_zh_a_spot
-3. 东方财富接口 (第三) - akshare.stock_zh_a_spot_em
 
 使用示例:
     from qrp_atlas.pipeline.daily_update.fetch import fetch_current_snapshot
@@ -27,13 +26,12 @@ from typing import Literal
 
 import akshare as ak
 import pandas as pd
-import tushare as ts
 
-from qrp_atlas.config import DAILY_SNAPSHOT_RAW_DIR, TUSHARE_TOKEN
+from qrp_atlas.config import DAILY_SNAPSHOT_RAW_DIR, _try_both_tokens
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
-DataSource = Literal["tushare", "sina", "em"]
+DataSource = Literal["tushare", "sina"]
 
 
 def get_latest_trade_date() -> date:
@@ -74,10 +72,7 @@ def _fetch_from_tushare(trade_date: date) -> pd.DataFrame:
     Returns:
         DataFrame，包含当日所有 A 股行情数据
     """
-    if not TUSHARE_TOKEN:
-        raise ValueError("TUSHARE_TOKEN 未配置，请设置环境变量 TUSHARE_TOKEN")
-
-    pro = ts.pro_api(TUSHARE_TOKEN)
+    pro = _try_both_tokens()
     date_str = trade_date.strftime("%Y%m%d")
     df = pro.daily(trade_date=date_str)
     return df
@@ -88,11 +83,6 @@ def _fetch_from_sina() -> pd.DataFrame:
     return ak.stock_zh_a_spot()
 
 
-def _fetch_from_eastmoney() -> pd.DataFrame:
-    """从东方财富接口获取原始数据"""
-    return ak.stock_zh_a_spot_em()
-
-
 def fetch_current_snapshot(
     trade_date: date = None,
     max_retries: int = 3,
@@ -100,7 +90,7 @@ def fetch_current_snapshot(
 ) -> tuple[pd.DataFrame, DataSource]:
     """获取当前 A 股市场快照原始数据
 
-    数据源优先级: tushare > 新浪 > 东方财富
+    数据源优先级: tushare > 新浪
 
     Args:
         trade_date: 目标交易日，默认自动获取最近交易日
@@ -123,25 +113,24 @@ def fetch_current_snapshot(
 
     last_error = None
 
-    if TUSHARE_TOKEN:
-        for attempt in range(max_retries):
-            try:
-                print(f"[FETCH] 尝试从 tushare 获取 {trade_date} 数据 (尝试 {attempt + 1}/{max_retries})...")
-                df = _fetch_from_tushare(trade_date)
-                if df is not None and len(df) > 0:
-                    print(f"[FETCH] tushare 成功，获取 {len(df)} 条数据")
-                    return df, "tushare"
-                else:
-                    print(f"[FETCH] tushare 返回空数据")
-            except Exception as e:
-                last_error = e
-                print(f"[FETCH] tushare 失败: {e}")
-                if attempt < max_retries - 1:
-                    print(f"[FETCH] 等待 {retry_delay} 秒后重试...")
-                    time.sleep(retry_delay)
-    else:
-        print("[FETCH] TUSHARE_TOKEN 未配置，跳过 tushare 数据源")
+    # 先尝试 tushare（自动降级主用→备用 token）
+    for attempt in range(max_retries):
+        try:
+            print(f"[FETCH] 尝试从 tushare 获取 {trade_date} 数据 (尝试 {attempt + 1}/{max_retries})...")
+            df = _fetch_from_tushare(trade_date)
+            if df is not None and len(df) > 0:
+                print(f"[FETCH] tushare 成功，获取 {len(df)} 条数据")
+                return df, "tushare"
+            else:
+                print(f"[FETCH] tushare 返回空数据")
+        except Exception as e:
+            last_error = e
+            print(f"[FETCH] tushare 失败: {e}")
+            if attempt < max_retries - 1:
+                print(f"[FETCH] 等待 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
 
+    # tushare 全部失败，降级到新浪
     for attempt in range(max_retries):
         try:
             print(f"[FETCH] 尝试从新浪接口获取数据 (尝试 {attempt + 1}/{max_retries})...")
@@ -155,13 +144,7 @@ def fetch_current_snapshot(
                 print(f"[FETCH] 等待 {retry_delay} 秒后重试...")
                 time.sleep(retry_delay)
 
-    print("[FETCH] 新浪接口失败，尝试东方财富接口...")
-    try:
-        df = _fetch_from_eastmoney()
-        print(f"[FETCH] 东方财富接口成功，获取 {len(df)} 条数据")
-        return df, "em"
-    except Exception as e:
-        raise Exception(f"所有数据源获取失败。tushare/新浪: {last_error}, 东财: {e}")
+    raise Exception(f"所有数据源获取失败。tushare: {last_error}, 新浪: {last_error}")
 
 
 def save_raw_snapshot(

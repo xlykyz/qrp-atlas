@@ -18,7 +18,6 @@ from .load_duckdb import load_daily_market_snapshot
 FETCH_TO_CLEAN_SOURCE = {
     "tushare": "tushare_daily",
     "sina": "sina_realtime",
-    "em": "eastmoney_realtime",
 }
 
 

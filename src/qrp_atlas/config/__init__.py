@@ -12,7 +12,7 @@ from .paths import (
     ensure_dirs,
 )
 from .settings import DB_READ_ONLY
-from .tushare import TUSHARE_TOKEN
+from .tushare_client import TUSHARE_TOKEN, get_tushare_pro, _try_both_tokens
 
 __all__ = [
     "PROJECT_ROOT",
@@ -27,4 +27,5 @@ __all__ = [
     "ensure_dirs",
     "DB_READ_ONLY",
     "TUSHARE_TOKEN",
+    "get_tushare_pro",
 ]
