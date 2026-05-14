@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { getDailyByDate, getDailyByDateRange, getDailyDates } from '@/api/daily'
+import { getDailyByDate } from '@/api/daily'
 import type { DailyRow } from '@/types'
 
 // ── helpers ──
@@ -39,7 +39,6 @@ function pctColor(v: number | null): string {
 
 export default function Overview() {
   const [selectedDate, setSelectedDate] = useState<string>('')
-  const [availableDates, setAvailableDates] = useState<string[]>([])
   const [data, setData] = useState<DailyRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -63,7 +62,7 @@ export default function Overview() {
     [now],
   )
 
-  // ── Step 1: Initial load — discover available dates ──
+  // ── Initial load — fetch today's data directly ──
 
   useEffect(() => {
     let cancelled = false
@@ -72,37 +71,11 @@ export default function Overview() {
       setLoading(true)
       setError(null)
       try {
-        const past = new Date(now)
-        past.setDate(past.getDate() - 60)
-        const startDate =
-          `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
-
-        // Fetch trade dates from trading_calendar
-        const dateList = await getDailyDates(startDate, todayYMD, 120)
+        const todayData = await getDailyByDate(todayYMD)
         if (cancelled) return
-
-        if (dateList.length > 0) {
-          setAvailableDates(dateList)
-          const latest = dateList[0]
-          setSelectedDate(latest)
-          // 用最新日期获取完整数据
-          const todayData = await getDailyByDate(latest)
-          if (cancelled) return
+        if (todayData.length > 0) {
+          setSelectedDate(todayYMD)
           setData(todayData)
-        } else {
-          // Fallback: try fetching today directly
-          try {
-            const todayData = await getDailyByDate(todayYMD)
-            if (cancelled) return
-            if (todayData.length > 0) {
-              setData(todayData)
-              setAvailableDates([todayYMD])
-              setSelectedDate(todayYMD)
-            }
-          } catch {
-            if (cancelled) return
-            // Still no data — stays empty
-          }
         }
       } catch (err) {
         if (cancelled) return
@@ -114,16 +87,14 @@ export default function Overview() {
 
     initLoad()
     return () => { cancelled = true }
-  }, [now, todayYMD])
+  }, [todayYMD])
 
-  // ── Step 2: Fetch data when selectedDate changes (after initial load) ──
+  // ── Step 2: Fetch data when selectedDate changes ──
 
   useEffect(() => {
     if (loading || !selectedDate) return
-    // If availableDates was just populated, the first date's data is already in `data`
-    // For subsequent date changes, fetch fresh data
-    const isFirstDate = availableDates.length > 0 && selectedDate === availableDates[0]
-    if (isFirstDate && data.length > 0) return
+    // Initial load already fetched data for today, skip redundant fetch
+    if (selectedDate === todayYMD && data.length > 0) return
 
     let cancelled = false
 
@@ -223,7 +194,6 @@ export default function Overview() {
       <DatePicker
         value={selectedDate}
         onChange={(v) => setSelectedDate(v)}
-        availableDates={availableDates}
         disabled={isBusy}
       />,
     )
@@ -231,7 +201,7 @@ export default function Overview() {
       setPageTitle('')
       setHeaderControls(null)
     }
-  }, [selectedDate, availableDates, isBusy, setPageTitle, setHeaderControls])
+  }, [selectedDate, isBusy, setPageTitle, setHeaderControls])
 
   // ── Retry ──
 
@@ -239,26 +209,14 @@ export default function Overview() {
     setError(null)
     setLoading(true)
     setData([])
-    setAvailableDates([])
     setSelectedDate('')
 
-    const past = new Date()
-    past.setDate(past.getDate() - 60)
-    const startDate =
-      `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
-
-    getDailyDates(startDate, todayYMD, 120)
-      .then((dateList) => {
-        if (dateList.length > 0) {
-          setAvailableDates(dateList)
-          const latest = dateList[0]
-          setSelectedDate(latest)
-          return getDailyByDate(latest)
-        }
-        return []
-      })
+    getDailyByDate(todayYMD)
       .then((todayData) => {
-        if (todayData) setData(todayData)
+        if (todayData.length > 0) {
+          setSelectedDate(todayYMD)
+          setData(todayData)
+        }
         setLoading(false)
       })
       .catch((err) => {
@@ -303,7 +261,7 @@ export default function Overview() {
 
   const isEmpty = !isBusy && data.length === 0
 
-  if (isEmpty && availableDates.length === 0) {
+  if (isEmpty) {
     return (
       <div className="min-h-screen p-6">
         <div className="flex items-center justify-center h-64">
