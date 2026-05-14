@@ -58,7 +58,7 @@ export default function Layout() {
   return (
     <div className="flex h-screen">
       {/* Left sidebar */}
-      <aside className="flex w-64 flex-col bg-slate-950 text-white">
+      <aside className="flex w-64 flex-col bg-slate-900 dark:bg-slate-950 text-white">
         {/* Brand */}
         <div className="flex items-center gap-2 px-6 py-5">
           <span className="text-lg font-bold tracking-tight">QRP Atlas</span>
