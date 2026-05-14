@@ -18,14 +18,8 @@ export function DatePicker({ value, onChange, disabled }: DatePickerProps) {
 
   return (
     <Popover>
-      <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          className="w-44 justify-start text-left font-normal"
-          disabled={disabled}
-        >
-          {value ? format(selectedDate!, 'yyyy-MM-dd') : <span>选择日期</span>}
-        </Button>
+      <PopoverTrigger render={<Button variant="outline" className="w-44 justify-start text-left font-normal" disabled={disabled} />}>
+        {value ? format(selectedDate!, 'yyyy-MM-dd') : <span>选择日期</span>}
       </PopoverTrigger>
       <PopoverContent className="w-auto p-0" align="start">
         <Calendar
