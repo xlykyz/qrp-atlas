@@ -79,7 +79,7 @@ export default function Overview() {
           `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
         // Fetch a broad range to discover which dates have data
-        const rangeData = await getDailyByDateRange(startDate, todayYMD, 2000)
+        const rangeData = await getDailyByDateRange(startDate, todayYMD, 10000)
         if (cancelled) return
 
         const dates = [...new Set(rangeData.map((r) => r.trade_date))].sort().reverse()
@@ -167,12 +167,33 @@ export default function Overview() {
     }
   }, [data])
 
-  // ── Sorted data ──
+  // ── Sort state ──
 
-  const sortedData = useMemo(
-    () => [...data].sort((a, b) => (b.pct_change ?? 0) - (a.pct_change ?? 0)),
-    [data],
-  )
+  type SortKey = 'ticker' | 'name' | 'close' | 'pct_change' | 'amount' | 'turnover'
+  type SortDir = 'desc' | 'asc'
+
+  const [sortKey, setSortKey] = useState<SortKey>('pct_change')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir(prev => (prev === 'desc' ? 'asc' : 'desc'))
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+  }
+
+  const sortedData = useMemo(() => {
+    return [...data].sort((a, b) => {
+      const aVal = (a as any)[sortKey] ?? 0
+      const bVal = (b as any)[sortKey] ?? 0
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortDir === 'desc' ? bVal.localeCompare(aVal) : aVal.localeCompare(bVal)
+      }
+      return sortDir === 'desc' ? (bVal as number) - (aVal as number) : (aVal as number) - (bVal as number)
+    })
+  }, [data, sortKey, sortDir])
 
   const isBusy = loading || isDateChanging
 
@@ -190,7 +211,7 @@ export default function Overview() {
     const startDate =
       `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
-    getDailyByDateRange(startDate, todayYMD, 2000)
+    getDailyByDateRange(startDate, todayYMD, 10000)
       .then((rangeData) => {
         const dates = [...new Set(rangeData.map((r) => r.trade_date))].sort().reverse()
         const top20 = dates.slice(0, 20)
@@ -212,9 +233,9 @@ export default function Overview() {
 
   if (loading) {
     return (
-      <div className="bg-slate-950 text-white min-h-screen p-6">
+      <div className="min-h-screen p-6">
         <div className="flex items-center justify-center h-64">
-          <p className="text-lg text-gray-400">正在加载数据...</p>
+          <p className="text-lg text-slate-500 dark:text-gray-400">正在加载数据...</p>
         </div>
       </div>
     )
@@ -224,13 +245,13 @@ export default function Overview() {
 
   if (error && data.length === 0 && !isDateChanging) {
     return (
-      <div className="bg-slate-950 text-white min-h-screen p-6">
+      <div className="min-h-screen p-6">
         <div className="flex items-center justify-center h-64">
           <div className="text-center">
             <p className="text-lg text-red-400">
               数据加载失败，请确认后端服务是否运行
             </p>
-            <p className="mt-2 text-sm text-gray-500">{error}</p>
+            <p className="mt-2 text-sm text-slate-500 dark:text-gray-500">{error}</p>
             <Button onClick={handleRetry} className="mt-4" variant="outline">
               重试
             </Button>
@@ -246,10 +267,10 @@ export default function Overview() {
 
   if (isEmpty && availableDates.length === 0) {
     return (
-      <div className="bg-slate-950 text-white min-h-screen p-6">
+      <div className="min-h-screen p-6">
         <div className="flex items-center justify-center h-64">
           <div className="text-center">
-            <p className="text-lg text-gray-400">当前日期无数据</p>
+            <p className="text-lg text-slate-500 dark:text-gray-400">当前日期无数据</p>
             <Button onClick={handleRetry} className="mt-4" variant="outline">
               重试
             </Button>
@@ -262,7 +283,7 @@ export default function Overview() {
   // ── Main content ──
 
   return (
-    <div className="bg-slate-950 text-white min-h-screen p-6">
+    <div className="min-h-screen p-6">
       {/* Header + Date selector */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">今日概览</h1>
@@ -287,13 +308,13 @@ export default function Overview() {
       {/* Loading overlay during date switch */}
       {isDateChanging && (
         <div className="flex items-center justify-center py-8">
-          <p className="text-gray-400">正在加载数据...</p>
+          <p className="text-slate-500 dark:text-gray-400">正在加载数据...</p>
         </div>
       )}
 
       {/* Error banner (non-fatal, data still present) */}
       {error && (
-        <div className="mb-4 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-400">
+        <div className="mb-4 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-3 text-sm text-red-600 dark:text-red-400">
           {error}
           <button
             className="ml-3 underline hover:text-red-300"
@@ -306,16 +327,16 @@ export default function Overview() {
 
       {/* KPI cards */}
       <div className="grid grid-cols-4 gap-4 mb-6">
-        <Card className="bg-slate-900 border-slate-800">
+        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
-            <p className="text-sm text-gray-400 mb-1">股票总数</p>
-            <p className="text-2xl font-bold">{kpis.total.toLocaleString()}</p>
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">股票总数</p>
+            <p className="text-2xl font-bold text-slate-900 dark:text-white">{kpis.total.toLocaleString()}</p>
           </CardContent>
         </Card>
 
-        <Card className="bg-slate-900 border-slate-800">
+        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
-            <p className="text-sm text-gray-400 mb-1">上涨</p>
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">上涨</p>
             <p className="text-2xl font-bold text-red-500">
               {kpis.upCount.toLocaleString()}
               <span className="text-sm ml-1 font-normal">
@@ -325,9 +346,9 @@ export default function Overview() {
           </CardContent>
         </Card>
 
-        <Card className="bg-slate-900 border-slate-800">
+        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
-            <p className="text-sm text-gray-400 mb-1">下跌</p>
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">下跌</p>
             <p className="text-2xl font-bold text-green-500">
               {kpis.downCount.toLocaleString()}
               <span className="text-sm ml-1 font-normal">
@@ -337,10 +358,10 @@ export default function Overview() {
           </CardContent>
         </Card>
 
-        <Card className="bg-slate-900 border-slate-800">
+        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
-            <p className="text-sm text-gray-400 mb-1">涨停</p>
-            <p className="text-2xl font-bold">
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">涨停</p>
+            <p className="text-2xl font-bold text-slate-900 dark:text-white">
               🚀 {kpis.limitUpCount.toLocaleString()}
             </p>
           </CardContent>
@@ -350,41 +371,71 @@ export default function Overview() {
       {/* Empty state inside table area */}
       {isEmpty && (
         <div className="flex items-center justify-center py-16">
-          <p className="text-gray-400">当前日期无数据</p>
+          <p className="text-slate-500 dark:text-gray-400">当前日期无数据</p>
         </div>
       )}
 
       {/* Data table */}
       {!isEmpty && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/50">
+        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50">
           <div className="max-h-[calc(100vh-280px)] overflow-y-auto">
             <Table>
-              <TableHeader className="sticky top-0 bg-slate-900 z-10">
-                <TableRow className="border-slate-800">
-                  <TableHead className="text-gray-400 font-medium">代码</TableHead>
-                  <TableHead className="text-gray-400 font-medium">名称</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-right">收盘价</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-right">涨跌幅</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-right">成交额</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-right">换手率</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-center">涨停</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-center">跌停</TableHead>
-                  <TableHead className="text-gray-400 font-medium text-center">ST</TableHead>
+              <TableHeader className="sticky top-0 bg-white dark:bg-slate-900 z-10">
+                <TableRow className="border-slate-200 dark:border-slate-800">
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('ticker')}
+                  >
+                    代码 {sortKey === 'ticker' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('name')}
+                  >
+                    名称 {sortKey === 'name' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('close')}
+                  >
+                    收盘价 {sortKey === 'close' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('pct_change')}
+                  >
+                    涨跌幅 {sortKey === 'pct_change' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('amount')}
+                  >
+                    成交额 {sortKey === 'amount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('turnover')}
+                  >
+                    换手率 {sortKey === 'turnover' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">涨停</TableHead>
+                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">跌停</TableHead>
+                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">ST</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedData.map((row, idx) => (
                   <TableRow
                     key={`${row.ticker}-${idx}`}
-                    className="border-slate-800 hover:bg-slate-800/50"
+                    className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/50"
                   >
-                    <TableCell className="font-mono text-xs text-gray-300">
+                    <TableCell className="font-mono text-xs text-slate-600 dark:text-gray-300">
                       {row.ticker}
                     </TableCell>
-                    <TableCell className="text-gray-200">
+                    <TableCell className="text-slate-800 dark:text-gray-200">
                       {row.name ?? '—'}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-gray-200">
+                    <TableCell className="text-right font-mono text-slate-700 dark:text-gray-200">
                       {row.close != null ? row.close.toFixed(2) : '—'}
                     </TableCell>
                     <TableCell
@@ -392,10 +443,10 @@ export default function Overview() {
                     >
                       {formatPct(row.pct_change)}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-gray-200">
+                    <TableCell className="text-right font-mono text-slate-700 dark:text-gray-200">
                       {formatAmount(row.amount)}
                     </TableCell>
-                    <TableCell className="text-right font-mono text-gray-200">
+                    <TableCell className="text-right font-mono text-slate-700 dark:text-gray-200">
                       {row.turnover != null ? `${row.turnover.toFixed(2)}%` : '—'}
                     </TableCell>
                     <TableCell className="text-center text-lg">
