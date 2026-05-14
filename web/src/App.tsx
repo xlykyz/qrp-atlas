@@ -1,13 +1,19 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import Layout from '@/components/layout'
+import Overview from '@/pages/overview'
+import StockReview from '@/pages/stock-review'
+import ReviewLogs from '@/pages/review-logs'
 
 function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-background text-foreground">
-        <Routes>
-          <Route path="/" element={<div className="p-8 text-center"><h1 className="text-2xl font-bold">QRP Atlas</h1><p className="text-muted-foreground mt-2">交易复盘可视化平台</p></div>} />
-        </Routes>
-      </div>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Overview />} />
+          <Route path="/stock" element={<StockReview />} />
+          <Route path="/logs" element={<ReviewLogs />} />
+        </Route>
+      </Routes>
     </BrowserRouter>
   )
 }
