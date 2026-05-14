@@ -78,7 +78,7 @@ export default function Overview() {
           `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
         // Fetch trade dates from trading_calendar
-        const dateList = await getDailyDates(startDate, todayYMD, 20)
+        const dateList = await getDailyDates(startDate, todayYMD, 120)
         if (cancelled) return
 
         if (dateList.length > 0) {
@@ -247,7 +247,7 @@ export default function Overview() {
     const startDate =
       `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
-    getDailyDates(startDate, todayYMD, 20)
+    getDailyDates(startDate, todayYMD, 120)
       .then((dateList) => {
         if (dateList.length > 0) {
           setAvailableDates(dateList)
