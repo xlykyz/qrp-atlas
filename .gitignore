@@ -4,6 +4,7 @@ db/
 
 # 项目管理文件（本地管理，不同步）
 PROJECT_MEMORY.md
+CLAUDE.md
 
 # Python 缓存和虚拟环境
 __pycache__/
