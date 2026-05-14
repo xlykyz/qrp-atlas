@@ -779,7 +779,7 @@ export default function StockReview() {
       <h1 className="text-2xl font-bold">个股复盘</h1>
 
       {/* ── Search bar ── */}
-      <Card className="border-slate-800 bg-slate-900/50">
+      <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
         <CardContent className="p-4">
           <div className="flex items-end gap-3">
             <div className="flex-1 relative">
@@ -793,20 +793,20 @@ export default function StockReview() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleSearch()
                 }}
-                className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500"
+                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500"
               />
               {/* Search dropdown */}
               {searchResults.length > 0 && (
-                <div className="absolute z-50 mt-1 w-full rounded-lg border border-slate-700 bg-slate-800 shadow-lg max-h-60 overflow-y-auto">
+                <div className="absolute z-50 mt-1 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg max-h-60 overflow-y-auto">
                   {searchResults.map((r) => (
                     <button
                       key={r.ticker}
-                      className="w-full px-3 py-2 text-left text-sm text-gray-200 hover:bg-slate-700 transition-colors flex items-center gap-2"
+                      className="w-full px-3 py-2 text-left text-sm text-slate-700 dark:text-gray-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center gap-2"
                       onClick={() =>
                         handleSelectStock(r.ticker, r.name ?? r.ticker)
                       }
                     >
-                      <span className="font-mono text-xs text-slate-400">
+                      <span className="font-mono text-xs text-slate-400 dark:text-slate-400">
                         {r.ticker}
                       </span>
                       <span>{r.name ?? '—'}</span>
@@ -818,7 +818,7 @@ export default function StockReview() {
             <Button
               onClick={handleSearch}
               disabled={searching || !searchQuery.trim()}
-              className="bg-slate-700 hover:bg-slate-600 text-white"
+              className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-white"
             >
               {searching ? '搜索中...' : '搜索'}
             </Button>
@@ -826,10 +826,10 @@ export default function StockReview() {
 
           {/* Selected stock display */}
           {selectedStock && (
-            <div className="mt-3 text-sm text-slate-300">
-              已选择：<span className="font-mono text-white">{selectedStock.ticker}</span>
+            <div className="mt-3 text-sm text-slate-500 dark:text-slate-300">
+              已选择：<span className="font-mono text-slate-800 dark:text-white">{selectedStock.ticker}</span>
               {' - '}
-              <span className="text-white">{selectedStock.name}</span>
+              <span className="text-slate-800 dark:text-white">{selectedStock.name}</span>
             </div>
           )}
         </CardContent>
@@ -837,10 +837,10 @@ export default function StockReview() {
 
       {/* ── Date range ── */}
       {selectedStock && (
-        <Card className="border-slate-800 bg-slate-900/50">
+        <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
           <CardContent className="p-4">
             <div className="flex items-center gap-3">
-              <label className="text-sm text-slate-400">开始日期</label>
+              <label className="text-sm text-slate-500 dark:text-slate-400">开始日期</label>
               <Input
                 type="date"
                 value={formatDate(startDate)}
@@ -848,9 +848,9 @@ export default function StockReview() {
                   const v = e.target.value.replace(/-/g, '')
                   setStartDate(v)
                 }}
-                className="w-40 border-slate-700 bg-slate-800 text-white"
+                className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
               />
-              <label className="text-sm text-slate-400">结束日期</label>
+              <label className="text-sm text-slate-500 dark:text-slate-400">结束日期</label>
               <Input
                 type="date"
                 value={formatDate(endDate)}
@@ -858,7 +858,7 @@ export default function StockReview() {
                   const v = e.target.value.replace(/-/g, '')
                   setEndDate(v)
                 }}
-                className="w-40 border-slate-700 bg-slate-800 text-white"
+                className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
               />
             </div>
           </CardContent>
@@ -868,7 +868,7 @@ export default function StockReview() {
       {/* ── Initial state ── */}
       {!selectedStock && (
         <div className="flex items-center justify-center py-20">
-          <p className="text-lg text-slate-400">
+          <p className="text-lg text-slate-500 dark:text-slate-400">
             请搜索并选择一只股票
           </p>
         </div>
@@ -877,7 +877,7 @@ export default function StockReview() {
       {/* ── Data loading ── */}
       {selectedStock && dataLoading && (
         <div className="flex items-center justify-center py-20">
-          <p className="text-lg text-slate-400">正在加载数据...</p>
+          <p className="text-lg text-slate-500 dark:text-slate-400">正在加载数据...</p>
         </div>
       )}
 
@@ -885,7 +885,7 @@ export default function StockReview() {
       {selectedStock && dataError && !dataLoading && (
         <div className="flex flex-col items-center justify-center py-20 gap-4">
           <p className="text-red-400">{dataError}</p>
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-slate-500 dark:text-slate-500">
             请确认后端服务是否运行，或调整日期范围重试
           </p>
         </div>
@@ -897,7 +897,7 @@ export default function StockReview() {
         !dataError &&
         chartData.length === 0 && (
           <div className="flex items-center justify-center py-20">
-            <p className="text-lg text-slate-400">
+            <p className="text-lg text-slate-500 dark:text-slate-400">
               未找到该股票的数据
             </p>
           </div>
@@ -916,8 +916,8 @@ export default function StockReview() {
                   onClick={() => toggleMA(cfg.key)}
                   className={`px-3 py-1 rounded-full text-xs font-medium transition-colors border ${
                     active
-                      ? 'bg-slate-700 text-white border-slate-600'
-                      : 'bg-transparent text-slate-500 border-slate-700 hover:text-slate-300 hover:border-slate-500'
+                      ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-white border-slate-300 dark:border-slate-600'
+                      : 'bg-transparent text-slate-500 border-slate-300 dark:border-slate-700 hover:text-slate-700 dark:hover:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
                   }`}
                   style={
                     active
@@ -933,17 +933,17 @@ export default function StockReview() {
 
           {/* Info panel */}
           {latestRow && (
-            <Card className="border-slate-800 bg-slate-900/50">
+            <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
               <CardContent className="p-4">
                 <div className="flex items-center gap-6 flex-wrap">
                   <div>
-                    <span className="text-sm text-slate-400">最新价</span>
-                    <span className="ml-2 text-3xl font-bold text-white">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">最新价</span>
+                    <span className="ml-2 text-3xl font-bold text-slate-900 dark:text-white">
                       {latestRow.close?.toFixed(2) ?? '—'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-sm text-slate-400">涨跌幅</span>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">涨跌幅</span>
                     <span
                       className={`ml-2 text-xl font-semibold ${pctColor(latestRow.pct_change)}`}
                     >
@@ -951,30 +951,30 @@ export default function StockReview() {
                     </span>
                   </div>
                   <div>
-                    <span className="text-sm text-slate-400">区间最高</span>
-                    <span className="ml-2 text-lg font-medium text-white">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">区间最高</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
                       {highInRange !== -Infinity
                         ? highInRange.toFixed(2)
                         : '—'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-sm text-slate-400">区间最低</span>
-                    <span className="ml-2 text-lg font-medium text-white">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">区间最低</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
                       {lowInRange !== Infinity
                         ? lowInRange.toFixed(2)
                         : '—'}
                     </span>
                   </div>
                   <div>
-                    <span className="text-sm text-slate-400">成交量</span>
-                    <span className="ml-2 text-lg font-medium text-white">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">成交量</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
                       {formatVolume(latestRow.volume)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-sm text-slate-400">成交额</span>
-                    <span className="ml-2 text-lg font-medium text-white">
+                    <span className="text-sm text-slate-500 dark:text-slate-400">成交额</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
                       {formatAmount(latestRow.amount)}
                     </span>
                   </div>
@@ -987,17 +987,17 @@ export default function StockReview() {
           <div className="space-y-0">
             <div
               ref={mainChartRef}
-              className="w-full rounded-t-lg border border-slate-800 bg-slate-900/50 overflow-hidden"
+              className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 400 }}
             />
             <div
               ref={volumeChartRef}
-              className="w-full border-l border-r border-slate-800 bg-slate-900/50 overflow-hidden"
+              className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 120 }}
             />
             <div
               ref={pctChartRef}
-              className="w-full rounded-b-lg border border-slate-800 bg-slate-900/50 overflow-hidden"
+              className="w-full rounded-b-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 80 }}
             />
           </div>
@@ -1006,16 +1006,16 @@ export default function StockReview() {
 
       {/* ── 市场判读笔记 ── */}
       {selectedStock && chartReady && (
-        <Card className="border-slate-800 bg-slate-900/50">
+        <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
           <CardHeader>
-            <CardTitle className="text-lg text-white">市场判读</CardTitle>
+            <CardTitle className="text-lg text-slate-900 dark:text-white">市场判读</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Phase select */}
             <div className="flex items-center gap-3">
-              <label className="text-sm text-slate-400 whitespace-nowrap">市场阶段</label>
+              <label className="text-sm text-slate-500 dark:text-slate-400 whitespace-nowrap">市场阶段</label>
               <Select value={phase} onValueChange={setPhase}>
-                <SelectTrigger className="w-40 border-slate-700 bg-slate-800 text-white">
+                <SelectTrigger className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white">
                   <SelectValue placeholder="选择阶段" />
                 </SelectTrigger>
                 <SelectContent>
@@ -1028,22 +1028,22 @@ export default function StockReview() {
             </div>
             {/* Checkboxes */}
             <div className="flex items-center gap-6 flex-wrap">
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={M1_core} onChange={(e) => setM1_core(e.target.checked)} className="accent-red-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block shrink-0" />
                 M1（核心板块形成）
               </label>
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={M2_front} onChange={(e) => setM2_front(e.target.checked)} className="accent-orange-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-orange-500 inline-block shrink-0" />
                 M2（前排标的）
               </label>
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={M3_identifiable} onChange={(e) => setM3_identifiable(e.target.checked)} className="accent-yellow-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-yellow-500 inline-block shrink-0" />
                 M3（可识别性）
               </label>
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                 <input type="checkbox" checked={V_triggered} onChange={(e) => setV_triggered(e.target.checked)} className="accent-green-500" />
                 <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block shrink-0" />
                 V（启动确认）
@@ -1055,7 +1055,7 @@ export default function StockReview() {
               onChange={(e) => setPhaseNotes(e.target.value)}
               placeholder="输入判读笔记..."
               rows={3}
-              className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-400 dark:focus:border-slate-500"
             />
             {/* Save + toast */}
             <div className="flex items-center gap-3">
@@ -1067,7 +1067,7 @@ export default function StockReview() {
                 {phaseSaving ? '保存中...' : '保存判读'}
               </Button>
               {phaseToast && (
-                <div className="px-3 py-1.5 rounded bg-slate-700 text-sm text-white animate-pulse">
+                <div className="px-3 py-1.5 rounded bg-slate-100 dark:bg-slate-700 text-sm text-slate-800 dark:text-white animate-pulse">
                   {phaseToast}
                 </div>
               )}
@@ -1078,9 +1078,9 @@ export default function StockReview() {
 
       {/* ── 交易记录 ── */}
       {selectedStock && (
-        <Card className="border-slate-800 bg-slate-900/50">
+        <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
           <CardHeader>
-            <CardTitle className="text-lg text-white">交易记录</CardTitle>
+            <CardTitle className="text-lg text-slate-900 dark:text-white">交易记录</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {/* New trade button */}
@@ -1091,39 +1091,39 @@ export default function StockReview() {
                   setNewEntryDate(currentDate ?? '')
                 }
               }}
-              className="bg-slate-700 hover:bg-slate-600 text-white"
+              className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-white"
             >
               {showNewTradeForm ? '取消' : '新建交易'}
             </Button>
 
             {/* New trade inline form */}
             {showNewTradeForm && (
-              <div className="border border-slate-700 rounded-lg p-3 space-y-3 bg-slate-800/50">
+              <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-3 space-y-3 bg-slate-50 dark:bg-slate-800/50">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1">入场日期</label>
+                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">入场日期</label>
                     <Input
                       type="date"
                       value={newEntryDate ? formatDate(newEntryDate) : formatDate(currentDate || endDate)}
                       onChange={(e) => setNewEntryDate(e.target.value.replace(/-/g, ''))}
-                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                      className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1">入场价</label>
+                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">入场价</label>
                     <Input
                       type="number"
                       step="0.001"
                       value={newEntryPrice}
                       onChange={(e) => setNewEntryPrice(e.target.value)}
                       placeholder="0.00"
-                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                      className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1">路径类型</label>
+                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">路径类型</label>
                     <Select value={newPathType} onValueChange={setNewPathType}>
-                      <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white text-sm">
+                      <SelectTrigger className="w-full border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm">
                         <SelectValue placeholder="选择路径" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1136,7 +1136,7 @@ export default function StockReview() {
                     </Select>
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1">仓位占比 (%)</label>
+                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">仓位占比 (%)</label>
                     <Input
                       type="number"
                       min="0"
@@ -1144,25 +1144,25 @@ export default function StockReview() {
                       value={newPositionPct}
                       onChange={(e) => setNewPositionPct(e.target.value)}
                       placeholder="0-100"
-                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                      className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">备注</label>
+                  <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">备注</label>
                   <textarea
                     value={newTradeNotes}
                     onChange={(e) => setNewTradeNotes(e.target.value)}
                     rows={2}
                     placeholder="备注..."
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-400 dark:focus:border-slate-500"
                   />
                 </div>
                 <div className="flex gap-2">
                   <Button onClick={handleCreateTrade} className="bg-blue-600 hover:bg-blue-500 text-white">
                     提交
                   </Button>
-                  <Button onClick={() => setShowNewTradeForm(false)} className="bg-slate-600 hover:bg-slate-500 text-white">
+                  <Button onClick={() => setShowNewTradeForm(false)} className="bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500 text-slate-800 dark:text-white">
                     取消
                   </Button>
                 </div>
@@ -1171,7 +1171,7 @@ export default function StockReview() {
 
             {/* Trade list */}
             {stockTrades.length === 0 ? (
-              <p className="text-sm text-slate-500 py-4 text-center">暂无交易记录</p>
+              <p className="text-sm text-slate-500 dark:text-slate-500 py-4 text-center">暂无交易记录</p>
             ) : (
               <div className="space-y-2">
                 {stockTrades.map((trade) => {
@@ -1179,88 +1179,88 @@ export default function StockReview() {
                   const isEditing = editingTradeId === trade.trade_id
                   const pnl = calcPnl(trade)
                   return (
-                    <div key={trade.trade_id} className="border border-slate-700 rounded-lg overflow-hidden">
+                    <div key={trade.trade_id} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
                       {/* Summary row */}
                       <button
-                        className="w-full flex items-center justify-between px-3 py-2 text-sm text-left hover:bg-slate-800/50 transition-colors"
+                        className="w-full flex items-center justify-between px-3 py-2 text-sm text-left hover:bg-slate-100 dark:hover:bg-slate-800/50 transition-colors"
                         onClick={() => setExpandedTradeId(isExpanded ? null : trade.trade_id)}
                       >
                         <div className="flex items-center gap-3">
-                          <span className="font-mono text-xs text-slate-400">{trade.ticker}</span>
-                          <span className="text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</span>
+                          <span className="font-mono text-xs text-slate-400 dark:text-slate-400">{trade.ticker}</span>
+                          <span className="text-slate-600 dark:text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</span>
                         </div>
                         <div className="flex items-center gap-4">
-                          <span className="text-slate-300">
+                          <span className="text-slate-600 dark:text-slate-300">
                             入场: {trade.entry_price?.toFixed(2) ?? '—'}
                           </span>
-                          <span className="text-slate-300">
+                          <span className="text-slate-600 dark:text-slate-300">
                             出场: {trade.exit_price?.toFixed(2) ?? '—'}
                           </span>
                           {pnl !== null && (
-                            <span className={`font-mono text-sm ${parseFloat(pnl) >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                            <span className={`font-mono text-sm ${parseFloat(pnl) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
                               {parseFloat(pnl) >= 0 ? '+' : ''}{pnl}%
                             </span>
                           )}
-                          <span className="text-slate-500">{isExpanded ? '▲' : '▼'}</span>
+                          <span className="text-slate-400 dark:text-slate-500">{isExpanded ? '▲' : '▼'}</span>
                         </div>
                       </button>
 
                       {/* Expanded detail */}
                       {isExpanded && !isEditing && (
-                        <div className="border-t border-slate-700 px-3 py-2 space-y-2 bg-slate-800/30">
+                        <div className="border-t border-slate-200 dark:border-slate-700 px-3 py-2 space-y-2 bg-slate-50 dark:bg-slate-800/30">
                           <div className="grid grid-cols-3 gap-3 text-sm">
                             <div>
-                              <span className="text-slate-500 text-xs">入场日期</span>
-                              <p className="text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">入场日期</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">入场价</span>
-                              <p className="text-slate-300">{trade.entry_price?.toFixed(3) ?? '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">入场价</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.entry_price?.toFixed(3) ?? '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">路径类型</span>
-                              <p className="text-slate-300">{trade.path_type ?? '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">路径类型</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.path_type ?? '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">仓位占比</span>
-                              <p className="text-slate-300">{trade.position_pct != null ? `${trade.position_pct}%` : '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">仓位占比</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.position_pct != null ? `${trade.position_pct}%` : '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">半卖触发价</span>
-                              <p className="text-slate-300">{trade.half_sell_trigger?.toFixed(3) ?? '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">半卖触发价</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.half_sell_trigger?.toFixed(3) ?? '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">半卖日期</span>
-                              <p className="text-slate-300">{trade.half_sell_date ? formatDate(trade.half_sell_date) : '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">半卖日期</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.half_sell_date ? formatDate(trade.half_sell_date) : '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">半卖价</span>
-                              <p className="text-slate-300">{trade.half_sell_price?.toFixed(3) ?? '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">半卖价</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.half_sell_price?.toFixed(3) ?? '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">出场日期</span>
-                              <p className="text-slate-300">{trade.exit_date ? formatDate(trade.exit_date) : '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">出场日期</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.exit_date ? formatDate(trade.exit_date) : '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">出场价</span>
-                              <p className="text-slate-300">{trade.exit_price?.toFixed(3) ?? '—'}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">出场价</span>
+                              <p className="text-slate-700 dark:text-slate-300">{trade.exit_price?.toFixed(3) ?? '—'}</p>
                             </div>
                             <div>
-                              <span className="text-slate-500 text-xs">盈亏</span>
-                              <p className={pnl !== null ? (parseFloat(pnl) >= 0 ? 'text-red-400' : 'text-green-400') : 'text-slate-300'}>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">盈亏</span>
+                              <p className={pnl !== null ? (parseFloat(pnl) >= 0 ? 'text-red-500' : 'text-green-500') : 'text-slate-700 dark:text-slate-300'}>
                                 {pnl !== null ? `${parseFloat(pnl) >= 0 ? '+' : ''}${pnl}%` : '—'}
                               </p>
                             </div>
                           </div>
                           {trade.notes && (
                             <div>
-                              <span className="text-slate-500 text-xs">备注</span>
-                              <p className="text-slate-300 text-sm">{trade.notes}</p>
+                              <span className="text-slate-500 dark:text-slate-400 text-xs">备注</span>
+                              <p className="text-slate-700 dark:text-slate-300 text-sm">{trade.notes}</p>
                             </div>
                           )}
                           <Button
                             onClick={() => openEditForm(trade)}
-                            className="bg-slate-600 hover:bg-slate-500 text-white text-xs px-3 py-1"
+                            className="bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500 text-slate-800 dark:text-white text-xs px-3 py-1"
                           >
                             编辑
                           </Button>
@@ -1269,71 +1269,71 @@ export default function StockReview() {
 
                       {/* Edit form */}
                       {isExpanded && isEditing && (
-                        <div className="border-t border-slate-700 px-3 py-2 space-y-3 bg-slate-800/30">
+                        <div className="border-t border-slate-200 dark:border-slate-700 px-3 py-2 space-y-3 bg-slate-50 dark:bg-slate-800/30">
                           <div className="grid grid-cols-2 gap-3">
                             <div>
-                              <label className="block text-xs text-slate-400 mb-1">半卖触发价</label>
+                              <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">半卖触发价</label>
                               <Input
                                 type="number"
                                 step="0.001"
                                 value={editHalfSellTrigger}
                                 onChange={(e) => setEditHalfSellTrigger(e.target.value)}
-                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                               />
                             </div>
                             <div>
-                              <label className="block text-xs text-slate-400 mb-1">半卖日期</label>
+                              <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">半卖日期</label>
                               <Input
                                 type="date"
                                 value={editHalfSellDate ? formatDate(editHalfSellDate) : ''}
                                 onChange={(e) => setEditHalfSellDate(e.target.value.replace(/-/g, ''))}
-                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                               />
                             </div>
                             <div>
-                              <label className="block text-xs text-slate-400 mb-1">半卖价</label>
+                              <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">半卖价</label>
                               <Input
                                 type="number"
                                 step="0.001"
                                 value={editHalfSellPrice}
                                 onChange={(e) => setEditHalfSellPrice(e.target.value)}
-                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                               />
                             </div>
                             <div>
-                              <label className="block text-xs text-slate-400 mb-1">出场日期</label>
+                              <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">出场日期</label>
                               <Input
                                 type="date"
                                 value={editExitDate ? formatDate(editExitDate) : ''}
                                 onChange={(e) => setEditExitDate(e.target.value.replace(/-/g, ''))}
-                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                               />
                             </div>
                             <div>
-                              <label className="block text-xs text-slate-400 mb-1">出场价</label>
+                              <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">出场价</label>
                               <Input
                                 type="number"
                                 step="0.001"
                                 value={editExitPrice}
                                 onChange={(e) => setEditExitPrice(e.target.value)}
-                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                                className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                               />
                             </div>
                           </div>
                           <div>
-                            <label className="block text-xs text-slate-400 mb-1">备注</label>
+                            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">备注</label>
                             <textarea
                               value={editNotes}
                               onChange={(e) => setEditNotes(e.target.value)}
                               rows={2}
-                              className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+                              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-400 dark:focus:border-slate-500"
                             />
                           </div>
                           <div className="flex gap-2">
                             <Button onClick={() => handleEditTrade(trade.trade_id)} className="bg-blue-600 hover:bg-blue-500 text-white">
                               保存
                             </Button>
-                            <Button onClick={() => setEditingTradeId(null)} className="bg-slate-600 hover:bg-slate-500 text-white">
+                            <Button onClick={() => setEditingTradeId(null)} className="bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500 text-slate-800 dark:text-white">
                               取消
                             </Button>
                           </div>
