@@ -74,3 +74,34 @@ def query_daily(
         return result
     finally:
         con.close()
+
+
+@router.get("/dates")
+def query_trade_dates(
+    start_date: Optional[str] = Query(None, description="起始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="截止日期 YYYY-MM-DD"),
+    limit: int = Query(100, description="最大返回天数"),
+):
+    """查询交易日列表（从 trading_calendar 表）"""
+    con = get_db()
+    try:
+        where_clauses = []
+        params = []
+        if start_date:
+            where_clauses.append("trade_date >= ?")
+            params.append(start_date)
+        if end_date:
+            where_clauses.append("trade_date <= ?")
+            params.append(end_date)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        # is_open=1 表示交易日
+        where_sql += " AND is_open = 1"
+
+        rows = con.execute(
+            f"SELECT trade_date FROM trading_calendar WHERE {where_sql} ORDER BY trade_date DESC LIMIT ?",
+            params + [limit],
+        ).fetchall()
+        return [row[0] for row in rows]
+    finally:
+        con.close()

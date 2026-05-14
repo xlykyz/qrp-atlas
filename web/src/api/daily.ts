@@ -35,3 +35,15 @@ export function getDailyByDateRange(
   if (limit) params.set('limit', String(limit));
   return request(`/api/daily?${params.toString()}`);
 }
+
+export function getDailyDates(
+  startDate?: string,
+  endDate?: string,
+  limit?: number,
+): Promise<string[]> {
+  const params = new URLSearchParams();
+  if (startDate) params.set('start_date', normalizeDate(startDate));
+  if (endDate) params.set('end_date', normalizeDate(endDate));
+  if (limit) params.set('limit', String(limit));
+  return request(`/api/daily/dates?${params.toString()}`);
+}

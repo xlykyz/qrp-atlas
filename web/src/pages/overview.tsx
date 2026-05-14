@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { getDailyByDate, getDailyByDateRange } from '@/api/daily'
+import { getDailyByDate, getDailyByDateRange, getDailyDates } from '@/api/daily'
 import type { DailyRow } from '@/types'
 
 // ── helpers ──
@@ -66,19 +66,18 @@ export default function Overview() {
         const startDate =
           `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
-        // Fetch a broad range to discover which dates have data
-        const rangeData = await getDailyByDateRange(startDate, todayYMD, 10000)
+        // Fetch trade dates from trading_calendar
+        const dateList = await getDailyDates(startDate, todayYMD, 20)
         if (cancelled) return
 
-        const dates = [...new Set(rangeData.map((r) => r.trade_date))].sort().reverse()
-        const top20 = dates.slice(0, 20)
-
-        if (top20.length > 0) {
-          setAvailableDates(top20)
-          const latest = top20[0]
+        if (dateList.length > 0) {
+          setAvailableDates(dateList)
+          const latest = dateList[0]
           setSelectedDate(latest)
-          // Use data already in the range response
-          setData(rangeData.filter((r) => r.trade_date === latest))
+          // 用最新日期获取完整数据
+          const todayData = await getDailyByDate(latest)
+          if (cancelled) return
+          setData(todayData)
         } else {
           // Fallback: try fetching today directly
           try {
@@ -222,16 +221,18 @@ export default function Overview() {
     const startDate =
       `${past.getFullYear()}${String(past.getMonth() + 1).padStart(2, '0')}${String(past.getDate()).padStart(2, '0')}`
 
-    getDailyByDateRange(startDate, todayYMD, 10000)
-      .then((rangeData) => {
-        const dates = [...new Set(rangeData.map((r) => r.trade_date))].sort().reverse()
-        const top20 = dates.slice(0, 20)
-        if (top20.length > 0) {
-          setAvailableDates(top20)
-          const latest = top20[0]
+    getDailyDates(startDate, todayYMD, 20)
+      .then((dateList) => {
+        if (dateList.length > 0) {
+          setAvailableDates(dateList)
+          const latest = dateList[0]
           setSelectedDate(latest)
-          setData(rangeData.filter((r) => r.trade_date === latest))
+          return getDailyByDate(latest)
         }
+        return []
+      })
+      .then((todayData) => {
+        if (todayData) setData(todayData)
         setLoading(false)
       })
       .catch((err) => {
