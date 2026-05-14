@@ -78,7 +78,7 @@ def query_daily(
             code = ticker.split(".")[0] if "." in ticker else ticker
             exchange = ticker.split(".")[1] if "." in ticker and len(ticker.split(".")) > 1 else ""
             
-            if code.startswith("688"):
+            if code.startswith("68"):
                 row["board"] = "科创板"
             elif code.startswith("60"):
                 row["board"] = "上证主板"
