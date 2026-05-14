@@ -2,13 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { DatePicker } from '@/components/date-picker'
 import {
   Table,
   TableBody,
@@ -21,13 +15,6 @@ import { getDailyByDate, getDailyByDateRange } from '@/api/daily'
 import type { DailyRow } from '@/types'
 
 // ── helpers ──
-
-function formatDate(ymd: string): string {
-  if (ymd.length === 8) {
-    return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
-  }
-  return ymd
-}
 
 function formatPct(v: number | null): string {
   if (v == null) return '—'
@@ -208,22 +195,12 @@ export default function Overview() {
   useEffect(() => {
     setPageTitle('今日概览')
     setHeaderControls(
-      <Select
+      <DatePicker
         value={selectedDate}
-        onValueChange={(v) => setSelectedDate(v)}
+        onChange={(v) => setSelectedDate(v)}
+        availableDates={availableDates}
         disabled={isBusy}
-      >
-        <SelectTrigger className="w-40">
-          <SelectValue placeholder="选择日期" />
-        </SelectTrigger>
-        <SelectContent>
-          {availableDates.map((d) => (
-            <SelectItem key={d} value={d}>
-              {formatDate(d)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>,
+      />,
     )
     return () => {
       setPageTitle('')
