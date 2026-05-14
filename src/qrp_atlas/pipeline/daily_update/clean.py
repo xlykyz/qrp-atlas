@@ -79,6 +79,13 @@ def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> 
     if source == "tushare_daily":
         df[TRADE_DATE] = pd.to_datetime(df[TRADE_DATE], format="%Y%m%d")
 
+    # tushare 源单位转换：手→股，千元→元
+    if source == "tushare_daily":
+        if VOLUME in df.columns:
+            df[VOLUME] = df[VOLUME] * 100
+        if AMOUNT in df.columns:
+            df[AMOUNT] = df[AMOUNT] * 1000
+
     # 统一 ticker 格式：去除前缀/补齐6位+交易所后缀
     if TICKER in df.columns:
         df[TICKER] = df[TICKER].apply(lambda x: normalize_ticker(x) if pd.notna(x) else x)
