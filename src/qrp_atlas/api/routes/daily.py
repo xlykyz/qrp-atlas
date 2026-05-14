@@ -37,7 +37,7 @@ def query_daily(
     ticker: Optional[str] = Query(None, description="股票代码，如 000001.SZ"),
     start_date: Optional[str] = Query(None, description="起始日期 YYYYMMDD"),
     end_date: Optional[str] = Query(None, description="截止日期 YYYYMMDD"),
-    limit: int = Query(5000, description="最大返回行数"),
+    limit: int = Query(10000, description="最大返回行数"),
 ):
     """查询每日行情数据"""
     con = get_db()
