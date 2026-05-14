@@ -265,17 +265,17 @@ export default function ReviewLogs() {
 
       {/* Error banners */}
       {activeTab === 'phase' && phaseError && (
-        <div className="mb-4 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-400">
+        <div className="mb-4 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-3 text-sm text-red-600 dark:text-red-400">
           {phaseError}
-          <button className="ml-3 underline hover:text-red-300" onClick={fetchPhase}>
+          <button className="ml-3 underline hover:text-red-500 dark:hover:text-red-300" onClick={fetchPhase}>
             重试
           </button>
         </div>
       )}
       {activeTab === 'trade' && tradeError && (
-        <div className="mb-4 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-400">
+        <div className="mb-4 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-3 text-sm text-red-600 dark:text-red-400">
           {tradeError}
-          <button className="ml-3 underline hover:text-red-300" onClick={fetchTrade}>
+          <button className="ml-3 underline hover:text-red-500 dark:hover:text-red-300" onClick={fetchTrade}>
             重试
           </button>
         </div>
@@ -367,7 +367,7 @@ export default function ReviewLogs() {
                                 </p>
                                 {r.notes.length > 120 && (
                                   <button
-                                    className="mt-1 text-xs text-blue-400 hover:text-blue-300"
+                                    className="mt-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-500 dark:hover:text-blue-300"
                                     onClick={() => toggleNote(noteKey)}
                                   >
                                     {isExpanded ? '收起' : '展开全文'}
