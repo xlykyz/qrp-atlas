@@ -53,3 +53,8 @@ deploy/*.sh
 *.h5
 *.db
 *.sqlite
+
+# 前端
+node_modules/
+dist/
+*.tsbuildinfo
