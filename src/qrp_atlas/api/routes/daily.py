@@ -91,6 +91,9 @@ def query_daily(
             else:
                 row["board"] = "其他"
 
+        # 过滤退市股
+        result = [row for row in result if not (row.get("name") and "退市" in str(row.get("name", "")))]
+
         return result
     finally:
         con.close()
