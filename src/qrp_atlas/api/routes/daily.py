@@ -28,6 +28,9 @@ class DailyRow(BaseModel):
     is_st: Optional[bool] = None
     is_limit_up: Optional[bool] = None
     is_limit_down: Optional[bool] = None
+    pct_5d: Optional[float] = None
+    pct_10d: Optional[float] = None
+    pct_20d: Optional[float] = None
     created_at: Optional[str] = None
 
 
@@ -58,12 +61,51 @@ def query_daily(
             where_clauses.append("trade_date <= ?")
             params.append(end_date)
 
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-        query = f"SELECT * FROM daily_market_snapshot WHERE {where_sql} ORDER BY trade_date, ticker LIMIT ?"
+        # ── 单日查询：用窗口函数计算 5/10/20 日累计涨跌幅 ──
+        if date and not start_date and not end_date:
+            # 兼容 YYYYMMDD 和 YYYY-MM-DD 两种输入格式
+            date_fmt = date if "-" in date else f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+            prev_dates = con.execute(
+                "SELECT trade_date FROM trading_calendar WHERE trade_date <= ? AND is_open = 1 ORDER BY trade_date DESC LIMIT 21",
+                [date_fmt],
+            ).fetchall()
+            prev_dates = [r[0] for r in prev_dates]
+            start_date_for_window = prev_dates[-1] if prev_dates else date_fmt
 
-        rows = con.execute(query, params + [limit]).fetchall()
-        columns = [desc[0] for desc in con.description]
-        result = [dict(zip(columns, row)) for row in rows]
+            window_query = """
+                WITH base AS (
+                    SELECT *,
+                        LAG(close, 5) OVER (PARTITION BY ticker ORDER BY trade_date) AS close_5d_ago,
+                        LAG(close, 10) OVER (PARTITION BY ticker ORDER BY trade_date) AS close_10d_ago,
+                        LAG(close, 20) OVER (PARTITION BY ticker ORDER BY trade_date) AS close_20d_ago
+                    FROM daily_market_snapshot
+                    WHERE trade_date BETWEEN ? AND ?
+                )
+                SELECT
+                    trade_date, ticker, name, open, high, low, close, pct_change,
+                    pre_close, volume, amount, turnover, market_cap, float_cap,
+                    is_st, is_limit_up, is_limit_down, created_at,
+                    CASE WHEN close_5d_ago IS NOT NULL AND close_5d_ago != 0
+                         THEN ROUND((close - close_5d_ago) / close_5d_ago * 100, 2) END AS pct_5d,
+                    CASE WHEN close_10d_ago IS NOT NULL AND close_10d_ago != 0
+                         THEN ROUND((close - close_10d_ago) / close_10d_ago * 100, 2) END AS pct_10d,
+                    CASE WHEN close_20d_ago IS NOT NULL AND close_20d_ago != 0
+                         THEN ROUND((close - close_20d_ago) / close_20d_ago * 100, 2) END AS pct_20d
+                FROM base
+                WHERE trade_date = ?
+                ORDER BY trade_date, ticker
+                LIMIT ?
+            """
+            rows = con.execute(window_query, [start_date_for_window, date, date, limit]).fetchall()
+            columns = [desc[0] for desc in con.description]
+            result = [dict(zip(columns, row)) for row in rows]
+        else:
+            # ── 范围查询（无单一日期的基准）或其它组合：走原始逻辑 ──
+            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            query = f"SELECT * FROM daily_market_snapshot WHERE {where_sql} ORDER BY trade_date, ticker LIMIT ?"
+            rows = con.execute(query, params + [limit]).fetchall()
+            columns = [desc[0] for desc in con.description]
+            result = [dict(zip(columns, row)) for row in rows]
 
         # 日期/DuckDB date 对象转字符串
         for row in result:
@@ -77,7 +119,7 @@ def query_daily(
             ticker = str(ticker)
             code = ticker.split(".")[0] if "." in ticker else ticker
             exchange = ticker.split(".")[1] if "." in ticker and len(ticker.split(".")) > 1 else ""
-            
+
             if code.startswith("68"):
                 row["board"] = "科创板"
             elif code.startswith("60"):

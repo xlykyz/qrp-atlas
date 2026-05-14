@@ -181,7 +181,7 @@ export default function Overview() {
 
   // ── Sort state ──
 
-  type SortKey = 'ticker' | 'name' | 'close' | 'pct_change' | 'amount' | 'turnover'
+  type SortKey = 'ticker' | 'name' | 'close' | 'pct_change' | 'pct_5d' | 'pct_10d' | 'pct_20d' | 'amount' | 'turnover'
   type SortDir = 'desc' | 'asc'
 
   const [sortKey, setSortKey] = useState<SortKey>('pct_change')
@@ -455,6 +455,24 @@ export default function Overview() {
                   </TableHead>
                   <TableHead
                     className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('pct_5d')}
+                  >
+                    5日 {sortKey === 'pct_5d' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('pct_10d')}
+                  >
+                    10日 {sortKey === 'pct_10d' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
+                    onClick={() => handleSort('pct_20d')}
+                  >
+                    20日 {sortKey === 'pct_20d' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+                  </TableHead>
+                  <TableHead
+                    className="text-slate-500 dark:text-gray-400 font-medium text-right cursor-pointer hover:text-slate-900 dark:hover:text-white"
                     onClick={() => handleSort('amount')}
                   >
                     成交额 {sortKey === 'amount' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
@@ -465,8 +483,7 @@ export default function Overview() {
                   >
                     换手率 {sortKey === 'turnover' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </TableHead>
-                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">涨停</TableHead>
-                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">跌停</TableHead>
+                  <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">涨跌停</TableHead>
                   <TableHead className="text-slate-500 dark:text-gray-400 font-medium text-center">ST</TableHead>
                 </TableRow>
               </TableHeader>
@@ -490,6 +507,21 @@ export default function Overview() {
                     >
                       {formatPct(row.pct_change)}
                     </TableCell>
+                    <TableCell
+                      className={`text-right font-mono ${pctColor(row.pct_5d)}`}
+                    >
+                      {formatPct(row.pct_5d)}
+                    </TableCell>
+                    <TableCell
+                      className={`text-right font-mono ${pctColor(row.pct_10d)}`}
+                    >
+                      {formatPct(row.pct_10d)}
+                    </TableCell>
+                    <TableCell
+                      className={`text-right font-mono ${pctColor(row.pct_20d)}`}
+                    >
+                      {formatPct(row.pct_20d)}
+                    </TableCell>
                     <TableCell className="text-right font-mono text-slate-700 dark:text-gray-200">
                       {formatAmount(row.amount)}
                     </TableCell>
@@ -497,10 +529,7 @@ export default function Overview() {
                       {row.turnover != null ? `${row.turnover.toFixed(2)}%` : '—'}
                     </TableCell>
                     <TableCell className="text-center text-lg">
-                      {row.is_limit_up ? '🚀' : ''}
-                    </TableCell>
-                    <TableCell className="text-center text-lg">
-                      {row.is_limit_down ? '📉' : ''}
+                      {row.is_limit_up ? '🚀' : row.is_limit_down ? '📉' : ''}
                     </TableCell>
                     <TableCell className="text-center text-lg">
                       {row.is_st ? '⚠️' : ''}

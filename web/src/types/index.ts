@@ -16,6 +16,9 @@ export interface DailyRow {
   is_st?: boolean | null;
   is_limit_up?: boolean | null;
   is_limit_down?: boolean | null;
+  pct_5d?: number | null;
+  pct_10d?: number | null;
+  pct_20d?: number | null;
   created_at?: string | null;
   board?: string | null;
 }
