@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 
 const navItems = [
@@ -26,6 +26,8 @@ function applyTheme(isDark: boolean) {
 
 export default function Layout() {
   const [isDark, setIsDark] = useState(getInitialTheme)
+  const [pageTitle, setPageTitle] = useState('')
+  const [headerControls, setHeaderControls] = useState<ReactNode | null>(null)
 
   // initial apply
   useEffect(() => {
@@ -87,8 +89,12 @@ export default function Layout() {
 
       {/* Right content area */}
       <main className="flex flex-1 flex-col bg-white text-slate-900 dark:bg-slate-950 dark:text-white">
-        {/* Top bar with theme toggle */}
-        <div className="flex items-center justify-end px-6 py-3 border-b border-slate-200 dark:border-slate-800">
+        {/* Top bar with title, controls and theme toggle */}
+        <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-200 dark:border-slate-800">
+          <h1 className="text-xl font-bold text-slate-900 dark:text-white flex-1">
+            {pageTitle}
+          </h1>
+          {headerControls}
           <button
             onClick={toggleTheme}
             className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-500 dark:text-slate-400 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -98,7 +104,7 @@ export default function Layout() {
           </button>
         </div>
         <div className="flex-1 overflow-auto p-6">
-          <Outlet />
+          <Outlet context={{ setPageTitle, setHeaderControls }} />
         </div>
       </main>
     </div>

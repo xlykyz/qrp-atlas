@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useOutletContext } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -197,6 +198,39 @@ export default function Overview() {
 
   const isBusy = loading || isDateChanging
 
+  // ── Register header title + controls ──
+
+  const { setPageTitle, setHeaderControls } = useOutletContext<{
+    setPageTitle: (t: string) => void
+    setHeaderControls: (c: React.ReactNode | null) => void
+  }>()
+
+  useEffect(() => {
+    setPageTitle('今日概览')
+    setHeaderControls(
+      <Select
+        value={selectedDate}
+        onValueChange={(v) => setSelectedDate(v)}
+        disabled={isBusy}
+      >
+        <SelectTrigger className="w-40">
+          <SelectValue placeholder="选择日期" />
+        </SelectTrigger>
+        <SelectContent>
+          {availableDates.map((d) => (
+            <SelectItem key={d} value={d}>
+              {formatDate(d)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>,
+    )
+    return () => {
+      setPageTitle('')
+      setHeaderControls(null)
+    }
+  }, [selectedDate, availableDates, isBusy, setPageTitle, setHeaderControls])
+
   // ── Retry ──
 
   const handleRetry = useCallback(() => {
@@ -284,27 +318,6 @@ export default function Overview() {
 
   return (
     <div className="min-h-screen p-6">
-      {/* Header + Date selector */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">今日概览</h1>
-        <Select
-          value={selectedDate}
-          onValueChange={(v) => setSelectedDate(v)}
-          disabled={isBusy}
-        >
-          <SelectTrigger className="w-40">
-            <SelectValue placeholder="选择日期" />
-          </SelectTrigger>
-          <SelectContent>
-            {availableDates.map((d) => (
-              <SelectItem key={d} value={d}>
-                {formatDate(d)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
       {/* Loading overlay during date switch */}
       {isDateChanging && (
         <div className="flex items-center justify-center py-8">
