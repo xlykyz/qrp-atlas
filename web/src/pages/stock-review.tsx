@@ -3,7 +3,16 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { getDailyByDate, getDailyByTicker } from '@/api/daily'
-import type { DailyRow } from '@/types'
+import { getPhase, createPhase } from '@/api/phase'
+import { getTrades, createTrade, updateTrade } from '@/api/trades'
+import type { DailyRow, PhaseRecord, PhaseWrite, TradeRecord, TradeWrite, TradePatch } from '@/types'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   createChart,
   ColorType,
@@ -133,6 +142,34 @@ export default function StockReview() {
   const [visibleMAs, setVisibleMAs] = useState<Set<MAKey>>(
     new Set(['ma5', 'ma20', 'ma60']),
   )
+
+  // ── state: phase notes ──
+  const [phaseRecord, setPhaseRecord] = useState<PhaseRecord | null>(null)
+  const [phase, setPhase] = useState<string>('')
+  const [M1_core, setM1_core] = useState(false)
+  const [M2_front, setM2_front] = useState(false)
+  const [M3_identifiable, setM3_identifiable] = useState(false)
+  const [V_triggered, setV_triggered] = useState(false)
+  const [phaseNotes, setPhaseNotes] = useState('')
+  const [phaseSaving, setPhaseSaving] = useState(false)
+  const [phaseToast, setPhaseToast] = useState<string | null>(null)
+
+  // ── state: trades ──
+  const [allTrades, setAllTrades] = useState<TradeRecord[]>([])
+  const [showNewTradeForm, setShowNewTradeForm] = useState(false)
+  const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null)
+  const [editingTradeId, setEditingTradeId] = useState<string | null>(null)
+  const [newEntryDate, setNewEntryDate] = useState('')
+  const [newEntryPrice, setNewEntryPrice] = useState('')
+  const [newPathType, setNewPathType] = useState('')
+  const [newPositionPct, setNewPositionPct] = useState('')
+  const [newTradeNotes, setNewTradeNotes] = useState('')
+  const [editHalfSellTrigger, setEditHalfSellTrigger] = useState('')
+  const [editHalfSellDate, setEditHalfSellDate] = useState('')
+  const [editHalfSellPrice, setEditHalfSellPrice] = useState('')
+  const [editExitDate, setEditExitDate] = useState('')
+  const [editExitPrice, setEditExitPrice] = useState('')
+  const [editNotes, setEditNotes] = useState('')
 
   // ── refs ──
 
@@ -570,6 +607,147 @@ export default function StockReview() {
     })
   }, [])
 
+  // ── current date for phase ──
+  const currentDate = useMemo(() => {
+    if (chartData.length > 0) return chartData[chartData.length - 1].trade_date
+    return endDate
+  }, [chartData, endDate])
+
+  // ── fetch phase for current date ──
+  useEffect(() => {
+    if (!currentDate) return
+    let cancelled = false
+    async function fetchPhase() {
+      try {
+        const records = await getPhase(currentDate)
+        if (!cancelled && records.length > 0) {
+          const r = records[0]
+          setPhaseRecord(r)
+          setPhase(r.phase ?? '')
+          setM1_core(r.M1_core ?? false)
+          setM2_front(r.M2_front ?? false)
+          setM3_identifiable(r.M3_identifiable ?? false)
+          setV_triggered(r.V_triggered ?? false)
+          setPhaseNotes(r.notes ?? '')
+        } else if (!cancelled) {
+          setPhaseRecord(null)
+          setPhase('')
+          setM1_core(false)
+          setM2_front(false)
+          setM3_identifiable(false)
+          setV_triggered(false)
+          setPhaseNotes('')
+        }
+      } catch {
+        if (!cancelled) setPhaseRecord(null)
+      }
+    }
+    fetchPhase()
+    return () => { cancelled = true }
+  }, [currentDate])
+
+  // ── fetch all trades ──
+  useEffect(() => {
+    let cancelled = false
+    async function fetchTrades() {
+      try {
+        const records = await getTrades()
+        if (!cancelled) setAllTrades(records)
+      } catch { /* ignore */ }
+    }
+    fetchTrades()
+    return () => { cancelled = true }
+  }, [])
+
+  // ── filtered trades for current stock ──
+  const stockTrades = useMemo(() => {
+    if (!selectedStock) return []
+    return allTrades.filter((t) => t.ticker === selectedStock.ticker)
+  }, [allTrades, selectedStock])
+
+  // ── handle save phase ──
+  const handleSavePhase = useCallback(async () => {
+    if (!currentDate) return
+    setPhaseSaving(true)
+    try {
+      const data: PhaseWrite = {
+        trade_date: currentDate,
+        phase: phase || null,
+        M1_core,
+        M2_front,
+        M3_identifiable,
+        V_triggered,
+        notes: phaseNotes || null,
+      }
+      await createPhase(data)
+      setPhaseToast('判读已保存')
+      setTimeout(() => setPhaseToast(null), 2000)
+    } catch {
+      setPhaseToast('保存失败')
+      setTimeout(() => setPhaseToast(null), 2000)
+    } finally {
+      setPhaseSaving(false)
+    }
+  }, [currentDate, phase, M1_core, M2_front, M3_identifiable, V_triggered, phaseNotes])
+
+  // ── handle create trade ──
+  const handleCreateTrade = useCallback(async () => {
+    if (!selectedStock) return
+    try {
+      const data: TradeWrite = {
+        ticker: selectedStock.ticker,
+        entry_date: newEntryDate || currentDate || null,
+        entry_price: newEntryPrice ? parseFloat(newEntryPrice) : null,
+        path_type: newPathType || null,
+        position_pct: newPositionPct ? parseFloat(newPositionPct) : null,
+        notes: newTradeNotes || null,
+      }
+      await createTrade(data)
+      const records = await getTrades()
+      setAllTrades(records)
+      setShowNewTradeForm(false)
+      setNewEntryDate('')
+      setNewEntryPrice('')
+      setNewPathType('')
+      setNewPositionPct('')
+      setNewTradeNotes('')
+    } catch { /* ignore */ }
+  }, [selectedStock, currentDate, newEntryDate, newEntryPrice, newPathType, newPositionPct, newTradeNotes])
+
+  // ── handle edit trade ──
+  const handleEditTrade = useCallback(async (tradeId: string) => {
+    try {
+      const patch: TradePatch = {
+        half_sell_trigger: editHalfSellTrigger ? parseFloat(editHalfSellTrigger) : null,
+        half_sell_date: editHalfSellDate || null,
+        half_sell_price: editHalfSellPrice ? parseFloat(editHalfSellPrice) : null,
+        exit_date: editExitDate || null,
+        exit_price: editExitPrice ? parseFloat(editExitPrice) : null,
+        notes: editNotes || null,
+      }
+      await updateTrade(tradeId, patch)
+      const records = await getTrades()
+      setAllTrades(records)
+      setEditingTradeId(null)
+    } catch { /* ignore */ }
+  }, [editHalfSellTrigger, editHalfSellDate, editHalfSellPrice, editExitDate, editExitPrice, editNotes])
+
+  const openEditForm = useCallback((trade: TradeRecord) => {
+    setEditingTradeId(trade.trade_id)
+    setEditHalfSellTrigger(trade.half_sell_trigger?.toString() ?? '')
+    setEditHalfSellDate(trade.half_sell_date ?? '')
+    setEditHalfSellPrice(trade.half_sell_price?.toString() ?? '')
+    setEditExitDate(trade.exit_date ?? '')
+    setEditExitPrice(trade.exit_price?.toString() ?? '')
+    setEditNotes(trade.notes ?? '')
+  }, [])
+
+  const calcPnl = useCallback((trade: TradeRecord): string | null => {
+    if (trade.entry_price == null || trade.exit_price == null) return null
+    const pnl = ((trade.exit_price - trade.entry_price) / trade.entry_price) * 100
+    return pnl.toFixed(2)
+  }, [])
+
   // ── info panel data ──
 
   const latestRow = useMemo(
@@ -824,6 +1002,350 @@ export default function StockReview() {
             />
           </div>
         </>
+      )}
+
+      {/* ── 市场判读笔记 ── */}
+      {selectedStock && chartReady && (
+        <Card className="border-slate-800 bg-slate-900/50">
+          <CardHeader>
+            <CardTitle className="text-lg text-white">市场判读</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Phase select */}
+            <div className="flex items-center gap-3">
+              <label className="text-sm text-slate-400 whitespace-nowrap">市场阶段</label>
+              <Select value={phase} onValueChange={setPhase}>
+                <SelectTrigger className="w-40 border-slate-700 bg-slate-800 text-white">
+                  <SelectValue placeholder="选择阶段" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="上升期">上升期</SelectItem>
+                  <SelectItem value="震荡期">震荡期</SelectItem>
+                  <SelectItem value="下降期">下降期</SelectItem>
+                  <SelectItem value="混沌期">混沌期</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {/* Checkboxes */}
+            <div className="flex items-center gap-6 flex-wrap">
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={M1_core} onChange={(e) => setM1_core(e.target.checked)} className="accent-red-500" />
+                <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block shrink-0" />
+                M1（核心板块形成）
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={M2_front} onChange={(e) => setM2_front(e.target.checked)} className="accent-orange-500" />
+                <span className="w-2.5 h-2.5 rounded-full bg-orange-500 inline-block shrink-0" />
+                M2（前排标的）
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={M3_identifiable} onChange={(e) => setM3_identifiable(e.target.checked)} className="accent-yellow-500" />
+                <span className="w-2.5 h-2.5 rounded-full bg-yellow-500 inline-block shrink-0" />
+                M3（可识别性）
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                <input type="checkbox" checked={V_triggered} onChange={(e) => setV_triggered(e.target.checked)} className="accent-green-500" />
+                <span className="w-2.5 h-2.5 rounded-full bg-green-500 inline-block shrink-0" />
+                V（启动确认）
+              </label>
+            </div>
+            {/* Notes textarea */}
+            <textarea
+              value={phaseNotes}
+              onChange={(e) => setPhaseNotes(e.target.value)}
+              placeholder="输入判读笔记..."
+              rows={3}
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+            />
+            {/* Save + toast */}
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={handleSavePhase}
+                disabled={phaseSaving}
+                className="bg-blue-600 hover:bg-blue-500 text-white"
+              >
+                {phaseSaving ? '保存中...' : '保存判读'}
+              </Button>
+              {phaseToast && (
+                <div className="px-3 py-1.5 rounded bg-slate-700 text-sm text-white animate-pulse">
+                  {phaseToast}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── 交易记录 ── */}
+      {selectedStock && (
+        <Card className="border-slate-800 bg-slate-900/50">
+          <CardHeader>
+            <CardTitle className="text-lg text-white">交易记录</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* New trade button */}
+            <Button
+              onClick={() => {
+                setShowNewTradeForm(!showNewTradeForm)
+                if (!showNewTradeForm) {
+                  setNewEntryDate(currentDate ?? '')
+                }
+              }}
+              className="bg-slate-700 hover:bg-slate-600 text-white"
+            >
+              {showNewTradeForm ? '取消' : '新建交易'}
+            </Button>
+
+            {/* New trade inline form */}
+            {showNewTradeForm && (
+              <div className="border border-slate-700 rounded-lg p-3 space-y-3 bg-slate-800/50">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">入场日期</label>
+                    <Input
+                      type="date"
+                      value={newEntryDate ? formatDate(newEntryDate) : formatDate(currentDate || endDate)}
+                      onChange={(e) => setNewEntryDate(e.target.value.replace(/-/g, ''))}
+                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">入场价</label>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      value={newEntryPrice}
+                      onChange={(e) => setNewEntryPrice(e.target.value)}
+                      placeholder="0.00"
+                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">路径类型</label>
+                    <Select value={newPathType} onValueChange={setNewPathType}>
+                      <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white text-sm">
+                        <SelectValue placeholder="选择路径" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="主升">主升</SelectItem>
+                        <SelectItem value="轮动">轮动</SelectItem>
+                        <SelectItem value="反抽">反抽</SelectItem>
+                        <SelectItem value="潜伏">潜伏</SelectItem>
+                        <SelectItem value="打板">打板</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">仓位占比 (%)</label>
+                    <Input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={newPositionPct}
+                      onChange={(e) => setNewPositionPct(e.target.value)}
+                      placeholder="0-100"
+                      className="border-slate-700 bg-slate-800 text-white text-sm"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">备注</label>
+                  <textarea
+                    value={newTradeNotes}
+                    onChange={(e) => setNewTradeNotes(e.target.value)}
+                    rows={2}
+                    placeholder="备注..."
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={handleCreateTrade} className="bg-blue-600 hover:bg-blue-500 text-white">
+                    提交
+                  </Button>
+                  <Button onClick={() => setShowNewTradeForm(false)} className="bg-slate-600 hover:bg-slate-500 text-white">
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Trade list */}
+            {stockTrades.length === 0 ? (
+              <p className="text-sm text-slate-500 py-4 text-center">暂无交易记录</p>
+            ) : (
+              <div className="space-y-2">
+                {stockTrades.map((trade) => {
+                  const isExpanded = expandedTradeId === trade.trade_id
+                  const isEditing = editingTradeId === trade.trade_id
+                  const pnl = calcPnl(trade)
+                  return (
+                    <div key={trade.trade_id} className="border border-slate-700 rounded-lg overflow-hidden">
+                      {/* Summary row */}
+                      <button
+                        className="w-full flex items-center justify-between px-3 py-2 text-sm text-left hover:bg-slate-800/50 transition-colors"
+                        onClick={() => setExpandedTradeId(isExpanded ? null : trade.trade_id)}
+                      >
+                        <div className="flex items-center gap-3">
+                          <span className="font-mono text-xs text-slate-400">{trade.ticker}</span>
+                          <span className="text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className="text-slate-300">
+                            入场: {trade.entry_price?.toFixed(2) ?? '—'}
+                          </span>
+                          <span className="text-slate-300">
+                            出场: {trade.exit_price?.toFixed(2) ?? '—'}
+                          </span>
+                          {pnl !== null && (
+                            <span className={`font-mono text-sm ${parseFloat(pnl) >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                              {parseFloat(pnl) >= 0 ? '+' : ''}{pnl}%
+                            </span>
+                          )}
+                          <span className="text-slate-500">{isExpanded ? '▲' : '▼'}</span>
+                        </div>
+                      </button>
+
+                      {/* Expanded detail */}
+                      {isExpanded && !isEditing && (
+                        <div className="border-t border-slate-700 px-3 py-2 space-y-2 bg-slate-800/30">
+                          <div className="grid grid-cols-3 gap-3 text-sm">
+                            <div>
+                              <span className="text-slate-500 text-xs">入场日期</span>
+                              <p className="text-slate-300">{trade.entry_date ? formatDate(trade.entry_date) : '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">入场价</span>
+                              <p className="text-slate-300">{trade.entry_price?.toFixed(3) ?? '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">路径类型</span>
+                              <p className="text-slate-300">{trade.path_type ?? '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">仓位占比</span>
+                              <p className="text-slate-300">{trade.position_pct != null ? `${trade.position_pct}%` : '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">半卖触发价</span>
+                              <p className="text-slate-300">{trade.half_sell_trigger?.toFixed(3) ?? '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">半卖日期</span>
+                              <p className="text-slate-300">{trade.half_sell_date ? formatDate(trade.half_sell_date) : '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">半卖价</span>
+                              <p className="text-slate-300">{trade.half_sell_price?.toFixed(3) ?? '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">出场日期</span>
+                              <p className="text-slate-300">{trade.exit_date ? formatDate(trade.exit_date) : '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">出场价</span>
+                              <p className="text-slate-300">{trade.exit_price?.toFixed(3) ?? '—'}</p>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-xs">盈亏</span>
+                              <p className={pnl !== null ? (parseFloat(pnl) >= 0 ? 'text-red-400' : 'text-green-400') : 'text-slate-300'}>
+                                {pnl !== null ? `${parseFloat(pnl) >= 0 ? '+' : ''}${pnl}%` : '—'}
+                              </p>
+                            </div>
+                          </div>
+                          {trade.notes && (
+                            <div>
+                              <span className="text-slate-500 text-xs">备注</span>
+                              <p className="text-slate-300 text-sm">{trade.notes}</p>
+                            </div>
+                          )}
+                          <Button
+                            onClick={() => openEditForm(trade)}
+                            className="bg-slate-600 hover:bg-slate-500 text-white text-xs px-3 py-1"
+                          >
+                            编辑
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* Edit form */}
+                      {isExpanded && isEditing && (
+                        <div className="border-t border-slate-700 px-3 py-2 space-y-3 bg-slate-800/30">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">半卖触发价</label>
+                              <Input
+                                type="number"
+                                step="0.001"
+                                value={editHalfSellTrigger}
+                                onChange={(e) => setEditHalfSellTrigger(e.target.value)}
+                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">半卖日期</label>
+                              <Input
+                                type="date"
+                                value={editHalfSellDate ? formatDate(editHalfSellDate) : ''}
+                                onChange={(e) => setEditHalfSellDate(e.target.value.replace(/-/g, ''))}
+                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">半卖价</label>
+                              <Input
+                                type="number"
+                                step="0.001"
+                                value={editHalfSellPrice}
+                                onChange={(e) => setEditHalfSellPrice(e.target.value)}
+                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">出场日期</label>
+                              <Input
+                                type="date"
+                                value={editExitDate ? formatDate(editExitDate) : ''}
+                                onChange={(e) => setEditExitDate(e.target.value.replace(/-/g, ''))}
+                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">出场价</label>
+                              <Input
+                                type="number"
+                                step="0.001"
+                                value={editExitPrice}
+                                onChange={(e) => setEditExitPrice(e.target.value)}
+                                className="border-slate-700 bg-slate-800 text-white text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-slate-400 mb-1">备注</label>
+                            <textarea
+                              value={editNotes}
+                              onChange={(e) => setEditNotes(e.target.value)}
+                              rows={2}
+                              className="w-full rounded-lg border border-slate-700 bg-slate-800 text-white placeholder:text-slate-500 p-2 text-sm resize-y focus:outline-none focus:border-slate-500"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <Button onClick={() => handleEditTrade(trade.trade_id)} className="bg-blue-600 hover:bg-blue-500 text-white">
+                              保存
+                            </Button>
+                            <Button onClick={() => setEditingTradeId(null)} className="bg-slate-600 hover:bg-slate-500 text-white">
+                              取消
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
     </div>
   )
