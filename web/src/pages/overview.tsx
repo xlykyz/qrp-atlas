@@ -144,6 +144,7 @@ export default function Overview() {
     const upCount = data.filter((r) => (r.pct_change ?? 0) > 0).length
     const downCount = data.filter((r) => (r.pct_change ?? 0) < 0).length
     const limitUpCount = data.filter((r) => r.is_limit_up).length
+    const limitDownCount = data.filter((r) => r.is_limit_down).length
     return {
       total,
       upCount,
@@ -151,6 +152,7 @@ export default function Overview() {
       downCount,
       downRatio: total > 0 ? (downCount / total) * 100 : 0,
       limitUpCount,
+      limitDownCount,
     }
   }, [data])
 
@@ -317,7 +319,7 @@ export default function Overview() {
       )}
 
       {/* KPI cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-5 gap-4 mb-6">
         <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
             <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">股票总数</p>
@@ -351,9 +353,18 @@ export default function Overview() {
 
         <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
           <CardContent className="p-4">
-            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">涨停</p>
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">涨停 🚀</p>
             <p className="text-2xl font-bold text-slate-900 dark:text-white">
-              🚀 {kpis.limitUpCount.toLocaleString()}
+              {kpis.limitUpCount.toLocaleString()}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
+          <CardContent className="p-4">
+            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">跌停 📉</p>
+            <p className="text-2xl font-bold text-slate-900 dark:text-white">
+              {kpis.limitDownCount.toLocaleString()}
             </p>
           </CardContent>
         </Card>
