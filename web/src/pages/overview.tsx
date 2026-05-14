@@ -44,6 +44,16 @@ export default function Overview() {
   const [error, setError] = useState<string | null>(null)
   const [isDateChanging, setIsDateChanging] = useState(false)
 
+  // Board filter state
+  const [boardFilters, setBoardFilters] = useState<Record<string, boolean>>({
+    '上证主板': true,
+    '深证主板': true,
+    '创业板': true,
+    '科创板': true,
+    '北交所': false,
+    'ST': false,
+  })
+
   // Build today and reference dates
   const now = useMemo(() => new Date(), [])
   const todayYMD = useMemo(
@@ -137,14 +147,27 @@ export default function Overview() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate])
 
+  // ── Board filters ──
+
+  const boardOptions = ['上证主板', '深证主板', '创业板', '科创板', '北交所', 'ST']
+
+  const filteredData = useMemo(() => {
+    return data.filter(row => {
+      // ST 特殊处理
+      const stOk = boardFilters['ST'] || !row.is_st
+      const boardOk = boardFilters[row.board ?? ''] ?? false
+      return stOk && boardOk
+    })
+  }, [data, boardFilters])
+
   // ── KPIs ──
 
   const kpis = useMemo(() => {
-    const total = data.length
-    const upCount = data.filter((r) => (r.pct_change ?? 0) > 0).length
-    const downCount = data.filter((r) => (r.pct_change ?? 0) < 0).length
-    const limitUpCount = data.filter((r) => r.is_limit_up).length
-    const limitDownCount = data.filter((r) => r.is_limit_down).length
+    const total = filteredData.length
+    const upCount = filteredData.filter((r) => (r.pct_change ?? 0) > 0).length
+    const downCount = filteredData.filter((r) => (r.pct_change ?? 0) < 0).length
+    const limitUpCount = filteredData.filter((r) => r.is_limit_up).length
+    const limitDownCount = filteredData.filter((r) => r.is_limit_down).length
     return {
       total,
       upCount,
@@ -154,7 +177,7 @@ export default function Overview() {
       limitUpCount,
       limitDownCount,
     }
-  }, [data])
+  }, [filteredData])
 
   // ── Sort state ──
 
@@ -174,7 +197,7 @@ export default function Overview() {
   }
 
   const sortedData = useMemo(() => {
-    return [...data].sort((a, b) => {
+    return [...filteredData].sort((a, b) => {
       const aVal = (a as any)[sortKey] ?? 0
       const bVal = (b as any)[sortKey] ?? 0
       if (typeof aVal === 'string' && typeof bVal === 'string') {
@@ -182,7 +205,7 @@ export default function Overview() {
       }
       return sortDir === 'desc' ? (bVal as number) - (aVal as number) : (aVal as number) - (bVal as number)
     })
-  }, [data, sortKey, sortDir])
+  }, [filteredData, sortKey, sortDir])
 
   const isBusy = loading || isDateChanging
 
@@ -368,6 +391,28 @@ export default function Overview() {
             </p>
           </CardContent>
         </Card>
+      </div>
+
+      {/* Board filters */}
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        {boardOptions.map(board => (
+          <label
+            key={board}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm cursor-pointer transition-colors ${
+              boardFilters[board]
+                ? 'bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-white'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={boardFilters[board]}
+              onChange={() => setBoardFilters(prev => ({ ...prev, [board]: !prev[board] }))}
+              className="sr-only"
+            />
+            {board}
+          </label>
+        ))}
       </div>
 
       {/* Empty state inside table area */}

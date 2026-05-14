@@ -71,6 +71,23 @@ def query_daily(
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
 
+        # 添加 board 分类
+        for row in result:
+            ticker = row.get("ticker", "")
+            ticker = str(ticker)
+            if ticker.startswith("60") and ticker.endswith(".SH"):
+                row["board"] = "上证主板"
+            elif ticker.startswith("00") and ticker.endswith(".SZ"):
+                row["board"] = "深证主板"
+            elif ticker.startswith("30") and ticker.endswith(".SZ"):
+                row["board"] = "创业板"
+            elif ticker.startswith("688") and ticker.endswith(".SH"):
+                row["board"] = "科创板"
+            elif ticker.endswith(".BJ") or ticker.startswith("8") or ticker.startswith("4"):
+                row["board"] = "北交所"
+            else:
+                row["board"] = "其他"
+
         return result
     finally:
         con.close()

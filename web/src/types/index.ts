@@ -17,6 +17,7 @@ export interface DailyRow {
   is_limit_up?: boolean | null;
   is_limit_down?: boolean | null;
   created_at?: string | null;
+  board?: string | null;
 }
 
 export interface PhaseRecord {
