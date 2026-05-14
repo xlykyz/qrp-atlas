@@ -71,19 +71,22 @@ def query_daily(
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
 
-        # 添加 board 分类
+        # 添加 board 分类（对齐 pipeline enrich.py + conventions.py 规则）
         for row in result:
             ticker = row.get("ticker", "")
             ticker = str(ticker)
-            if ticker.startswith("60") and ticker.endswith(".SH"):
-                row["board"] = "上证主板"
-            elif ticker.startswith("00") and ticker.endswith(".SZ"):
-                row["board"] = "深证主板"
-            elif ticker.startswith("30") and ticker.endswith(".SZ"):
-                row["board"] = "创业板"
-            elif ticker.startswith("688") and ticker.endswith(".SH"):
+            code = ticker.split(".")[0] if "." in ticker else ticker
+            exchange = ticker.split(".")[1] if "." in ticker and len(ticker.split(".")) > 1 else ""
+            
+            if code.startswith("688"):
                 row["board"] = "科创板"
-            elif ticker.endswith(".BJ") or ticker.startswith("8") or ticker.startswith("4"):
+            elif code.startswith("60"):
+                row["board"] = "上证主板"
+            elif code.startswith("30"):
+                row["board"] = "创业板"
+            elif code.startswith("00"):
+                row["board"] = "深证主板"
+            elif exchange == "BJ" or code.startswith(("43", "83", "87", "88", "92")):
                 row["board"] = "北交所"
             else:
                 row["board"] = "其他"
