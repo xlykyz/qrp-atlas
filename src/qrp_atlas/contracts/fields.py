@@ -85,6 +85,7 @@ IS_ACTIVE = "is_active"
 UPDATED_AT = "updated_at"
 
 IS_OPEN = "is_open"
+ADJ_FACTOR = "adj_factor"
 YEAR_FIELD = "year"
 MONTH_FIELD = "month"
 QUARTER = "quarter"

@@ -24,8 +24,8 @@ function formatPct(v: number | null): string {
 
 function formatAmount(v: number | null): string {
   if (v == null) return '—'
-  // tushare amount 单位是千元，转为亿元
-  return `${(v / 100000).toFixed(2)}亿`
+  // amount 单位已修正为元，转为亿元
+  return `${(v / 1e8).toFixed(2)}亿`
 }
 
 function pctColor(v: number | null): string {

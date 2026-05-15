@@ -54,6 +54,7 @@ from .fields import (
     BOOLEAN_FIELDS,
     DATE_FIELDS,
     IDENTIFIER_FIELDS,
+    ADJ_FACTOR,
 )
 
 from .schema import (
@@ -64,6 +65,7 @@ from .schema import (
     TRADE_EXECUTION,
     STOCK_INFO,
     TRADING_CALENDAR,
+    ADJ_FACTOR_CHANGES,
     ALL_TABLES,
     TABLE_BY_NAME,
     get_table,
@@ -165,6 +167,7 @@ __all__ = [
     "BOOLEAN_FIELDS",
     "DATE_FIELDS",
     "IDENTIFIER_FIELDS",
+    "ADJ_FACTOR",
     "ColumnSpec",
     "TableSchema",
     "DAILY_MARKET_SNAPSHOT",
@@ -172,6 +175,7 @@ __all__ = [
     "TRADE_EXECUTION",
     "STOCK_INFO",
     "TRADING_CALENDAR",
+    "ADJ_FACTOR_CHANGES",
     "ALL_TABLES",
     "TABLE_BY_NAME",
     "get_table",
