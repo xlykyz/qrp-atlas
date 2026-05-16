@@ -5,6 +5,7 @@ const navItems = [
   { to: '/', label: '今日概览' },
   { to: '/stock', label: '个股复盘' },
   { to: '/logs', label: '复盘日志' },
+  { to: '/raw', label: '🛠️ 数据库预览' },
 ]
 
 function getInitialTheme(): boolean {
