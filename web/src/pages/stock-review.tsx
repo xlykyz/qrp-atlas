@@ -41,6 +41,7 @@ function formatDate(ymd: string): string {
 }
 
 function toChartTime(ymd: string): string {
+  if (ymd.includes('-')) return ymd // already YYYY-MM-DD
   return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
 }
 
@@ -276,8 +277,9 @@ export default function StockReview() {
       // c) pinyin initials match
       if (s.name) {
         try {
-          const initials = pinyinPro(s.name, { pattern: 'first' })
-          if (initials && initials.toLowerCase().includes(lowerQ)) return true
+          const initials = pinyinPro(s.name, { pattern: 'first', toneType: 'none' })
+          const compact = initials.replace(/\s+/g, '')
+          if (compact && compact.toLowerCase().includes(lowerQ)) return true
         } catch {
           // ignore pinyin errors
         }
@@ -899,7 +901,7 @@ export default function StockReview() {
       <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
         <CardContent className="p-4">
           <div className="flex items-end gap-3">
-            <div className="flex-1 relative">
+            <div className="max-w-sm relative">
               <Input
                 placeholder="输入股票代码或名称..."
                 value={searchQuery}
@@ -920,7 +922,16 @@ export default function StockReview() {
               />
               {/* Search dropdown */}
               {searchResults.length > 0 && (
-                <div className="absolute z-50 mt-1 w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg max-h-60 overflow-y-auto">
+                <div
+                  ref={(el) => {
+                    if (!el) return
+                    const rect = el.parentElement!.getBoundingClientRect()
+                    el.style.left = `${rect.left}px`
+                    el.style.width = `${rect.width}px`
+                    el.style.top = `${rect.bottom}px`
+                  }}
+                  className="fixed z-[9999] mt-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg max-h-60 overflow-y-auto"
+                >
                   {searchResults.map((r) => (
                     <button
                       key={r.ticker}
