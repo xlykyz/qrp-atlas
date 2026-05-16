@@ -451,26 +451,13 @@ export default function StockReview() {
     allDates.length - 1,
   ])
 
-  // Rebuild charts when data changes
-  const buildCharts = useCallback(() => {
-    if (
-      !mainChartRef.current ||
-      !volumeChartRef.current ||
-      !pctChartRef.current ||
-      candleData.length === 0
-    ) {
-      return
-    }
-
-    // Destroy existing charts
-    mainChart.current?.remove()
-    volumeChart.current?.remove()
-    pctChart.current?.remove()
-    maSeries.current.clear()
+  // ── Effect 1: Create charts ONCE per true mount (empty deps) ──
+  useLayoutEffect(() => {
+    if (!mainChartRef.current || !volumeChartRef.current || !pctChartRef.current) return
 
     const containerWidth = mainChartRef.current.clientWidth
 
-    // ── Main chart: K-line + MA ──
+    // Main K-line chart
     const main = createChart(mainChartRef.current, {
       width: containerWidth,
       height: 400,
@@ -516,14 +503,11 @@ export default function StockReview() {
       wickUpColor: WICK_UP_COLOR,
       wickDownColor: WICK_DOWN_COLOR,
     })
-    candles.setData(candleData)
-    candleSeries.current = candles
 
-    // Add MA lines
+    // MA lines (create all 5 but default visible to visibleMAs)
+    const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
     for (const cfg of MA_CONFIGS) {
-      const data = maDataMap.get(cfg.key) ?? []
-      if (data.length === 0) continue
-      const series = main.addLineSeries({
+      const s = main.addLineSeries({
         color: cfg.color,
         lineWidth: 1,
         priceLineVisible: false,
@@ -531,13 +515,10 @@ export default function StockReview() {
         title: cfg.label,
         visible: visibleMAs.has(cfg.key),
       })
-      series.setData(data)
-      maSeries.current.set(cfg.key, series)
+      maMap.set(cfg.key, s)
     }
 
-    mainChart.current = main
-
-    // ── Volume chart ──
+    // Volume chart
     const vol = createChart(volumeChartRef.current, {
       width: containerWidth,
       height: 120,
@@ -578,11 +559,8 @@ export default function StockReview() {
       priceFormat: { type: 'volume' },
       priceScaleId: 'right',
     })
-    hist.setData(volumeData)
-    volumeSeries.current = hist
-    volumeChart.current = vol
 
-    // ── Pct change chart ──
+    // Pct chart
     const pct = createChart(pctChartRef.current, {
       width: containerWidth,
       height: 80,
@@ -626,11 +604,8 @@ export default function StockReview() {
       lastValueVisible: false,
       crosshairMarkerVisible: true,
     })
-    pctLine.setData(pctData)
-    pctSeries.current = pctLine
-    pctChart.current = pct
 
-    // ── Crosshair sync: sync visible range between charts ──
+    // Crosshair sync
     const syncCharts = (source: IChartApi) => {
       if (isSyncing.current) return
       const range = source.timeScale().getVisibleLogicalRange()
@@ -647,40 +622,19 @@ export default function StockReview() {
     vol.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(vol))
     pct.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(pct))
 
-    // Fit content
     main.timeScale().fitContent()
-  }, [candleData, closeData, volumeData, pctData, maDataMap, visibleMAs])
 
-  // Build/rebuild charts when data changes
-  useLayoutEffect(() => {
-    buildCharts()
+    // Store refs
+    mainChart.current = main
+    volumeChart.current = vol
+    pctChart.current = pct
+    candleSeries.current = candles
+    volumeSeries.current = hist
+    pctSeries.current = pctLine
+    maSeries.current = maMap
 
-    return () => {
-      mainChart.current?.remove()
-      volumeChart.current?.remove()
-      pctChart.current?.remove()
-      mainChart.current = null
-      volumeChart.current = null
-      pctChart.current = null
-      maSeries.current.clear()
-    }
-  }, [candleData, closeData, volumeData, pctData, maDataMap, visibleMAs])
-
-  // Update MA visibility without rebuilding
-  useEffect(() => {
-    for (const cfg of MA_CONFIGS) {
-      const series = maSeries.current.get(cfg.key)
-      if (series) {
-        series.applyOptions({ visible: visibleMAs.has(cfg.key) })
-      }
-    }
-  }, [visibleMAs])
-
-  // Resize observer for chart containers
-  useEffect(() => {
+    // Setup ResizeObserver
     const container = mainChartRef.current
-    if (!container) return
-
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width } = entry.contentRect
@@ -692,8 +646,51 @@ export default function StockReview() {
     })
     observer.observe(container)
 
-    return () => observer.disconnect()
-  }, [])
+    return () => {
+      observer.disconnect()
+      main.remove()
+      vol.remove()
+      pct.remove()
+      mainChart.current = null
+      volumeChart.current = null
+      pctChart.current = null
+      candleSeries.current = null
+      volumeSeries.current = null
+      pctSeries.current = null
+      maSeries.current.clear()
+    }
+  }, []) // ← EMPTY DEPS: only runs once per true mount
+
+  // ── Effect 2: Update data when available ──
+  useEffect(() => {
+    if (!candleSeries.current || candleData.length === 0) return
+
+    candleSeries.current.setData(candleData)
+
+    // Update MA data
+    for (const cfg of MA_CONFIGS) {
+      const series = maSeries.current.get(cfg.key)
+      const data = maDataMap.get(cfg.key) ?? []
+      if (series && data.length > 0) {
+        series.setData(data)
+      }
+    }
+
+    volumeSeries.current?.setData(volumeData)
+    pctSeries.current?.setData(pctData)
+
+    mainChart.current?.timeScale().fitContent()
+  }, [candleData, closeData, volumeData, pctData, maDataMap])
+
+  // ── Effect 3: MA visibility toggle ──
+  useEffect(() => {
+    for (const cfg of MA_CONFIGS) {
+      const series = maSeries.current.get(cfg.key)
+      if (series) {
+        series.applyOptions({ visible: visibleMAs.has(cfg.key) })
+      }
+    }
+  }, [visibleMAs])
 
   // ── MA toggle ──
 
