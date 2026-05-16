@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useOutletContext } from 'react-router-dom'
+import { useOutletContext, useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { DatePicker } from '@/components/date-picker'
@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { getDailyByDate } from '@/api/daily'
+import { getDailyByDate, getDailyDates } from '@/api/daily'
 import type { DailyRow } from '@/types'
 
 // ── helpers ──
@@ -41,8 +41,12 @@ export default function Overview() {
   const [selectedDate, setSelectedDate] = useState<string>('')
   const [data, setData] = useState<DailyRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [dateLoading, setDateLoading] = useState(true)
+  const [anchorDate, setAnchorDate] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [isDateChanging, setIsDateChanging] = useState(false)
+
+  const navigate = useNavigate()
 
   // Board filter state
   const [boardFilters, setBoardFilters] = useState<Record<string, boolean>>({
@@ -62,23 +66,50 @@ export default function Overview() {
     [now],
   )
 
-  // ── Initial load — fetch today's data directly ──
+  // ── Initial load — determine trading day anchor, then fetch data ──
 
   useEffect(() => {
     let cancelled = false
 
     async function initLoad() {
+      setDateLoading(true)
       setLoading(true)
       setError(null)
       try {
-        const todayData = await getDailyByDate(todayYMD)
+        // Step 1: Fetch trading dates to find the right anchor date
+        const dates = await getDailyDates(null, todayYMD, 2)
         if (cancelled) return
-        if (todayData.length > 0) {
-          setSelectedDate(todayYMD)
-          setData(todayData)
+
+        const now = new Date()
+        const isAfterCutoff =
+          now.getHours() > 15 || (now.getHours() === 15 && now.getMinutes() >= 30)
+        const latestDate = dates[0]
+
+        let effectiveDate: string
+        if (latestDate === todayYMD && !isAfterCutoff) {
+          // Today is a trading day but before 15:30 cutoff → show previous trading day
+          effectiveDate = dates[1] ?? latestDate
+        } else {
+          // Non-trading day, or after cutoff → show latest trading day
+          effectiveDate = latestDate ?? todayYMD
+        }
+
+        setAnchorDate(effectiveDate)
+        setSelectedDate(effectiveDate)
+        setDateLoading(false)
+
+        // Step 2: Fetch data for the effective date
+        const rows = await getDailyByDate(effectiveDate)
+        if (cancelled) return
+        if (rows.length > 0) {
+          setData(rows)
         }
       } catch (err) {
         if (cancelled) return
+        // On API error, fallback to todayYMD
+        setAnchorDate(todayYMD)
+        setSelectedDate(todayYMD)
+        setDateLoading(false)
         setError(err instanceof Error ? err.message : '数据加载失败')
       } finally {
         if (!cancelled) setLoading(false)
@@ -93,8 +124,8 @@ export default function Overview() {
 
   useEffect(() => {
     if (loading || !selectedDate) return
-    // Initial load already fetched data for today, skip redundant fetch
-    if (selectedDate === todayYMD && data.length > 0) return
+    // Initial load already fetched data for this anchor date, skip redundant fetch
+    if (selectedDate === anchorDate && data.length > 0 && !isDateChanging) return
 
     let cancelled = false
 
@@ -226,6 +257,16 @@ export default function Overview() {
   }, [todayYMD])
 
   // ── Loading state ──
+
+  if (dateLoading) {
+    return (
+      <div className="min-h-screen p-6">
+        <div className="flex items-center justify-center h-64">
+          <p className="text-lg text-slate-500 dark:text-gray-400">正在获取交易日历...</p>
+        </div>
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -450,7 +491,12 @@ export default function Overview() {
                 {sortedData.map((row, idx) => (
                   <TableRow
                     key={`${row.ticker}-${idx}`}
-                    className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/50"
+                    className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/50 cursor-pointer"
+                    onClick={() =>
+                      navigate(
+                        `/stock?ticker=${encodeURIComponent(row.ticker)}&name=${encodeURIComponent(row.name ?? '')}`,
+                      )
+                    }
                   >
                     <TableCell className="font-mono text-xs text-slate-600 dark:text-gray-300">
                       {row.ticker}
