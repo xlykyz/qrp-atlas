@@ -1,10 +1,15 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { getDailyByDate, getDailyByTicker } from '@/api/daily'
 import { getPhase, createPhase } from '@/api/phase'
 import { getTrades, createTrade, updateTrade } from '@/api/trades'
+import { getStockList, type StockInfo } from '@/api/stock'
+import { pinyin as pinyinPro } from 'pinyin-pro'
+import Slider from 'rc-slider'
+import 'rc-slider/assets/index.css'
 import type { DailyRow, PhaseRecord, PhaseWrite, TradeRecord, TradeWrite, TradePatch } from '@/types'
 import {
   Select,
@@ -101,14 +106,40 @@ const DOWN_COLOR = '#ef4444'
 const WICK_UP_COLOR = '#22c55e'
 const WICK_DOWN_COLOR = '#ef4444'
 
+// ── slider dark-theme override styles ──
+const sliderStyles = `
+.rc-slider-track {
+  background-color: #6366f1 !important;
+}
+.rc-slider-rail {
+  background-color: #334155 !important;
+}
+.rc-slider-handle {
+  border-color: #6366f1 !important;
+  background-color: #6366f1 !important;
+  opacity: 1 !important;
+}
+.rc-slider-handle:hover {
+  border-color: #818cf8 !important;
+}
+.rc-slider-handle-dragging {
+  border-color: #818cf8 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.3) !important;
+}
+`
+
 // ── component ──
 
 export default function StockReview() {
+  const [searchParams] = useSearchParams()
+
   // ── state: search ──
 
   const [searchQuery, setSearchQuery] = useState('')
   const [searching, setSearching] = useState(false)
-  const [searchResults, setSearchResults] = useState<DailyRow[]>([])
+  const [searchResults, setSearchResults] = useState<StockInfo[]>([])
+  const [stockList, setStockList] = useState<StockInfo[]>([])
+  const [stockListError, setStockListError] = useState(false)
   const [selectedStock, setSelectedStock] = useState<{
     ticker: string
     name: string
@@ -189,7 +220,75 @@ export default function StockReview() {
 
   const isSyncing = useRef(false)
 
-  // ── search logic ──
+  const hasAutoLoaded = useRef(false)
+
+  // ── TASK 2: URL param auto-load ──
+
+  useEffect(() => {
+    if (hasAutoLoaded.current) return
+    const tickerParam = searchParams.get('ticker')
+    const nameParam = searchParams.get('name')
+    if (tickerParam) {
+      const name = nameParam || tickerParam
+      setSelectedStock({ ticker: tickerParam, name })
+      setSearchQuery(`${tickerParam} - ${name}`)
+      hasAutoLoaded.current = true
+    }
+  }, [searchParams])
+
+  // ── TASK 5: Fetch stock list on mount ──
+
+  useEffect(() => {
+    let cancelled = false
+    async function fetchStockList() {
+      try {
+        const list = await getStockList()
+        if (!cancelled) {
+          setStockList(list)
+          setStockListError(false)
+        }
+      } catch {
+        if (!cancelled) {
+          setStockListError(true)
+        }
+      }
+    }
+    fetchStockList()
+    return () => { cancelled = true }
+  }, [])
+
+  // ── TASK 5: Real-time local filtering for search suggestions ──
+
+  const handleSearchInputChange = useCallback((value: string) => {
+    setSearchQuery(value)
+    const q = value.trim()
+    if (!q || stockList.length === 0) {
+      setSearchResults([])
+      return
+    }
+
+    const lowerQ = q.toLowerCase()
+    const matched = stockList.filter((s) => {
+      // a) ticker code match
+      if (s.ticker.toLowerCase().includes(lowerQ)) return true
+      // b) name match
+      if (s.name && s.name.toLowerCase().includes(lowerQ)) return true
+      // c) pinyin initials match
+      if (s.name) {
+        try {
+          const initials = pinyinPro(s.name, { pattern: 'first' })
+          if (initials && initials.toLowerCase().includes(lowerQ)) return true
+        } catch {
+          // ignore pinyin errors
+        }
+      }
+      return false
+    })
+
+    setSearchResults(matched.slice(0, 20))
+  }, [stockList])
+
+  // ── search logic (fallback degraded mode) ──
 
   const handleSearch = useCallback(async () => {
     const q = searchQuery.trim()
@@ -206,7 +305,9 @@ export default function StockReview() {
           r.ticker.toLowerCase().includes(lowerQ) ||
           (r.name && r.name.toLowerCase().includes(lowerQ)),
       )
-      setSearchResults(matched.slice(0, 20))
+      setSearchResults(
+        matched.slice(0, 20).map((r) => ({ ticker: r.ticker, name: r.name ?? r.ticker })),
+      )
     } catch (err) {
       // Fallback: try a few recent dates
       try {
@@ -220,7 +321,9 @@ export default function StockReview() {
             r.ticker.toLowerCase().includes(lowerQ) ||
             (r.name && r.name.toLowerCase().includes(lowerQ)),
         )
-        setSearchResults(matched.slice(0, 20))
+        setSearchResults(
+          matched.slice(0, 20).map((r) => ({ ticker: r.ticker, name: r.name ?? r.ticker })),
+        )
       } catch {
         setSearchResults([])
       }
@@ -337,6 +440,11 @@ export default function StockReview() {
     }
     return map
   }, [closeData])
+
+  // TASK 6: Date list for slider
+  const allDates = useMemo(() => {
+    return chartData.map((r) => toChartTime(r.trade_date))
+  }, [chartData])
 
   // Rebuild charts when data changes
   const buildCharts = useCallback(() => {
@@ -772,10 +880,27 @@ export default function StockReview() {
     [chartData],
   )
 
+  // ── TASK 6: Time range slider handler ──
+
+  const handleSliderChange = useCallback(
+    (value: number | number[]) => {
+      if (!Array.isArray(value) || value.length < 2) return
+      const [startIdx, endIdx] = value
+      const main = mainChart.current
+      if (!main || allDates.length === 0) return
+      main.timeScale().setVisibleRange({
+        from: allDates[startIdx] as Time,
+        to: allDates[endIdx] as Time,
+      })
+    },
+    [allDates],
+  )
+
   // ── render ──
 
   return (
     <div className="space-y-4">
+      <style>{sliderStyles}</style>
       <h1 className="text-2xl font-bold">个股复盘</h1>
 
       {/* ── Search bar ── */}
@@ -787,11 +912,17 @@ export default function StockReview() {
                 placeholder="输入股票代码或名称..."
                 value={searchQuery}
                 onChange={(e) => {
-                  setSearchQuery(e.target.value)
-                  setSearchResults([])
+                  handleSearchInputChange(e.target.value)
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleSearch()
+                  if (e.key === 'Enter') {
+                    if (searchResults.length > 0) {
+                      const first = searchResults[0]
+                      handleSelectStock(first.ticker, first.name)
+                    } else {
+                      handleSearch()
+                    }
+                  }
                 }}
                 className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500"
               />
@@ -803,20 +934,27 @@ export default function StockReview() {
                       key={r.ticker}
                       className="w-full px-3 py-2 text-left text-sm text-slate-700 dark:text-gray-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center gap-2"
                       onClick={() =>
-                        handleSelectStock(r.ticker, r.name ?? r.ticker)
+                        handleSelectStock(r.ticker, r.name)
                       }
                     >
                       <span className="font-mono text-xs text-slate-400 dark:text-slate-400">
                         {r.ticker}
                       </span>
-                      <span>{r.name ?? '—'}</span>
+                      <span>{r.name}</span>
                     </button>
                   ))}
                 </div>
               )}
             </div>
             <Button
-              onClick={handleSearch}
+              onClick={() => {
+                if (searchResults.length > 0) {
+                  const first = searchResults[0]
+                  handleSelectStock(first.ticker, first.name)
+                } else {
+                  handleSearch()
+                }
+              }}
               disabled={searching || !searchQuery.trim()}
               className="bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-white"
             >
@@ -997,9 +1135,38 @@ export default function StockReview() {
             />
             <div
               ref={pctChartRef}
-              className="w-full rounded-b-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
+              className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 80 }}
             />
+            {/* TASK 6: Time range slider */}
+            {allDates.length > 0 && (
+              <div className="w-full rounded-b-lg border border-t-0 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 px-4 pt-3 pb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-slate-400">
+                    {allDates[Math.max(0, allDates.length - 365)]}
+                  </span>
+                  <span className="text-xs text-slate-500">时间范围</span>
+                  <span className="text-xs text-slate-400">
+                    {allDates[allDates.length - 1]}
+                  </span>
+                </div>
+                <Slider
+                  range
+                  min={0}
+                  max={allDates.length - 1}
+                  defaultValue={[Math.max(0, allDates.length - 365), allDates.length - 1]}
+                  onChange={handleSliderChange}
+                />
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-[11px] text-slate-500" id="slider-start-label">
+                    {allDates[Math.max(0, allDates.length - 365)]}
+                  </span>
+                  <span className="text-[11px] text-slate-500" id="slider-end-label">
+                    {allDates[allDates.length - 1]}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
