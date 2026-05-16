@@ -223,6 +223,8 @@ export default function StockReview() {
 
   const hasAutoLoaded = useRef(false)
 
+  const chartsInitialized = useRef(false)
+
   // ── TASK 2: URL param auto-load ──
 
   useEffect(() => {
@@ -453,140 +455,127 @@ export default function StockReview() {
     allDates.length - 1,
   ])
 
-  // ── Merged effect: lazy init charts + data update ──
+  // ── Effect A: Create charts ONCE (lazy init) ──
   useLayoutEffect(() => {
-    // 1. If no data, nothing to do
     if (candleData.length === 0) return
+    if (!mainChartRef.current || !volumeChartRef.current || !pctChartRef.current) return
+    if (chartsInitialized.current) return
+    chartsInitialized.current = true
 
     const mainRef = mainChartRef.current
     const volRef = volumeChartRef.current
     const pctRef = pctChartRef.current
+    const containerWidth = mainRef.clientWidth
 
-    // 2. Lazy init: create charts if not yet created
-    if (!candleSeries.current) {
-      if (!mainRef || !volRef || !pctRef) return // containers not ready yet
+    // ── Main K-line chart ──
+    const main = createChart(mainRef, {
+      width: containerWidth,
+      height: 400,
+      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      borderColor: BORDER_COLOR,
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+      },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+    })
 
-      const containerWidth = mainRef.clientWidth
+    const candles = main.addCandlestickSeries({
+      upColor: UP_COLOR, downColor: DOWN_COLOR,
+      borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
+      wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
+    })
 
-      // ── Main K-line chart ──
-      const main = createChart(mainRef, {
-        width: containerWidth,
-        height: 400,
-        layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-        grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-        borderColor: BORDER_COLOR,
-        crosshair: {
-          mode: CrosshairMode.Normal,
-          vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-          horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        },
-        timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
-        rightPriceScale: { borderColor: BORDER_COLOR },
+    // MA lines
+    const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
+    for (const cfg of MA_CONFIGS) {
+      const s = main.addLineSeries({
+        color: cfg.color, lineWidth: 1, priceLineVisible: false,
+        lastValueVisible: true, title: cfg.label,
+        visible: visibleMAs.has(cfg.key),
       })
-
-      const candles = main.addCandlestickSeries({
-        upColor: UP_COLOR, downColor: DOWN_COLOR,
-        borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
-        wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
-      })
-
-      // MA lines
-      const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
-      for (const cfg of MA_CONFIGS) {
-        const s = main.addLineSeries({
-          color: cfg.color, lineWidth: 1, priceLineVisible: false,
-          lastValueVisible: true, title: cfg.label,
-          visible: visibleMAs.has(cfg.key),
-        })
-        maMap.set(cfg.key, s)
-      }
-
-      // ── Volume chart ──
-      const vol = createChart(volRef, {
-        width: containerWidth, height: 120,
-        layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-        grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-        borderColor: BORDER_COLOR,
-        crosshair: {
-          mode: CrosshairMode.Normal,
-          vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-          horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        },
-        timeScale: { borderColor: BORDER_COLOR, visible: false },
-        rightPriceScale: { borderColor: BORDER_COLOR },
-      })
-      const hist = vol.addHistogramSeries({ priceFormat: { type: 'volume' } })
-
-      // ── Pct change chart ──
-      const pct = createChart(pctRef, {
-        width: containerWidth, height: 80,
-        layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-        grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-        borderColor: BORDER_COLOR,
-        crosshair: {
-          mode: CrosshairMode.Normal,
-          vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-          horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        },
-        timeScale: { borderColor: BORDER_COLOR, visible: false },
-        rightPriceScale: { borderColor: BORDER_COLOR },
-      })
-      const pctLine = pct.addLineSeries({
-        color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: true,
-      })
-
-      // Crosshair sync
-      const syncCharts = (source: IChartApi) => {
-        if (isSyncing.current) return
-        const range = source.timeScale().getVisibleLogicalRange()
-        if (!range) return
-        isSyncing.current = true
-        ;[main, vol, pct].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-        isSyncing.current = false
-      }
-      main.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(main))
-      vol.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(vol))
-      pct.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(pct))
-
-      // ResizeObserver
-      const resizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const { width } = entry.contentRect
-          const w = Math.floor(width)
-          mainChart.current?.resize(w, 400)
-          volumeChart.current?.resize(w, 120)
-          pctChart.current?.resize(w, 80)
-        }
-      })
-      resizeObserver.observe(mainRef)
-
-      // Store refs
-      mainChart.current = main
-      volumeChart.current = vol
-      pctChart.current = pct
-      candleSeries.current = candles
-      volumeSeries.current = hist
-      pctSeries.current = pctLine
-      maSeries.current = maMap
-
-      // Cleanup function
-      return () => {
-        resizeObserver.disconnect()
-        main.remove()
-        vol.remove()
-        pct.remove()
-        mainChart.current = null
-        volumeChart.current = null
-        pctChart.current = null
-        candleSeries.current = null
-        volumeSeries.current = null
-        pctSeries.current = null
-        maSeries.current.clear()
-      }
+      maMap.set(cfg.key, s)
     }
 
-    // 3. Charts exist → just update data
+    // ── Volume chart ──
+    const vol = createChart(volRef, {
+      width: containerWidth, height: 120,
+      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      borderColor: BORDER_COLOR,
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+      },
+      timeScale: { borderColor: BORDER_COLOR, visible: false },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+    })
+    const hist = vol.addHistogramSeries({ priceFormat: { type: 'volume' } })
+
+    // ── Pct change chart ──
+    const pct = createChart(pctRef, {
+      width: containerWidth, height: 80,
+      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      borderColor: BORDER_COLOR,
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+      },
+      timeScale: { borderColor: BORDER_COLOR, visible: false },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+    })
+    const pctLine = pct.addLineSeries({
+      color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: true,
+    })
+
+    // Crosshair sync
+    const syncCharts = (source: IChartApi) => {
+      if (isSyncing.current) return
+      const range = source.timeScale().getVisibleLogicalRange()
+      if (!range) return
+      isSyncing.current = true
+      ;[main, vol, pct].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+      isSyncing.current = false
+    }
+    main.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(main))
+    vol.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(vol))
+    pct.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(pct))
+
+    // ResizeObserver
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width } = entry.contentRect
+        const w = Math.floor(width)
+        mainChart.current?.resize(w, 400)
+        volumeChart.current?.resize(w, 120)
+        pctChart.current?.resize(w, 80)
+      }
+    })
+    resizeObserver.observe(mainRef)
+
+    // Store refs
+    mainChart.current = main
+    volumeChart.current = vol
+    pctChart.current = pct
+    candleSeries.current = candles
+    volumeSeries.current = hist
+    pctSeries.current = pctLine
+    maSeries.current = maMap
+
+    // NO cleanup here — charts live until unmount
+  }, [candleData])
+
+  // ── Effect B: Update data on existing charts ──
+  useEffect(() => {
+    if (!candleSeries.current || candleData.length === 0) return
+
     candleSeries.current.setData(candleData)
     for (const cfg of MA_CONFIGS) {
       const series = maSeries.current.get(cfg.key)
@@ -598,11 +587,25 @@ export default function StockReview() {
     volumeSeries.current?.setData(volumeData)
     pctSeries.current?.setData(pctData)
     mainChart.current?.timeScale().fitContent()
+  }, [candleData, closeData, volumeData, pctData, maDataMap])
 
-    // No cleanup needed for data-only updates
-  }, [candleData, closeData, volumeData, pctData, maDataMap, visibleMAs])
+  // ── Effect C: Cleanup on unmount only ──
+  useEffect(() => {
+    return () => {
+      mainChart.current?.remove()
+      volumeChart.current?.remove()
+      pctChart.current?.remove()
+      mainChart.current = null
+      volumeChart.current = null
+      pctChart.current = null
+      candleSeries.current = null
+      volumeSeries.current = null
+      pctSeries.current = null
+      maSeries.current.clear()
+    }
+  }, [])
 
-  // ── Effect 3: MA visibility toggle ──
+  // ── Effect D: MA visibility toggle ──
   useEffect(() => {
     for (const cfg of MA_CONFIGS) {
       const series = maSeries.current.get(cfg.key)
