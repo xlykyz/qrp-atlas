@@ -99,6 +99,63 @@ const MA_CONFIGS = [
 
 type MAKey = (typeof MA_CONFIGS)[number]['key']
 
+function calcRSI(
+  data: { time: Time; close: number }[],
+  period = 14,
+): LineData[] {
+  const results: LineData[] = []
+  let gains = 0, losses = 0
+  for (let i = 1; i < data.length; i++) {
+    const diff = data[i].close - data[i - 1].close
+    if (i <= period) {
+      gains += Math.max(diff, 0)
+      losses += Math.max(-diff, 0)
+      if (i === period) {
+        const avgGain = gains / period
+        const avgLoss = losses / period
+        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss
+        results.push({ time: data[i].time, value: 100 - 100 / (1 + rs) })
+      }
+    } else {
+      gains = (gains * (period - 1)) / period + Math.max(diff, 0)
+      losses = (losses * (period - 1)) / period + Math.max(-diff, 0)
+      const rs = losses === 0 ? 100 : gains / losses
+      results.push({ time: data[i].time, value: 100 - 100 / (1 + rs) })
+    }
+  }
+  return results
+}
+
+function calcEMA(data: number[], period: number): number[] {
+  const multiplier = 2 / (period + 1)
+  const ema: number[] = [data[0]]
+  for (let i = 1; i < data.length; i++) {
+    ema.push((data[i] - ema[i - 1]) * multiplier + ema[i - 1])
+  }
+  return ema
+}
+
+function calcMACD(data: { time: Time; close: number }[]): {
+  macdLine: LineData[]
+  signalLine: LineData[]
+  histogram: HistogramData[]
+} {
+  const closes = data.map((d) => d.close)
+  const ema12 = calcEMA(closes, 12)
+  const ema26 = calcEMA(closes, 26)
+  const macdLineArr = ema12.map((v, i) => v - ema26[i])
+  const signalLineArr = calcEMA(macdLineArr, 9)
+  return {
+    macdLine: data.map((d, i) => ({ time: d.time, value: macdLineArr[i] })),
+    signalLine: data.map((d, i) => ({ time: d.time, value: signalLineArr[i] })),
+    histogram: data.map((d, i) => ({
+      time: d.time,
+      value: macdLineArr[i] - signalLineArr[i],
+      color: macdLineArr[i] - signalLineArr[i] >= 0 ? '#ef4444' : '#22c55e',
+    })),
+  }
+}
+
 // ── chart theme constants ──
 
 const BG_COLOR = '#0f172a'
@@ -178,6 +235,10 @@ export default function StockReview() {
     new Set(['ma5', 'ma20', 'ma60']),
   )
 
+  // ── state: sub-chart indicators ──
+  const [subChart1Indicator, setSubChart1Indicator] = useState<'volume' | 'amount'>('volume')
+  const [subChart2Indicator, setSubChart2Indicator] = useState<'pct_change' | 'turnover' | 'rsi' | 'macd'>('pct_change')
+
   // ── state: phase notes ──
   const [phaseRecord, setPhaseRecord] = useState<PhaseRecord | null>(null)
   const [phase, setPhase] = useState<string>('')
@@ -215,6 +276,11 @@ export default function StockReview() {
   const candleSeries = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeries = useRef<ISeriesApi<'Histogram'> | null>(null)
   const pctSeries = useRef<ISeriesApi<'Line'> | null>(null)
+
+  // Sub-chart 2 MACD components (only used when subChart2Indicator === 'macd')
+  const subChart2MACDLine = useRef<ISeriesApi<'Line'> | null>(null)
+  const subChart2SignalLine = useRef<ISeriesApi<'Line'> | null>(null)
+  const subChart2Histogram = useRef<ISeriesApi<'Histogram'> | null>(null)
 
   const maSeries = useRef<Map<MAKey, ISeriesApi<'Line'>>>(new Map())
 
@@ -435,6 +501,33 @@ export default function StockReview() {
       }))
   }, [chartData])
 
+  const amountData = useMemo((): HistogramData[] => {
+    return chartData
+      .filter((r) => r.amount != null && r.open != null && r.close != null)
+      .map((r) => ({
+        time: toChartTime(r.trade_date) as Time,
+        value: r.amount!,
+        color: r.close! >= r.open! ? UP_COLOR : DOWN_COLOR,
+      }))
+  }, [chartData])
+
+  const turnoverData = useMemo((): LineData[] => {
+    return chartData
+      .filter((r) => r.turnover != null)
+      .map((r) => ({
+        time: toChartTime(r.trade_date) as Time,
+        value: r.turnover!,
+      }))
+  }, [chartData])
+
+  const rsiData = useMemo((): LineData[] => {
+    return calcRSI(closeData)
+  }, [closeData])
+
+  const macdData = useMemo(() => {
+    return calcMACD(closeData)
+  }, [closeData])
+
   // MA data per period
   const maDataMap = useMemo(() => {
     const map = new Map<MAKey, LineData[]>()
@@ -466,10 +559,29 @@ export default function StockReview() {
         series.setData(data)
       }
     }
-    volumeSeries.current?.setData(volumeData)
-    pctSeries.current?.setData(pctData)
+    // Sub-chart 1
+    const sub1 = volumeSeries.current
+    if (sub1) {
+      if (subChart1Indicator === 'volume' && volumeData.length > 0) {
+        sub1.setData(volumeData)
+      } else if (subChart1Indicator === 'amount' && amountData.length > 0) {
+        sub1.setData(amountData)
+      }
+    }
+    // Sub-chart 2
+    if (subChart2Indicator === 'pct_change' && pctSeries.current && pctData.length > 0) {
+      pctSeries.current.setData(pctData)
+    } else if (subChart2Indicator === 'turnover' && pctSeries.current && turnoverData.length > 0) {
+      pctSeries.current.setData(turnoverData)
+    } else if (subChart2Indicator === 'rsi' && pctSeries.current && rsiData.length > 0) {
+      pctSeries.current.setData(rsiData)
+    } else if (subChart2Indicator === 'macd') {
+      if (subChart2MACDLine.current && macdData.macdLine.length > 0) subChart2MACDLine.current.setData(macdData.macdLine)
+      if (subChart2SignalLine.current && macdData.signalLine.length > 0) subChart2SignalLine.current.setData(macdData.signalLine)
+      if (subChart2Histogram.current && macdData.histogram.length > 0) subChart2Histogram.current.setData(macdData.histogram)
+    }
     mainChart.current?.timeScale().fitContent()
-  }, [candleData, closeData, volumeData, pctData, maDataMap])
+  }, [candleData, closeData, volumeData, pctData, maDataMap, amountData, turnoverData, rsiData, macdData, subChart1Indicator, subChart2Indicator])
 
   // ── Effect: Cleanup on unmount only ──
   useEffect(() => {
@@ -485,6 +597,9 @@ export default function StockReview() {
       candleSeries.current = null
       volumeSeries.current = null
       pctSeries.current = null
+      subChart2MACDLine.current = null
+      subChart2SignalLine.current = null
+      subChart2Histogram.current = null
       maSeries.current.clear()
       crosshairSynced.current = false
     }
@@ -499,6 +614,56 @@ export default function StockReview() {
       }
     }
   }, [visibleMAs])
+
+  // ── Effect: Sub-chart 1 indicator swap ──
+  useEffect(() => {
+    const chart = volumeChart.current
+    if (!chart) return
+    if (volumeSeries.current) {
+      try { chart.removeSeries(volumeSeries.current) } catch {}
+      volumeSeries.current = null
+    }
+    if (subChart1Indicator === 'volume') {
+      volumeSeries.current = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+    } else {
+      volumeSeries.current = chart.addSeries(HistogramSeries, {})
+    }
+  }, [subChart1Indicator])
+
+  // ── Effect: Sub-chart 2 indicator swap ──
+  useEffect(() => {
+    const chart = pctChart.current
+    if (!chart) return
+    // Remove all possible series
+    const oldSeries = [pctSeries.current, subChart2MACDLine.current, subChart2SignalLine.current, subChart2Histogram.current]
+    for (const s of oldSeries) {
+      if (s) {
+        try { chart.removeSeries(s) } catch {}
+      }
+    }
+    pctSeries.current = null
+    subChart2MACDLine.current = null
+    subChart2SignalLine.current = null
+    subChart2Histogram.current = null
+
+    if (subChart2Indicator === 'macd') {
+      subChart2Histogram.current = chart.addSeries(HistogramSeries, { color: '#22c55e' })
+      subChart2MACDLine.current = chart.addSeries(LineSeries, {
+        color: '#3b82f6', lineWidth: 1.5, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: true,
+      })
+      subChart2SignalLine.current = chart.addSeries(LineSeries, {
+        color: '#f59e0b', lineWidth: 1.5, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: true,
+      })
+    } else {
+      const color = subChart2Indicator === 'rsi' ? '#a855f7' : '#f59e0b'
+      pctSeries.current = chart.addSeries(LineSeries, {
+        color, lineWidth: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: true,
+      })
+    }
+  }, [subChart2Indicator])
 
   // ── MA toggle ──
 
@@ -939,7 +1104,7 @@ export default function StockReview() {
                 const w = el.clientWidth || 800
                 const main = createChart(el, {
                   width: w, height: 400,
-                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                   grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                   borderColor: BORDER_COLOR,
                   crosshair: {
@@ -947,8 +1112,13 @@ export default function StockReview() {
                     vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                     horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                   },
-                  timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
-                  rightPriceScale: { borderColor: BORDER_COLOR },
+                  timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false, tickMarkFormatter: (time, tickMarkType) => {
+                    const date = typeof time === 'string' ? new Date(time) : new Date((time as number) * 1000)
+                    const month = date.getMonth() + 1
+                    const day = date.getDate()
+                    return `${month}/${day}`
+                  } },
+                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
                 })
                 const candles = main.addSeries(CandlestickSeries, {
                   upColor: UP_COLOR, downColor: DOWN_COLOR,
@@ -1008,6 +1178,18 @@ export default function StockReview() {
               className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 400 }}
             />
+            {/* Sub-chart 1 controls */}
+            <div className="flex items-center gap-2 mb-1 px-1 pt-1">
+              <span className="text-xs text-slate-400 font-medium">副图一:</span>
+              <select
+                value={subChart1Indicator}
+                onChange={(e) => setSubChart1Indicator(e.target.value as typeof subChart1Indicator)}
+                className="text-xs bg-transparent border border-slate-700 rounded px-2 py-0.5 text-slate-300"
+              >
+                <option value="volume">成交量</option>
+                <option value="amount">成交额</option>
+              </select>
+            </div>
             {/* Volume chart */}
             <div
               ref={(el) => {
@@ -1015,7 +1197,7 @@ export default function StockReview() {
                 const w = el.clientWidth || 800
                 const vol = createChart(el, {
                   width: w, height: 120,
-                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                   grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                   borderColor: BORDER_COLOR,
                   crosshair: {
@@ -1024,7 +1206,7 @@ export default function StockReview() {
                     horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                   },
                   timeScale: { borderColor: BORDER_COLOR, visible: false },
-                  rightPriceScale: { borderColor: BORDER_COLOR },
+                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
                 })
                 const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
                 volumeChart.current = vol
@@ -1057,6 +1239,20 @@ export default function StockReview() {
               className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 120 }}
             />
+            {/* Sub-chart 2 controls */}
+            <div className="flex items-center gap-2 mb-1 px-1 pt-1">
+              <span className="text-xs text-slate-400 font-medium">副图二:</span>
+              <select
+                value={subChart2Indicator}
+                onChange={(e) => setSubChart2Indicator(e.target.value as typeof subChart2Indicator)}
+                className="text-xs bg-transparent border border-slate-700 rounded px-2 py-0.5 text-slate-300"
+              >
+                <option value="pct_change">涨跌幅</option>
+                <option value="turnover">换手率</option>
+                <option value="rsi">RSI</option>
+                <option value="macd">MACD</option>
+              </select>
+            </div>
             {/* Pct change chart */}
             <div
               ref={(el) => {
@@ -1064,7 +1260,7 @@ export default function StockReview() {
                 const w = el.clientWidth || 800
                 const pct = createChart(el, {
                   width: w, height: 80,
-                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                   grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                   borderColor: BORDER_COLOR,
                   crosshair: {
@@ -1073,7 +1269,7 @@ export default function StockReview() {
                     horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                   },
                   timeScale: { borderColor: BORDER_COLOR, visible: false },
-                  rightPriceScale: { borderColor: BORDER_COLOR },
+                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
                 })
                 const pctLine = pct.addSeries(LineSeries, {
                   color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
