@@ -20,6 +20,9 @@ import {
 } from '@/components/ui/select'
 import {
   createChart,
+  CandlestickSeries,
+  LineSeries,
+  HistogramSeries,
   ColorType,
   CrosshairMode,
   LineStyle,
@@ -947,14 +950,14 @@ export default function StockReview() {
                   timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
                   rightPriceScale: { borderColor: BORDER_COLOR },
                 })
-                const candles = main.addCandlestickSeries({
+                const candles = main.addSeries(CandlestickSeries, {
                   upColor: UP_COLOR, downColor: DOWN_COLOR,
                   borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
                   wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
                 })
                 const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
                 for (const cfg of MA_CONFIGS) {
-                  const s = main.addLineSeries({
+                  const s = main.addSeries(LineSeries, {
                     color: cfg.color, lineWidth: 1, priceLineVisible: false,
                     lastValueVisible: true, title: cfg.label,
                     visible: visibleMAs.has(cfg.key),
@@ -1023,7 +1026,7 @@ export default function StockReview() {
                   timeScale: { borderColor: BORDER_COLOR, visible: false },
                   rightPriceScale: { borderColor: BORDER_COLOR },
                 })
-                const hist = vol.addHistogramSeries({ priceFormat: { type: 'volume' } })
+                const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
                 volumeChart.current = vol
                 volumeSeries.current = hist
 
@@ -1072,7 +1075,7 @@ export default function StockReview() {
                   timeScale: { borderColor: BORDER_COLOR, visible: false },
                   rightPriceScale: { borderColor: BORDER_COLOR },
                 })
-                const pctLine = pct.addLineSeries({
+                const pctLine = pct.addSeries(LineSeries, {
                   color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
                   lastValueVisible: false, crosshairMarkerVisible: true,
                 })
