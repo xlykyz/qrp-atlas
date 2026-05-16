@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -205,10 +205,6 @@ export default function StockReview() {
 
   // ── refs ──
 
-  const mainChartRef = useRef<HTMLDivElement>(null)
-  const volumeChartRef = useRef<HTMLDivElement>(null)
-  const pctChartRef = useRef<HTMLDivElement>(null)
-
   const mainChart = useRef<IChartApi | null>(null)
   const volumeChart = useRef<IChartApi | null>(null)
   const pctChart = useRef<IChartApi | null>(null)
@@ -220,10 +216,10 @@ export default function StockReview() {
   const maSeries = useRef<Map<MAKey, ISeriesApi<'Line'>>>(new Map())
 
   const isSyncing = useRef(false)
+  const crosshairSynced = useRef(false)
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
 
   const hasAutoLoaded = useRef(false)
-
-  const chartsInitialized = useRef(false)
 
   // ── TASK 2: URL param auto-load ──
 
@@ -455,124 +451,7 @@ export default function StockReview() {
     allDates.length - 1,
   ])
 
-  // ── Effect A: Create charts ONCE (lazy init) ──
-  useLayoutEffect(() => {
-    if (candleData.length === 0) return
-    if (!mainChartRef.current || !volumeChartRef.current || !pctChartRef.current) return
-    if (chartsInitialized.current) return
-    chartsInitialized.current = true
-
-    const mainRef = mainChartRef.current
-    const volRef = volumeChartRef.current
-    const pctRef = pctChartRef.current
-    const containerWidth = mainRef.clientWidth
-
-    // ── Main K-line chart ──
-    const main = createChart(mainRef, {
-      width: containerWidth,
-      height: 400,
-      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      borderColor: BORDER_COLOR,
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-      },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-    })
-
-    const candles = main.addCandlestickSeries({
-      upColor: UP_COLOR, downColor: DOWN_COLOR,
-      borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
-      wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
-    })
-
-    // MA lines
-    const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
-    for (const cfg of MA_CONFIGS) {
-      const s = main.addLineSeries({
-        color: cfg.color, lineWidth: 1, priceLineVisible: false,
-        lastValueVisible: true, title: cfg.label,
-        visible: visibleMAs.has(cfg.key),
-      })
-      maMap.set(cfg.key, s)
-    }
-
-    // ── Volume chart ──
-    const vol = createChart(volRef, {
-      width: containerWidth, height: 120,
-      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      borderColor: BORDER_COLOR,
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-      },
-      timeScale: { borderColor: BORDER_COLOR, visible: false },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-    })
-    const hist = vol.addHistogramSeries({ priceFormat: { type: 'volume' } })
-
-    // ── Pct change chart ──
-    const pct = createChart(pctRef, {
-      width: containerWidth, height: 80,
-      layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
-      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-      borderColor: BORDER_COLOR,
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-        horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-      },
-      timeScale: { borderColor: BORDER_COLOR, visible: false },
-      rightPriceScale: { borderColor: BORDER_COLOR },
-    })
-    const pctLine = pct.addLineSeries({
-      color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
-      lastValueVisible: false, crosshairMarkerVisible: true,
-    })
-
-    // Crosshair sync
-    const syncCharts = (source: IChartApi) => {
-      if (isSyncing.current) return
-      const range = source.timeScale().getVisibleLogicalRange()
-      if (!range) return
-      isSyncing.current = true
-      ;[main, vol, pct].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-      isSyncing.current = false
-    }
-    main.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(main))
-    vol.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(vol))
-    pct.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(pct))
-
-    // ResizeObserver
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width } = entry.contentRect
-        const w = Math.floor(width)
-        mainChart.current?.resize(w, 400)
-        volumeChart.current?.resize(w, 120)
-        pctChart.current?.resize(w, 80)
-      }
-    })
-    resizeObserver.observe(mainRef)
-
-    // Store refs
-    mainChart.current = main
-    volumeChart.current = vol
-    pctChart.current = pct
-    candleSeries.current = candles
-    volumeSeries.current = hist
-    pctSeries.current = pctLine
-    maSeries.current = maMap
-
-    // NO cleanup here — charts live until unmount
-  }, [candleData])
-
-  // ── Effect B: Update data on existing charts ──
+  // ── Effect: Update data on existing charts ──
   useEffect(() => {
     if (!candleSeries.current || candleData.length === 0) return
 
@@ -589,9 +468,11 @@ export default function StockReview() {
     mainChart.current?.timeScale().fitContent()
   }, [candleData, closeData, volumeData, pctData, maDataMap])
 
-  // ── Effect C: Cleanup on unmount only ──
+  // ── Effect: Cleanup on unmount only ──
   useEffect(() => {
     return () => {
+      resizeObserverRef.current?.disconnect()
+      resizeObserverRef.current = null
       mainChart.current?.remove()
       volumeChart.current?.remove()
       pctChart.current?.remove()
@@ -602,6 +483,7 @@ export default function StockReview() {
       volumeSeries.current = null
       pctSeries.current = null
       maSeries.current.clear()
+      crosshairSynced.current = false
     }
   }, [])
 
@@ -1047,18 +929,180 @@ export default function StockReview() {
 
           {/* Chart containers */}
           <div className="space-y-0">
+            {/* Main K-line chart */}
             <div
-              ref={mainChartRef}
+              ref={(el) => {
+                if (!el || candleSeries.current) return
+                const w = el.clientWidth || 800
+                const main = createChart(el, {
+                  width: w, height: 400,
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+                  borderColor: BORDER_COLOR,
+                  crosshair: {
+                    mode: CrosshairMode.Normal,
+                    vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                    horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                  },
+                  timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false },
+                  rightPriceScale: { borderColor: BORDER_COLOR },
+                })
+                const candles = main.addCandlestickSeries({
+                  upColor: UP_COLOR, downColor: DOWN_COLOR,
+                  borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
+                  wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
+                })
+                const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
+                for (const cfg of MA_CONFIGS) {
+                  const s = main.addLineSeries({
+                    color: cfg.color, lineWidth: 1, priceLineVisible: false,
+                    lastValueVisible: true, title: cfg.label,
+                    visible: visibleMAs.has(cfg.key),
+                  })
+                  maMap.set(cfg.key, s)
+                }
+                mainChart.current = main
+                candleSeries.current = candles
+                maSeries.current = maMap
+
+                // ResizeObserver — observe main chart container
+                const ro = new ResizeObserver((entries) => {
+                  for (const entry of entries) {
+                    const { width } = entry.contentRect
+                    const cw = Math.floor(width)
+                    mainChart.current?.resize(cw, 400)
+                    volumeChart.current?.resize(cw, 120)
+                    pctChart.current?.resize(cw, 80)
+                  }
+                })
+                ro.observe(el)
+                resizeObserverRef.current = ro
+
+                // Crosshair sync (lazy — after all 3 charts are ready)
+                if (
+                  mainChart.current &&
+                  volumeChart.current &&
+                  pctChart.current &&
+                  !crosshairSynced.current
+                ) {
+                  crosshairSynced.current = true
+                  const m = mainChart.current
+                  const v = volumeChart.current
+                  const p = pctChart.current
+                  const syncCharts = (source: IChartApi) => {
+                    if (isSyncing.current) return
+                    const range = source.timeScale().getVisibleLogicalRange()
+                    if (!range) return
+                    isSyncing.current = true
+                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+                    isSyncing.current = false
+                  }
+                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
+                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
+                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                }
+              }}
               className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 400 }}
             />
+            {/* Volume chart */}
             <div
-              ref={volumeChartRef}
+              ref={(el) => {
+                if (!el || volumeSeries.current) return
+                const w = el.clientWidth || 800
+                const vol = createChart(el, {
+                  width: w, height: 120,
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+                  borderColor: BORDER_COLOR,
+                  crosshair: {
+                    mode: CrosshairMode.Normal,
+                    vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                    horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                  },
+                  timeScale: { borderColor: BORDER_COLOR, visible: false },
+                  rightPriceScale: { borderColor: BORDER_COLOR },
+                })
+                const hist = vol.addHistogramSeries({ priceFormat: { type: 'volume' } })
+                volumeChart.current = vol
+                volumeSeries.current = hist
+
+                // Crosshair sync (lazy — after all 3 charts are ready)
+                if (
+                  mainChart.current &&
+                  volumeChart.current &&
+                  pctChart.current &&
+                  !crosshairSynced.current
+                ) {
+                  crosshairSynced.current = true
+                  const m = mainChart.current
+                  const v = volumeChart.current
+                  const p = pctChart.current
+                  const syncCharts = (source: IChartApi) => {
+                    if (isSyncing.current) return
+                    const range = source.timeScale().getVisibleLogicalRange()
+                    if (!range) return
+                    isSyncing.current = true
+                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+                    isSyncing.current = false
+                  }
+                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
+                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
+                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                }
+              }}
               className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 120 }}
             />
+            {/* Pct change chart */}
             <div
-              ref={pctChartRef}
+              ref={(el) => {
+                if (!el || pctSeries.current) return
+                const w = el.clientWidth || 800
+                const pct = createChart(el, {
+                  width: w, height: 80,
+                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR },
+                  grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+                  borderColor: BORDER_COLOR,
+                  crosshair: {
+                    mode: CrosshairMode.Normal,
+                    vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                    horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                  },
+                  timeScale: { borderColor: BORDER_COLOR, visible: false },
+                  rightPriceScale: { borderColor: BORDER_COLOR },
+                })
+                const pctLine = pct.addLineSeries({
+                  color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
+                  lastValueVisible: false, crosshairMarkerVisible: true,
+                })
+                pctChart.current = pct
+                pctSeries.current = pctLine
+
+                // Crosshair sync (lazy — after all 3 charts are ready)
+                if (
+                  mainChart.current &&
+                  volumeChart.current &&
+                  pctChart.current &&
+                  !crosshairSynced.current
+                ) {
+                  crosshairSynced.current = true
+                  const m = mainChart.current
+                  const v = volumeChart.current
+                  const p = pctChart.current
+                  const syncCharts = (source: IChartApi) => {
+                    if (isSyncing.current) return
+                    const range = source.timeScale().getVisibleLogicalRange()
+                    if (!range) return
+                    isSyncing.current = true
+                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+                    isSyncing.current = false
+                  }
+                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
+                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
+                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                }
+              }}
               className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 80 }}
             />
