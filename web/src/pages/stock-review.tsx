@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -446,6 +446,11 @@ export default function StockReview() {
     return chartData.map((r) => toChartTime(r.trade_date))
   }, [chartData])
 
+  const [sliderValue, setSliderValue] = useState<[number, number]>([
+    Math.max(0, allDates.length - 365),
+    allDates.length - 1,
+  ])
+
   // Rebuild charts when data changes
   const buildCharts = useCallback(() => {
     if (
@@ -647,7 +652,7 @@ export default function StockReview() {
   }, [candleData, closeData, volumeData, pctData, maDataMap, visibleMAs])
 
   // Build/rebuild charts when data changes
-  useEffect(() => {
+  useLayoutEffect(() => {
     buildCharts()
 
     return () => {
@@ -659,8 +664,7 @@ export default function StockReview() {
       pctChart.current = null
       maSeries.current.clear()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [candleData, closeData, volumeData, pctData, maDataMap])
+  }, [candleData, closeData, volumeData, pctData, maDataMap, visibleMAs])
 
   // Update MA visibility without rebuilding
   useEffect(() => {
@@ -690,16 +694,6 @@ export default function StockReview() {
 
     return () => observer.disconnect()
   }, [])
-
-  // Fallback: rebuild on initial mount when container size is ready
-  useEffect(() => {
-    if (!chartReady) return
-    const timer = setTimeout(() => {
-      buildCharts()
-    }, 100)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartReady])
 
   // ── MA toggle ──
 
@@ -886,6 +880,7 @@ export default function StockReview() {
     (value: number | number[]) => {
       if (!Array.isArray(value) || value.length < 2) return
       const [startIdx, endIdx] = value
+      setSliderValue([startIdx, endIdx])
       const main = mainChart.current
       if (!main || allDates.length === 0) return
       main.timeScale().setVisibleRange({
@@ -1159,10 +1154,10 @@ export default function StockReview() {
                 />
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-[11px] text-slate-500" id="slider-start-label">
-                    {allDates[Math.max(0, allDates.length - 365)]}
+                    {allDates[sliderValue[0]]}
                   </span>
                   <span className="text-[11px] text-slate-500" id="slider-end-label">
-                    {allDates[allDates.length - 1]}
+                    {allDates[sliderValue[1]]}
                   </span>
                 </div>
               </div>
