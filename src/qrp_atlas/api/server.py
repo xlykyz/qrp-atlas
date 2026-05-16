@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from qrp_atlas.api.db import get_db, get_db_path
-from qrp_atlas.api.routes import daily, phase, trades
+from qrp_atlas.api.routes import daily, phase, stock, trades
 
 
 @asynccontextmanager
@@ -38,6 +38,7 @@ app.add_middleware(
 
 app.include_router(daily.router)
 app.include_router(phase.router)
+app.include_router(stock.router)
 app.include_router(trades.router)
 
 
