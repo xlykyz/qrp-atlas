@@ -97,7 +97,7 @@ const MA_CONFIGS = [
   { key: 'ma120', label: 'MA120', period: 120, color: '#ef4444' },
 ] as const
 
-type MAKey = (typeof MA_CONFIGS)[number]['key']
+type MAKey = string
 
 function calcRSI(
   data: { time: Time; close: number }[],
@@ -187,6 +187,12 @@ const sliderStyles = `
   border-color: #818cf8 !important;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.3) !important;
 }
+@keyframes toastFade {
+  0% { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  75% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+}
 `
 
 // ── component ──
@@ -214,11 +220,7 @@ export default function StockReview() {
       `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`,
     [now],
   )
-  const defaultStart = useMemo(() => {
-    const d = new Date(now)
-    d.setDate(d.getDate() - 90)
-    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
-  }, [now])
+  const defaultStart = '20120101'
 
   const [startDate, setStartDate] = useState(defaultStart)
   const [endDate, setEndDate] = useState(todayYMD)
@@ -231,9 +233,40 @@ export default function StockReview() {
 
   // ── state: MA visibility ──
 
-  const [visibleMAs, setVisibleMAs] = useState<Set<MAKey>>(
+  const DEFAULT_MA_COLORS = ['#8b5cf6', '#ec4899', '#14b8a6', '#f97316', '#06b6d4', '#84cc16', '#d946ef', '#0ea5e9']
+  const [customMAs, setCustomMAs] = useState<{ period: number; color: string }[]>(() => {
+    try {
+      const saved = localStorage.getItem('stock-review-custom-mas')
+      return saved ? JSON.parse(saved) : []
+    } catch { return [] }
+  })
+  const [isAddingMA, setIsAddingMA] = useState(false)
+  const [toastMsg, setToastMsg] = useState<string | null>(null)
+  const [crosshairData, setCrosshairData] = useState<{
+    time: string
+    open: number
+    close: number
+    volume: number | null
+    amount: number | null
+    turnover: number | null
+    maValues: { label: string; value: number; color: string }[]
+  } | null>(null)
+
+  useEffect(() => {
+    if (toastMsg) {
+      const timer = setTimeout(() => setToastMsg(null), 2500)
+      return () => clearTimeout(timer)
+    }
+  }, [toastMsg])
+
+  const [visibleMAs, setVisibleMAs] = useState<Set<string>>(
     new Set(['ma5', 'ma20', 'ma60']),
   )
+
+  // ── Persist custom MAs to localStorage ──
+  useEffect(() => {
+    localStorage.setItem('stock-review-custom-mas', JSON.stringify(customMAs))
+  }, [customMAs])
 
   // ── state: sub-chart indicators ──
   const [subChart1Indicator, setSubChart1Indicator] = useState<'volume' | 'amount'>('volume')
@@ -282,11 +315,18 @@ export default function StockReview() {
   const subChart2SignalLine = useRef<ISeriesApi<'Line'> | null>(null)
   const subChart2Histogram = useRef<ISeriesApi<'Histogram'> | null>(null)
 
-  const maSeries = useRef<Map<MAKey, ISeriesApi<'Line'>>>(new Map())
+  const maSeries = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
+  const chartDataRef = useRef<DailyRow[]>([])
+  const maConfigRef = useRef<{ key: string; label: string; color: string }[]>([])
+  const visibleMAsRef = useRef<Set<string>>(new Set())
 
   const isSyncing = useRef(false)
   const crosshairSynced = useRef(false)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
+
+  const prevSubChart1Ref = useRef(subChart1Indicator)
+  const prevSubChart2Ref = useRef(subChart2Indicator)
+  const initialFillDone = useRef(false)
 
   const hasAutoLoaded = useRef(false)
 
@@ -430,6 +470,7 @@ export default function StockReview() {
           // Sort ascending by trade_date for charting
           rows.sort((a, b) => a.trade_date.localeCompare(b.trade_date))
           setChartData(rows)
+          chartDataRef.current = rows
         }
       } catch (err) {
         if (!cancelled) {
@@ -437,6 +478,7 @@ export default function StockReview() {
             err instanceof Error ? err.message : '数据加载失败',
           )
           setChartData([])
+          chartDataRef.current = []
         }
       } finally {
         if (!cancelled) setDataLoading(false)
@@ -528,14 +570,31 @@ export default function StockReview() {
     return calcMACD(closeData)
   }, [closeData])
 
+  // Merge built-in and custom MA configs
+  const allMAConfigs = useMemo(() => {
+    const builtin = MA_CONFIGS.map(cfg => ({ ...cfg, label: cfg.label }))
+    const custom = customMAs.map((m, i) => ({
+      key: `custom_${m.period}`,
+      label: `MA${m.period}`,
+      period: m.period,
+      color: m.color,
+    }))
+    return [...builtin, ...custom]
+  }, [customMAs])
+
   // MA data per period
   const maDataMap = useMemo(() => {
     const map = new Map<MAKey, LineData[]>()
-    for (const cfg of MA_CONFIGS) {
+    for (const cfg of allMAConfigs) {
       map.set(cfg.key, calcMA(closeData, cfg.period))
     }
     return map
-  }, [closeData])
+  }, [closeData, allMAConfigs])
+
+  // Sync maConfigRef with latest allMAConfigs (for crosshair tooltip callback)
+  useEffect(() => {
+    maConfigRef.current = allMAConfigs.map(c => ({ key: c.key, label: c.label, color: c.color }))
+  }, [allMAConfigs])
 
   // TASK 6: Date list for slider
   const allDates = useMemo(() => {
@@ -543,23 +602,83 @@ export default function StockReview() {
   }, [chartData])
 
   const [sliderValue, setSliderValue] = useState<[number, number]>([
-    Math.max(0, allDates.length - 365),
+    Math.max(0, allDates.length - 90),
     allDates.length - 1,
   ])
 
-  // ── Effect: Update data on existing charts ──
+  // ── Effect: Rebuild sub-chart series (if needed) + set data ──
+  // Must rebuild series BEFORE setting data — separate effects cause stale-series bug
   useEffect(() => {
     if (!candleSeries.current || candleData.length === 0) return
 
+    // Save visible range before series recreation (restore after)
+    const savedRange = mainChart.current?.timeScale().getVisibleRange()
+
+    // ── Sub-chart 1: recreate series if indicator changed ──
+    if (subChart1Indicator !== prevSubChart1Ref.current) {
+      prevSubChart1Ref.current = subChart1Indicator
+      const chart1 = volumeChart.current
+      if (chart1 && volumeSeries.current) {
+        try { chart1.removeSeries(volumeSeries.current) } catch {}
+        volumeSeries.current = null
+      }
+      if (chart1) {
+        if (subChart1Indicator === 'volume') {
+          volumeSeries.current = chart1.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+        } else {
+          volumeSeries.current = chart1.addSeries(HistogramSeries, {})
+        }
+      }
+    }
+    // ── Sub-chart 2: recreate series if needed ──
+    // Check: if we need MACD but current series is a single LineSeries (or vice versa), recreate
+    const needsMACD = subChart2Indicator === 'macd'
+    const hasMACD = subChart2MACDLine.current !== null
+    if (needsMACD !== hasMACD) {
+      const chart2 = pctChart.current
+      if (chart2) {
+        const oldSeries = [pctSeries.current, subChart2MACDLine.current, subChart2SignalLine.current, subChart2Histogram.current]
+        for (const s of oldSeries) {
+          if (s) {
+            try { chart2.removeSeries(s) } catch {}
+          }
+        }
+        pctSeries.current = null
+        subChart2MACDLine.current = null
+        subChart2SignalLine.current = null
+        subChart2Histogram.current = null
+      }
+      if (chart2) {
+        if (needsMACD) {
+          subChart2Histogram.current = chart2.addSeries(HistogramSeries, { color: '#22c55e' })
+          subChart2MACDLine.current = chart2.addSeries(LineSeries, {
+            color: '#3b82f6', lineWidth: 1.5, priceLineVisible: false,
+            lastValueVisible: false, crosshairMarkerVisible: true,
+          })
+          subChart2SignalLine.current = chart2.addSeries(LineSeries, {
+            color: '#f59e0b', lineWidth: 1.5, priceLineVisible: false,
+            lastValueVisible: false, crosshairMarkerVisible: true,
+          })
+        } else {
+          const color = subChart2Indicator === 'rsi' ? '#a855f7' : '#f59e0b'
+          pctSeries.current = chart2.addSeries(LineSeries, {
+            color, lineWidth: 2, priceLineVisible: false,
+            lastValueVisible: false, crosshairMarkerVisible: true,
+          })
+        }
+      }
+    }
+
+    // ── Set candle data ──
     candleSeries.current.setData(candleData)
-    for (const cfg of MA_CONFIGS) {
+    for (const cfg of allMAConfigs) {
       const series = maSeries.current.get(cfg.key)
       const data = maDataMap.get(cfg.key) ?? []
       if (series && data.length > 0) {
         series.setData(data)
       }
     }
-    // Sub-chart 1
+    // ── Set sub-chart 1 data ──
     const sub1 = volumeSeries.current
     if (sub1) {
       if (subChart1Indicator === 'volume' && volumeData.length > 0) {
@@ -568,7 +687,7 @@ export default function StockReview() {
         sub1.setData(amountData)
       }
     }
-    // Sub-chart 2
+    // ── Set sub-chart 2 data ──
     if (subChart2Indicator === 'pct_change' && pctSeries.current && pctData.length > 0) {
       pctSeries.current.setData(pctData)
     } else if (subChart2Indicator === 'turnover' && pctSeries.current && turnoverData.length > 0) {
@@ -580,7 +699,27 @@ export default function StockReview() {
       if (subChart2SignalLine.current && macdData.signalLine.length > 0) subChart2SignalLine.current.setData(macdData.signalLine)
       if (subChart2Histogram.current && macdData.histogram.length > 0) subChart2Histogram.current.setData(macdData.histogram)
     }
-    mainChart.current?.timeScale().fitContent()
+
+    // Restore visible range after sub-chart series recreation
+    if (savedRange && initialFillDone.current) {
+      mainChart.current?.timeScale().setVisibleRange(savedRange)
+      volumeChart.current?.timeScale().setVisibleRange(savedRange)
+      pctChart.current?.timeScale().setVisibleRange(savedRange)
+    }
+
+    // ── Initial fill: show last ~90 trading days on first load ──
+    if (candleData.length > 0 && !initialFillDone.current) {
+      initialFillDone.current = true
+      const endIdx = allDates.length - 1
+      const startIdx = Math.max(0, allDates.length - 90)
+      const range = {
+        from: allDates[startIdx] as Time,
+        to: allDates[endIdx] as Time,
+      }
+      mainChart.current?.timeScale().setVisibleRange(range)
+      volumeChart.current?.timeScale().setVisibleRange(range)
+      pctChart.current?.timeScale().setVisibleRange(range)
+    }
   }, [candleData, closeData, volumeData, pctData, maDataMap, amountData, turnoverData, rsiData, macdData, subChart1Indicator, subChart2Indicator])
 
   // ── Effect: Cleanup on unmount only ──
@@ -605,76 +744,38 @@ export default function StockReview() {
     }
   }, [])
 
+  // ── Sync visibleMAs to ref for crosshair callback ──
+  useEffect(() => {
+    visibleMAsRef.current = visibleMAs
+  }, [visibleMAs])
+
   // ── Effect D: MA visibility toggle ──
   useEffect(() => {
-    for (const cfg of MA_CONFIGS) {
+    for (const cfg of allMAConfigs) {
       const series = maSeries.current.get(cfg.key)
       if (series) {
         series.applyOptions({ visible: visibleMAs.has(cfg.key) })
       }
     }
-  }, [visibleMAs])
-
-  // ── Effect: Sub-chart 1 indicator swap ──
-  useEffect(() => {
-    const chart = volumeChart.current
-    if (!chart) return
-    if (volumeSeries.current) {
-      try { chart.removeSeries(volumeSeries.current) } catch {}
-      volumeSeries.current = null
-    }
-    if (subChart1Indicator === 'volume') {
-      volumeSeries.current = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
-    } else {
-      volumeSeries.current = chart.addSeries(HistogramSeries, {})
-    }
-  }, [subChart1Indicator])
-
-  // ── Effect: Sub-chart 2 indicator swap ──
-  useEffect(() => {
-    const chart = pctChart.current
-    if (!chart) return
-    // Remove all possible series
-    const oldSeries = [pctSeries.current, subChart2MACDLine.current, subChart2SignalLine.current, subChart2Histogram.current]
-    for (const s of oldSeries) {
-      if (s) {
-        try { chart.removeSeries(s) } catch {}
-      }
-    }
-    pctSeries.current = null
-    subChart2MACDLine.current = null
-    subChart2SignalLine.current = null
-    subChart2Histogram.current = null
-
-    if (subChart2Indicator === 'macd') {
-      subChart2Histogram.current = chart.addSeries(HistogramSeries, { color: '#22c55e' })
-      subChart2MACDLine.current = chart.addSeries(LineSeries, {
-        color: '#3b82f6', lineWidth: 1.5, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: true,
-      })
-      subChart2SignalLine.current = chart.addSeries(LineSeries, {
-        color: '#f59e0b', lineWidth: 1.5, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: true,
-      })
-    } else {
-      const color = subChart2Indicator === 'rsi' ? '#a855f7' : '#f59e0b'
-      pctSeries.current = chart.addSeries(LineSeries, {
-        color, lineWidth: 2, priceLineVisible: false,
-        lastValueVisible: false, crosshairMarkerVisible: true,
-      })
-    }
-  }, [subChart2Indicator])
+  }, [visibleMAs, allMAConfigs])
 
   // ── MA toggle ──
 
-  const toggleMA = useCallback((key: MAKey) => {
+  const toggleMA = useCallback((key: string) => {
     setVisibleMAs((prev) => {
-      const next = new Set(prev)
-      if (next.has(key)) {
+      if (prev.has(key)) {
+        // 关闭 — 始终允许
+        const next = new Set(prev)
         next.delete(key)
-      } else {
-        next.add(key)
+        return next
       }
+      // 开启 — 检查是否超出3条限制
+      if (prev.size >= 3) {
+        setTimeout(() => setToastMsg('最多同时显示3条均线'), 0)
+        return prev
+      }
+      const next = new Set(prev)
+      next.add(key)
       return next
     })
   }, [])
@@ -851,12 +952,14 @@ export default function StockReview() {
       if (!Array.isArray(value) || value.length < 2) return
       const [startIdx, endIdx] = value
       setSliderValue([startIdx, endIdx])
-      const main = mainChart.current
-      if (!main || allDates.length === 0) return
-      main.timeScale().setVisibleRange({
+      if (allDates.length === 0) return
+      const range = {
         from: allDates[startIdx] as Time,
         to: allDates[endIdx] as Time,
-      })
+      }
+      mainChart.current?.timeScale().setVisibleRange(range)
+      volumeChart.current?.timeScale().setVisibleRange(range)
+      pctChart.current?.timeScale().setVisibleRange(range)
     },
     [allDates],
   )
@@ -1017,30 +1120,124 @@ export default function StockReview() {
 
       {/* ── Charts area ── */}
       {chartReady && (
-        <>
+        <div className="relative">
+          {toastMsg && (
+            <div
+              className="absolute top-0 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-slate-800/90 text-slate-200 text-sm border border-slate-700 shadow-lg transition-opacity duration-500 pointer-events-none"
+              style={{ animation: 'toastFade 2.5s ease-in-out forwards' }}
+            >
+              {toastMsg}
+            </div>
+          )}
+          {/* Crosshair tooltip */}
+          {crosshairData && (
+            <div className="absolute top-2 right-2 z-10 bg-slate-900/85 backdrop-blur-sm border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 space-y-1 min-w-[160px] shadow-lg pointer-events-none">
+              <div className="text-slate-400 font-medium mb-1">{crosshairData.time}</div>
+              <div className="flex justify-between gap-3">
+                <span>开 <span className="text-slate-200 font-mono">{crosshairData.open.toFixed(2)}</span></span>
+                <span>收 <span className={`font-mono ${crosshairData.close >= crosshairData.open ? 'text-red-400' : 'text-green-400'}`}>{crosshairData.close.toFixed(2)}</span></span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span>量 <span className="text-slate-200 font-mono">{formatVolume(crosshairData.volume)}</span></span>
+                <span>额 <span className="text-slate-200 font-mono">{formatAmount(crosshairData.amount)}</span></span>
+              </div>
+              <div>
+                <span>换手 <span className="text-slate-200 font-mono">{crosshairData.turnover != null ? `${crosshairData.turnover.toFixed(2)}%` : '—'}</span></span>
+              </div>
+              {crosshairData.maValues.length > 0 && (
+                <div className="border-t border-slate-700 pt-1 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                  {crosshairData.maValues.map(m => (
+                    <span key={m.label} style={{ color: m.color }} className="font-mono">
+                      {m.label} {m.value.toFixed(2)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {/* MA toggle buttons */}
           <div className="flex items-center gap-2 flex-wrap">
-            {MA_CONFIGS.map((cfg) => {
+            {allMAConfigs.map((cfg) => {
               const active = visibleMAs.has(cfg.key)
+              const isCustom = cfg.key.startsWith('custom_')
               return (
-                <button
-                  key={cfg.key}
-                  onClick={() => toggleMA(cfg.key)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors border ${
-                    active
-                      ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-white border-slate-300 dark:border-slate-600'
-                      : 'bg-transparent text-slate-500 border-slate-300 dark:border-slate-700 hover:text-slate-700 dark:hover:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
-                  }`}
-                  style={
-                    active
-                      ? { borderColor: cfg.color, color: cfg.color }
-                      : undefined
-                  }
-                >
-                  {cfg.label}
-                </button>
+                <div key={cfg.key} className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => toggleMA(cfg.key)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors border ${
+                      active
+                        ? 'bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-white border-slate-300 dark:border-slate-600'
+                        : 'bg-transparent text-slate-500 border-slate-300 dark:border-slate-700 hover:text-slate-700 dark:hover:text-slate-300 hover:border-slate-400 dark:hover:border-slate-500'
+                    }`}
+                    style={
+                      active
+                        ? { borderColor: cfg.color, color: cfg.color }
+                        : undefined
+                    }
+                  >
+                    {cfg.label}
+                  </button>
+                  {isCustom && (
+                    <button
+                      className="text-xs text-slate-500 hover:text-red-400 ml-0.5"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setCustomMAs(prev => prev.filter(m => `custom_${m.period}` !== cfg.key))
+                        setVisibleMAs(prev => { const n = new Set(prev); n.delete(cfg.key); return n })
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               )
             })}
+            {customMAs.length < 3 && (
+              <>
+                {isAddingMA ? (
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="周期"
+                    id="custom-ma-input"
+                    className="px-3 py-1 rounded-full text-xs font-medium border bg-transparent border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 w-14"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const input = e.currentTarget
+                        const val = parseInt(input.value)
+                        if (!isNaN(val) && val >= 3 && val <= 999 && !customMAs.some(m => m.period === val)) {
+                          const color = DEFAULT_MA_COLORS[customMAs.length % DEFAULT_MA_COLORS.length]
+                          setCustomMAs(prev => [...prev, { period: val, color }])
+                        }
+                        input.value = ''
+                        setIsAddingMA(false)
+                      }
+                      if (e.key === 'Escape') {
+                        e.currentTarget.value = ''
+                        setIsAddingMA(false)
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const val = parseInt(e.currentTarget.value)
+                      if (!isNaN(val) && val >= 3 && val <= 999 && !customMAs.some(m => m.period === val)) {
+                        const color = DEFAULT_MA_COLORS[customMAs.length % DEFAULT_MA_COLORS.length]
+                        setCustomMAs(prev => [...prev, { period: val, color }])
+                      }
+                      e.currentTarget.value = ''
+                      setIsAddingMA(false)
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="px-3 py-1 rounded-full text-xs font-medium border border-dashed border-indigo-500/40 text-indigo-400/70 hover:text-indigo-300 hover:border-indigo-400/60 bg-transparent transition-colors"
+                    onClick={() => setIsAddingMA(true)}
+                  >
+                    + 自定义MA
+                  </button>
+                )}
+              </>
+            )}
           </div>
 
           {/* Info panel */}
@@ -1112,6 +1309,8 @@ export default function StockReview() {
                     vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                     horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
                   },
+                  handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
+                  handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
                   timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false, tickMarkFormatter: (time, tickMarkType) => {
                     const date = typeof time === 'string' ? new Date(time) : new Date((time as number) * 1000)
                     const month = date.getMonth() + 1
@@ -1126,10 +1325,10 @@ export default function StockReview() {
                   wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
                 })
                 const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
-                for (const cfg of MA_CONFIGS) {
+                for (const cfg of allMAConfigs) {
                   const s = main.addSeries(LineSeries, {
                     color: cfg.color, lineWidth: 1, priceLineVisible: false,
-                    lastValueVisible: true, title: cfg.label,
+                    lastValueVisible: false, title: cfg.label,
                     visible: visibleMAs.has(cfg.key),
                   })
                   maMap.set(cfg.key, s)
@@ -1137,6 +1336,43 @@ export default function StockReview() {
                 mainChart.current = main
                 candleSeries.current = candles
                 maSeries.current = maMap
+
+                // Crosshair tooltip
+                main.subscribeCrosshairMove((param) => {
+                  if (!param.time || !param.point) {
+                    setCrosshairData(null)
+                    return
+                  }
+                  const cd = param.seriesData.get(candles) as CandlestickData | undefined
+                  if (!cd) { setCrosshairData(null); return }
+
+                  const timeStr = typeof param.time === 'string'
+                    ? param.time
+                    : new Date((param.time as number) * 1000).toISOString().slice(0, 10)
+
+                  const row = chartDataRef.current.find(r => toChartTime(r.trade_date) === timeStr)
+
+                  const maValues: { label: string; value: number; color: string }[] = []
+                  const visible = visibleMAsRef.current
+                  for (const [key, series] of maSeries.current.entries()) {
+                    if (!visible.has(key)) continue
+                    const ld = param.seriesData.get(series) as LineData | undefined
+                    if (ld !== undefined) {
+                      const cfg = maConfigRef.current.find(c => c.key === key)
+                      if (cfg) maValues.push({ label: cfg.label, value: ld.value, color: cfg.color })
+                    }
+                  }
+
+                  setCrosshairData({
+                    time: timeStr,
+                    open: cd.open,
+                    close: cd.close,
+                    volume: row?.volume ?? null,
+                    amount: row?.amount ?? null,
+                    turnover: row?.turnover ?? null,
+                    maValues,
+                  })
+                })
 
                 // ResizeObserver — observe main chart container
                 const ro = new ResizeObserver((entries) => {
@@ -1178,133 +1414,135 @@ export default function StockReview() {
               className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
               style={{ height: 400 }}
             />
-            {/* Sub-chart 1 controls */}
-            <div className="flex items-center gap-2 mb-1 px-1 pt-1">
-              <span className="text-xs text-slate-400 font-medium">副图一:</span>
+
+            {/* Volume chart */}
+            <div className="relative">
               <select
                 value={subChart1Indicator}
                 onChange={(e) => setSubChart1Indicator(e.target.value as typeof subChart1Indicator)}
-                className="text-xs bg-transparent border border-slate-700 rounded px-2 py-0.5 text-slate-300"
+                className="absolute top-1 left-1 z-10 text-xs bg-slate-900/80 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300 backdrop-blur-sm"
               >
                 <option value="volume">成交量</option>
                 <option value="amount">成交额</option>
               </select>
-            </div>
-            {/* Volume chart */}
-            <div
-              ref={(el) => {
-                if (!el || volumeSeries.current) return
-                const w = el.clientWidth || 800
-                const vol = createChart(el, {
-                  width: w, height: 120,
-                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
-                  grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-                  borderColor: BORDER_COLOR,
-                  crosshair: {
-                    mode: CrosshairMode.Normal,
-                    vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-                    horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-                  },
-                  timeScale: { borderColor: BORDER_COLOR, visible: false },
-                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
-                })
-                const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
-                volumeChart.current = vol
-                volumeSeries.current = hist
+              <div
+                ref={(el) => {
+                  if (!el || volumeSeries.current) return
+                  const w = el.clientWidth || 800
+                  const vol = createChart(el, {
+                    width: w, height: 120,
+                    layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
+                    grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+                    borderColor: BORDER_COLOR,
+                    crosshair: {
+                      mode: CrosshairMode.Normal,
+                      vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                      horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                    },
+                    handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
+                    handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
+                    timeScale: { borderColor: BORDER_COLOR, visible: false },
+                    rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
+                  })
+                  const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+                  volumeChart.current = vol
+                  volumeSeries.current = hist
 
-                // Crosshair sync (lazy — after all 3 charts are ready)
-                if (
-                  mainChart.current &&
-                  volumeChart.current &&
-                  pctChart.current &&
-                  !crosshairSynced.current
-                ) {
-                  crosshairSynced.current = true
-                  const m = mainChart.current
-                  const v = volumeChart.current
-                  const p = pctChart.current
-                  const syncCharts = (source: IChartApi) => {
-                    if (isSyncing.current) return
-                    const range = source.timeScale().getVisibleLogicalRange()
-                    if (!range) return
-                    isSyncing.current = true
-                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-                    isSyncing.current = false
+                  // Crosshair sync (lazy — after all 3 charts are ready)
+                  if (
+                    mainChart.current &&
+                    volumeChart.current &&
+                    pctChart.current &&
+                    !crosshairSynced.current
+                  ) {
+                    crosshairSynced.current = true
+                    const m = mainChart.current
+                    const v = volumeChart.current
+                    const p = pctChart.current
+                    const syncCharts = (source: IChartApi) => {
+                      if (isSyncing.current) return
+                      const range = source.timeScale().getVisibleLogicalRange()
+                      if (!range) return
+                      isSyncing.current = true
+                      ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+                      isSyncing.current = false
+                    }
+                    m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
+                    v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
+                    p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
                   }
-                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
-                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
-                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
-                }
-              }}
-              className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
-              style={{ height: 120 }}
-            />
-            {/* Sub-chart 2 controls */}
-            <div className="flex items-center gap-2 mb-1 px-1 pt-1">
-              <span className="text-xs text-slate-400 font-medium">副图二:</span>
+                }}
+                className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
+                style={{ height: 120 }}
+              />
+            </div>
+
+            {/* Pct change chart */}
+            <div className="relative">
               <select
                 value={subChart2Indicator}
                 onChange={(e) => setSubChart2Indicator(e.target.value as typeof subChart2Indicator)}
-                className="text-xs bg-transparent border border-slate-700 rounded px-2 py-0.5 text-slate-300"
+                className="absolute top-1 left-1 z-10 text-xs bg-slate-900/80 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300 backdrop-blur-sm"
               >
                 <option value="pct_change">涨跌幅</option>
                 <option value="turnover">换手率</option>
                 <option value="rsi">RSI</option>
                 <option value="macd">MACD</option>
               </select>
-            </div>
-            {/* Pct change chart */}
-            <div
-              ref={(el) => {
-                if (!el || pctSeries.current) return
-                const w = el.clientWidth || 800
-                const pct = createChart(el, {
-                  width: w, height: 80,
-                  layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
-                  grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-                  borderColor: BORDER_COLOR,
-                  crosshair: {
-                    mode: CrosshairMode.Normal,
-                    vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-                    horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
-                  },
-                  timeScale: { borderColor: BORDER_COLOR, visible: false },
-                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
-                })
-                const pctLine = pct.addSeries(LineSeries, {
-                  color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
-                  lastValueVisible: false, crosshairMarkerVisible: true,
-                })
-                pctChart.current = pct
-                pctSeries.current = pctLine
+              <div
+                ref={(el) => {
+                  if (!el || pctSeries.current) return
+                  const w = el.clientWidth || 800
+                  const pct = createChart(el, {
+                    width: w, height: 80,
+                    layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
+                    grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+                    borderColor: BORDER_COLOR,
+                    crosshair: {
+                      mode: CrosshairMode.Normal,
+                      vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                      horzLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
+                    },
+                    handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
+                    handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
+                    timeScale: { borderColor: BORDER_COLOR, visible: false },
+                    rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
+                  })
+                  const pctLine = pct.addSeries(LineSeries, {
+                    color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
+                    lastValueVisible: false, crosshairMarkerVisible: true,
+                  })
+                  pctChart.current = pct
+                  pctSeries.current = pctLine
 
-                // Crosshair sync (lazy — after all 3 charts are ready)
-                if (
-                  mainChart.current &&
-                  volumeChart.current &&
-                  pctChart.current &&
-                  !crosshairSynced.current
-                ) {
-                  crosshairSynced.current = true
-                  const m = mainChart.current
-                  const v = volumeChart.current
-                  const p = pctChart.current
-                  const syncCharts = (source: IChartApi) => {
-                    if (isSyncing.current) return
-                    const range = source.timeScale().getVisibleLogicalRange()
-                    if (!range) return
-                    isSyncing.current = true
-                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-                    isSyncing.current = false
+                  // Crosshair sync (lazy — after all 3 charts are ready)
+                  if (
+                    mainChart.current &&
+                    volumeChart.current &&
+                    pctChart.current &&
+                    !crosshairSynced.current
+                  ) {
+                    crosshairSynced.current = true
+                    const m = mainChart.current
+                    const v = volumeChart.current
+                    const p = pctChart.current
+                    const syncCharts = (source: IChartApi) => {
+                      if (isSyncing.current) return
+                      const range = source.timeScale().getVisibleLogicalRange()
+                      if (!range) return
+                      isSyncing.current = true
+                      ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
+                      isSyncing.current = false
+                    }
+                    m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
+                    v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
+                    p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
                   }
-                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
-                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
-                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
-                }
-              }}
-              className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
-              style={{ height: 80 }}
-            />
+                }}
+                className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
+                style={{ height: 80 }}
+              />
+            </div>
             {/* TASK 6: Time range slider */}
             {allDates.length > 0 && (
               <div className="w-full rounded-b-lg border border-t-0 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 px-4 pt-3 pb-4">
@@ -1321,7 +1559,7 @@ export default function StockReview() {
                   range
                   min={0}
                   max={allDates.length - 1}
-                  defaultValue={[Math.max(0, allDates.length - 365), allDates.length - 1]}
+                  defaultValue={[Math.max(0, allDates.length - 90), allDates.length - 1]}
                   onChange={handleSliderChange}
                 />
                 <div className="flex items-center justify-between mt-1">
@@ -1335,7 +1573,7 @@ export default function StockReview() {
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
 
       {/* ── 市场判读笔记 ── */}
