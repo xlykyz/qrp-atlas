@@ -242,6 +242,14 @@ export default function StockReview() {
   })
   const [isAddingMA, setIsAddingMA] = useState(false)
   const [toastMsg, setToastMsg] = useState<string | null>(null)
+
+  // ── state: recent searches ──
+  const [recentSearches, setRecentSearches] = useState<{ ticker: string; name: string }[]>(() => {
+    try {
+      const saved = localStorage.getItem('stock-review-recent-searches')
+      return saved ? JSON.parse(saved) : []
+    } catch { return [] }
+  })
   const [crosshairData, setCrosshairData] = useState<{
     time: string
     open: number
@@ -267,6 +275,11 @@ export default function StockReview() {
   useEffect(() => {
     localStorage.setItem('stock-review-custom-mas', JSON.stringify(customMAs))
   }, [customMAs])
+
+  // ── Persist recent searches to localStorage ──
+  useEffect(() => {
+    localStorage.setItem('stock-review-recent-searches', JSON.stringify(recentSearches))
+  }, [recentSearches])
 
   // ── state: sub-chart indicators ──
   const [subChart1Indicator, setSubChart1Indicator] = useState<'volume' | 'amount'>('volume')
@@ -446,9 +459,41 @@ export default function StockReview() {
       setSelectedStock({ ticker, name })
       setSearchResults([])
       setSearchQuery(`${ticker} - ${name}`)
+      setRecentSearches((prev) => {
+        const next = prev.filter((s) => s.ticker !== ticker)
+        return [{ ticker, name }, ...next].slice(0, 5)
+      })
     },
     [],
   )
+
+  // ── 换股票时清理图表 ref，避免 DOM 重挂载后 ref callback 因旧 ref 跳过创建 ──
+  useEffect(() => {
+    if (!selectedStock) return
+
+    // 先销毁图表实例
+    resizeObserverRef.current?.disconnect()
+    resizeObserverRef.current = null
+    mainChart.current?.remove()
+    volumeChart.current?.remove()
+    pctChart.current?.remove()
+    mainChart.current = null
+    volumeChart.current = null
+    pctChart.current = null
+
+    // 清理系列 ref
+    candleSeries.current = null
+    volumeSeries.current = null
+    pctSeries.current = null
+    subChart2MACDLine.current = null
+    subChart2SignalLine.current = null
+    subChart2Histogram.current = null
+    maSeries.current.clear()
+
+    // 重置状态 ref
+    crosshairSynced.current = false
+    initialFillDone.current = false
+  }, [selectedStock])
 
   // ── fetch chart data ──
 
@@ -995,7 +1040,7 @@ export default function StockReview() {
                 className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500"
               />
               {/* Search dropdown */}
-              {searchResults.length > 0 && (
+              {(searchQuery.trim() === '' ? recentSearches.length > 0 : searchResults.length > 0) && (
                 <div
                   ref={(el) => {
                     if (!el) return
@@ -1006,20 +1051,48 @@ export default function StockReview() {
                   }}
                   className="fixed z-[9999] mt-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg max-h-60 overflow-y-auto"
                 >
-                  {searchResults.map((r) => (
-                    <button
-                      key={r.ticker}
-                      className="w-full px-3 py-2 text-left text-sm text-slate-700 dark:text-gray-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center gap-2"
-                      onClick={() =>
-                        handleSelectStock(r.ticker, r.name)
-                      }
-                    >
-                      <span className="font-mono text-xs text-slate-400 dark:text-slate-400">
-                        {r.ticker}
-                      </span>
-                      <span>{r.name}</span>
-                    </button>
-                  ))}
+                  {searchQuery.trim() === '' ? (
+                    recentSearches.map((r) => (
+                      <div
+                        key={r.ticker}
+                        className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 dark:text-gray-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                      >
+                        <button
+                          className="flex items-center gap-2 flex-1 text-left"
+                          onClick={() => handleSelectStock(r.ticker, r.name)}
+                        >
+                          <span className="font-mono text-xs text-slate-400 dark:text-slate-400">
+                            {r.ticker}
+                          </span>
+                          <span>{r.name}</span>
+                        </button>
+                        <button
+                          className="text-xs text-slate-400 hover:text-red-400 ml-1 shrink-0"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setRecentSearches((prev) => prev.filter((s) => s.ticker !== r.ticker))
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    searchResults.map((r) => (
+                      <button
+                        key={r.ticker}
+                        className="w-full px-3 py-2 text-left text-sm text-slate-700 dark:text-gray-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors flex items-center gap-2"
+                        onClick={() =>
+                          handleSelectStock(r.ticker, r.name)
+                        }
+                      >
+                        <span className="font-mono text-xs text-slate-400 dark:text-slate-400">
+                          {r.ticker}
+                        </span>
+                        <span>{r.name}</span>
+                      </button>
+                    ))
+                  )}
                 </div>
               )}
             </div>
