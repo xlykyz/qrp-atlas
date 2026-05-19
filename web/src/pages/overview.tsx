@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useOutletContext, useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -190,6 +190,10 @@ export default function Overview() {
   const [sortKey, setSortKey] = useState<SortKey>('pct_change')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const pageSizeOptions = [50, 100, 200];
+
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir(prev => (prev === 'desc' ? 'asc' : 'desc'))
@@ -211,6 +215,23 @@ export default function Overview() {
   }, [filteredData, sortKey, sortDir])
 
   const isBusy = loading || isDateChanging
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(sortedData.length / pageSize)), [sortedData, pageSize])
+
+  const paginatedData = useMemo(() => {
+    const start = (page - 1) * pageSize
+    return sortedData.slice(start, start + pageSize)
+  }, [sortedData, page, pageSize])
+
+  // Reset to page 1 when sort, filter, or pageSize changes
+  const prevSortedKey = useRef({ sortKey, sortDir, filterKey: JSON.stringify(boardFilters), pageSize })
+  useEffect(() => {
+    const cur = { sortKey, sortDir, filterKey: JSON.stringify(boardFilters), pageSize }
+    if (JSON.stringify(prevSortedKey.current) !== JSON.stringify(cur)) {
+      setPage(1)
+      prevSortedKey.current = cur
+    }
+  }, [sortKey, sortDir, boardFilters, pageSize])
 
   // ── Register header title + controls ──
 
@@ -488,7 +509,7 @@ export default function Overview() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sortedData.map((row, idx) => (
+                {paginatedData.map((row, idx) => (
                   <TableRow
                     key={`${row.ticker}-${idx}`}
                     className="border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/50 cursor-pointer"
@@ -543,6 +564,18 @@ export default function Overview() {
                 ))}
               </TableBody>
             </Table>
+          </div>
+          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-800">
+            <span className="text-sm text-slate-500 dark:text-gray-400">第 {page}/{totalPages} 页，共 {sortedData.length} 条</span>
+            <div className="flex items-center gap-3">
+              <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1) }} className="text-sm bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded px-2 py-1 text-slate-700 dark:text-gray-300">
+                {pageSizeOptions.map(n => (<option key={n} value={n}>{n} 条/页</option>))}
+              </select>
+              <div className="flex gap-1">
+                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>上一页</Button>
+                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>下一页</Button>
+              </div>
+            </div>
           </div>
         </div>
       )}
