@@ -93,3 +93,18 @@ QUARTER = "quarter"
 DATE_FIELDS = (TRADE_DATE, ENTRY_DATE, EXIT_DATE, HALF_SELL_DATE)
 
 IDENTIFIER_FIELDS = (TICKER, TRADE_ID)
+
+# ── 调研公告字段 ──
+SECU_CODE = "secu_code"
+SEC_NAME = "sec_name"
+NOTICE_DATE = "notice_date"
+RECEIVE_DATE = "receive_date"
+RECEIVE_WAY = "receive_way"
+RECEIVE_PLACE = "receive_place"
+RECEPTIONIST = "receptionist"
+ORG_COUNT = "org_count"
+CONTENT = "content"
+ANNOUNCEMENT_TITLE = "announcement_title"
+ADJUNCT_URL = "adjunct_url"
+ADJUNCT_SIZE = "adjunct_size"
+SOURCE = "source"

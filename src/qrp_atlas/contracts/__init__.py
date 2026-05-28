@@ -55,6 +55,20 @@ from .fields import (
     DATE_FIELDS,
     IDENTIFIER_FIELDS,
     ADJ_FACTOR,
+    # ── 调研公告字段 ──
+    SECU_CODE,
+    SEC_NAME,
+    NOTICE_DATE,
+    RECEIVE_DATE,
+    RECEIVE_WAY,
+    RECEIVE_PLACE,
+    RECEPTIONIST,
+    ORG_COUNT,
+    CONTENT,
+    ANNOUNCEMENT_TITLE,
+    ADJUNCT_URL,
+    ADJUNCT_SIZE,
+    SOURCE,
 )
 
 from .schema import (
@@ -66,6 +80,7 @@ from .schema import (
     STOCK_INFO,
     TRADING_CALENDAR,
     ADJ_FACTOR_CHANGES,
+    CNINFO_RESEARCH_VISITS,
     ALL_TABLES,
     TABLE_BY_NAME,
     get_table,
