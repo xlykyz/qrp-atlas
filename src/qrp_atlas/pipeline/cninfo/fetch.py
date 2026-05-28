@@ -1,5 +1,8 @@
 """
 fetch.py - 东方财富机构调研数据抓取模块
+
+失败策略：单页失败时跳过该页（记录日志），继续下一页。
+确保海量数据天不会因限流导致整批丢失。
 """
 
 import json
@@ -25,18 +28,23 @@ def fetch_from_eastmoney(date_str: str) -> list[dict]:
     """
     分页抓取指定日期的东财机构调研数据。
 
+    单页失败时跳过该页（非致命），确保海量数据天不因限流丢失整批。
+
     Args:
         date_str: 日期字符串，格式 "2026-05-28"
 
     Returns:
-        所有页面的原始记录列表
+        所有成功页面的原始记录列表
     """
     page = 1
     all_records: list[dict] = []
     max_retries = 3
+    consecutive_failures = 0
+    max_consecutive_failures = 5
 
     while True:
         success = False
+        records = []
         last_error: Exception | None = None
 
         for attempt in range(max_retries):
@@ -80,9 +88,25 @@ def fetch_from_eastmoney(date_str: str) -> list[dict]:
                     time.sleep(sleep_time)
 
         if not success:
-            raise RuntimeError(
-                f"Failed after {max_retries} retries: {last_error}"
+            consecutive_failures += 1
+            print(
+                f"[WARN] Page {page} failed after {max_retries} retries: "
+                f"{last_error}. Skipping (consecutive failures: {consecutive_failures}).",
+                file=__import__("sys").stderr,
             )
+            if consecutive_failures >= max_consecutive_failures:
+                print(
+                    f"[WARN] {max_consecutive_failures} consecutive failures, "
+                    f"stopping fetch for {date_str}.",
+                    file=__import__("sys").stderr,
+                )
+                break
+            page += 1
+            time.sleep(eastmoney_sleep_interval())
+            continue
+
+        # 成功：重置连续失败计数
+        consecutive_failures = 0
 
         count = len(records)
         print(
