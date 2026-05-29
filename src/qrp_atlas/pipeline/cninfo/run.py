@@ -3,6 +3,7 @@ run.py - cninfo 调研公告数据管道入口
 
 用法:
     python -m qrp_atlas.pipeline.cninfo.run --date 2026-05-28
+    python -m qrp_atlas.pipeline.cninfo.run --date 2026-05-28 --date 2026-05-29 --incremental
 """
 import argparse
 import sys
@@ -15,14 +16,15 @@ from qrp_atlas.config.paths import DB_PATH
 from qrp_atlas.contracts.schema import init_database
 
 
-def run(date_str: str, source: str = "eastmoney") -> int:
+def run(date_str: str, source: str = "eastmoney", incremental: bool = False) -> int:
     """执行单日调研公告数据管道"""
     
     if source != "eastmoney":
         print(f"Unsupported source: {source}", file=sys.stderr)
         return 1
     
-    print(f"[cninfo] Starting pipeline for {date_str} (source={source})")
+    mode = "incremental" if incremental else "full"
+    print(f"[cninfo] Starting pipeline for {date_str} ({mode})")
     
     # Fetch
     print(f"[cninfo] Fetching data...")
@@ -35,12 +37,13 @@ def run(date_str: str, source: str = "eastmoney") -> int:
     print(f"[cninfo] Cleaned to {len(cleaned)} unique surveys")
     
     # Load
-    print(f"[cninfo] Loading to database...")
+    print(f"[cninfo] Loading to database ({mode})...")
     con = duckdb.connect(str(DB_PATH))
     try:
         init_database(con)
-        count = upsert_research_visits(con, cleaned)
-        print(f"[cninfo] Loaded {count} records")
+        count = upsert_research_visits(con, cleaned, incremental=incremental)
+        action = "Skipped (IGNORE)" if incremental else "Loaded"
+        print(f"[cninfo] {action} {count} records")
         
         # Verify
         row_count = con.execute(
@@ -57,12 +60,17 @@ def run(date_str: str, source: str = "eastmoney") -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="cninfo 调研公告数据管道")
-    parser.add_argument("--date", required=True, help="日期，格式 YYYY-MM-DD")
+    parser.add_argument("--date", required=True, action="append", help="日期，格式 YYYY-MM-DD（可多次指定）")
     parser.add_argument("--source", default="eastmoney", choices=["eastmoney"], help="数据源（默认 eastmoney）")
+    parser.add_argument("--incremental", action="store_true", help="增量模式：INSERT OR IGNORE 跳过已有记录")
     args = parser.parse_args()
     
-    exit_code = run(args.date, args.source)
-    sys.exit(exit_code)
+    for date_str in args.date:
+        exit_code = run(date_str, args.source, incremental=args.incremental)
+        if exit_code != 0:
+            sys.exit(exit_code)
+    
+    sys.exit(0)
 
 
 if __name__ == "__main__":

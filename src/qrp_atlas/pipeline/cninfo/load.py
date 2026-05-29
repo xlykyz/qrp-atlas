@@ -23,19 +23,17 @@ from qrp_atlas.contracts import (
 )
 
 
-def upsert_research_visits(con: Any, records: list[dict]) -> int:
+def upsert_research_visits(con: Any, records: list[dict], incremental: bool = False) -> int:
     """
     将清洗后的调研记录 upsert 到 cninfo_research_visits 表。
-
-    东财数据使用 INSERT OR REPLACE (始终覆盖);
-    cninfo 数据使用 INSERT OR IGNORE (存在则跳过)。
 
     Args:
         con: DuckDB 连接对象
         records: 清洗后的记录列表
+        incremental: True=INSERT OR IGNORE(跳过已有), False=INSERT OR REPLACE(覆盖)
 
     Returns:
-        实际插入/更新的行数
+        处理的行数
     """
     if not records:
         return 0
@@ -61,9 +59,10 @@ def upsert_research_visits(con: Any, records: list[dict]) -> int:
     col_names = ", ".join(columns)
     placeholders = ", ".join(["?" for _ in columns])
 
-    # 东财数据优先: INSERT OR REPLACE
+    # 主更新 = INSERT OR REPLACE, 增量 = INSERT OR IGNORE
+    action = "INSERT OR IGNORE" if incremental else "INSERT OR REPLACE"
     sql = f"""
-    INSERT OR REPLACE INTO {table_name} ({col_names})
+    {action} INTO {table_name} ({col_names})
     VALUES ({placeholders})
     """
 
