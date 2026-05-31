@@ -23,15 +23,16 @@ def _coerce_params(params: list, columns: list[str]) -> list:
     ]
 
 
-def load_report(con: Any, records: list[dict]) -> int:
+def load_report(con: Any, records: list[dict], incremental: bool = False) -> int:
     """Upsert cleaned research report records into DuckDB.
 
-    Uses INSERT OR IGNORE so that already-existing rows (by primary key
-    info_code) are silently skipped.
+    Uses INSERT OR IGNORE when incremental=True (skip existing rows by primary key),
+    or INSERT OR REPLACE when incremental=False (overwrite existing rows).
 
     Args:
         con: DuckDB connection object.
         records: List of cleaned dicts with snake_case DB field names.
+        incremental: If True, use INSERT OR IGNORE; if False, use INSERT OR REPLACE.
 
     Returns:
         Number of rows actually inserted.
@@ -44,7 +45,8 @@ def load_report(con: Any, records: list[dict]) -> int:
     columns = [c for c in RESEARCH_REPORT_STOCK.column_names() if c != "created_at"]
     col_list = ", ".join(columns)
     placeholders = ", ".join(["?"] * len(columns))
-    insert_sql = f"INSERT OR IGNORE INTO {RESEARCH_REPORT_STOCK.name} ({col_list}) VALUES ({placeholders})"
+    insert_sql_keyword = "INSERT OR IGNORE" if incremental else "INSERT OR REPLACE"
+    insert_sql = f"{insert_sql_keyword} INTO {RESEARCH_REPORT_STOCK.name} ({col_list}) VALUES ({placeholders})"
 
     # Collect info_codes present *before* this load run
     info_codes = [r.get("info_code") for r in records if r.get("info_code")]
