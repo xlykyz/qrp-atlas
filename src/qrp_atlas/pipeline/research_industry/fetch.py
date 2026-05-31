@@ -1,8 +1,8 @@
-"""fetch.py - 研报列表 API 抓取模块"""
+"""fetch.py - 行业研报列表 API 抓取模块"""
 
-import json
 import logging
 import time
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def fetch_report_list(begin_date: str, end_date: str) -> list[dict]:
     """
-    从东方财富研报列表 API 抓取指定日期区间的所有记录。
+    从东方财富行业研报列表 API 抓取指定日期区间的所有记录。
 
     Args:
         begin_date: 开始日期 (YYYY-MM-DD)
@@ -31,25 +31,24 @@ def fetch_report_list(begin_date: str, end_date: str) -> list[dict]:
     page = 1
 
     while True:
-        body: dict[str, Any] = {
+        params = {
+            "qType": 1,
             "beginTime": begin_date,
             "endTime": end_date,
             "industryCode": "*",
-            "ratingChange": "*",
             "rating": "*",
-            "orgCode": "*",
-            "code": "*",
-            "rcode": "",
+            "ratingChange": "*",
             "pageSize": REPORT_PAGE_SIZE,
             "pageNo": page,
         }
+        query_string = urllib.parse.urlencode(params)
+        url = f"{REPORT_API_URL}?{query_string}"
 
         try:
             req = urllib.request.Request(
-                REPORT_API_URL,
-                data=json.dumps(body).encode("utf-8"),
+                url,
                 headers=REPORT_HEADERS,
-                method="POST",
+                method="GET",
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 if resp.status != 200:
@@ -57,6 +56,7 @@ def fetch_report_list(begin_date: str, end_date: str) -> list[dict]:
                         "Page %d returned HTTP %s, skipping", page, resp.status
                     )
                     break
+                import json
                 payload = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             logger.warning("Page %d failed: %s, continuing", page, exc)

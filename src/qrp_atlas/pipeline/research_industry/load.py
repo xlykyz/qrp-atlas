@@ -1,18 +1,18 @@
-"""load.py - 研报数据加载模块
+"""load.py - 行业研报数据加载模块
 
-将清洗后的研报记录 UPSERT 入 DuckDB research_report_stock 表。
+将清洗后的行业研报记录 UPSERT 入 DuckDB research_report_industry 表。
 """
 
 import logging
 from typing import Any
 
-from qrp_atlas.contracts.schema import RESEARCH_REPORT_STOCK
+from qrp_atlas.contracts.schema import RESEARCH_REPORT_INDUSTRY
 
 logger = logging.getLogger(__name__)
 
 # Columns whose DuckDB dtype is numeric but may arrive as empty string
 _NUMERIC_DUCKDB_TYPES = {"DOUBLE", "INTEGER", "BIGINT", "DECIMAL", "FLOAT"}
-_COL_DTYPE = {col.name: col.dtype for col in RESEARCH_REPORT_STOCK.columns}
+_COL_DTYPE = {col.name: col.dtype for col in RESEARCH_REPORT_INDUSTRY.columns}
 
 
 def _coerce_params(params: list, columns: list[str]) -> list:
@@ -24,7 +24,7 @@ def _coerce_params(params: list, columns: list[str]) -> list:
 
 
 def load_report(con: Any, records: list[dict], incremental: bool = False) -> int:
-    """Upsert cleaned research report records into DuckDB.
+    """Upsert cleaned industry research report records into DuckDB.
 
     Uses INSERT OR IGNORE when incremental=True (skip existing rows by primary key),
     or INSERT OR REPLACE when incremental=False (overwrite existing rows).
@@ -42,11 +42,11 @@ def load_report(con: Any, records: list[dict], incremental: bool = False) -> int
         return 0
 
     # Column names from schema (exclude created_at, which has DEFAULT)
-    columns = [c for c in RESEARCH_REPORT_STOCK.column_names() if c != "created_at"]
+    columns = [c for c in RESEARCH_REPORT_INDUSTRY.column_names() if c != "created_at"]
     col_list = ", ".join(columns)
     placeholders = ", ".join(["?"] * len(columns))
     insert_sql_keyword = "INSERT OR IGNORE" if incremental else "INSERT OR REPLACE"
-    insert_sql = f"{insert_sql_keyword} INTO {RESEARCH_REPORT_STOCK.name} ({col_list}) VALUES ({placeholders})"
+    insert_sql = f"{insert_sql_keyword} INTO {RESEARCH_REPORT_INDUSTRY.name} ({col_list}) VALUES ({placeholders})"
 
     # Collect info_codes present *before* this load run
     info_codes = [r.get("info_code") for r in records if r.get("info_code")]
@@ -56,7 +56,7 @@ def load_report(con: Any, records: list[dict], incremental: bool = False) -> int
         codes_before = {
             row[0]
             for row in con.execute(
-                f"SELECT info_code FROM {RESEARCH_REPORT_STOCK.name} WHERE info_code IN ({placeholders_in})",
+                f"SELECT info_code FROM {RESEARCH_REPORT_INDUSTRY.name} WHERE info_code IN ({placeholders_in})",
                 info_codes,
             ).fetchall()
         }
@@ -75,7 +75,7 @@ def load_report(con: Any, records: list[dict], incremental: bool = False) -> int
         codes_after = {
             row[0]
             for row in con.execute(
-                f"SELECT info_code FROM {RESEARCH_REPORT_STOCK.name} WHERE info_code IN ({placeholders_in})",
+                f"SELECT info_code FROM {RESEARCH_REPORT_INDUSTRY.name} WHERE info_code IN ({placeholders_in})",
                 info_codes,
             ).fetchall()
         }

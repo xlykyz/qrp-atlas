@@ -1,4 +1,4 @@
-"""fetch_detail.py - 研报详情页抓取模块"""
+"""fetch_detail.py - 行业研报详情页抓取模块"""
 
 import json
 import logging
@@ -27,12 +27,12 @@ def fetch_report_detail(records: list[dict]) -> list[dict]:
     """
     total = len(records)
     for idx, record in enumerate(records):
-        encode_url = record.get("encodeUrl")
-        if not encode_url:
-            logger.warning("Record at index %d has no encodeUrl – skipping", idx)
+        info_code = record.get("infoCode")
+        if not info_code:
+            logger.warning("Record at index %d has no infoCode – skipping", idx)
             continue
 
-        url = DETAIL_URL_TEMPLATE.format(encode_url=encode_url)
+        url = DETAIL_URL_TEMPLATE.format(info_code=info_code)
 
         try:
             req = urllib.request.Request(
@@ -44,25 +44,25 @@ def fetch_report_detail(records: list[dict]) -> list[dict]:
                 if resp.status != 200:
                     logger.warning(
                         "Detail page for %s returned HTTP %s – skipping",
-                        encode_url,
+                        info_code,
                         resp.status,
                     )
                     continue
                 html = resp.read().decode("utf-8", errors="replace")
         except Exception as exc:
-            logger.warning("Failed to fetch detail page for %s: %s – skipping", encode_url, exc)
+            logger.warning("Failed to fetch detail page for %s: %s – skipping", info_code, exc)
             continue
 
         # 提取 var zwinfo = {...};
         match = re.search(r"var zwinfo = ({.*?});", html, re.DOTALL)
         if not match:
-            logger.warning("Could not find zwinfo in detail page for %s – skipping", encode_url)
+            logger.warning("Could not find zwinfo in detail page for %s – skipping", info_code)
             continue
 
         try:
             zwinfo = json.loads(match.group(1))
         except json.JSONDecodeError as exc:
-            logger.warning("Failed to parse zwinfo JSON for %s: %s – skipping", encode_url, exc)
+            logger.warning("Failed to parse zwinfo JSON for %s: %s – skipping", info_code, exc)
             continue
 
         record["noticeContent"] = zwinfo.get("notice_content") or ""
