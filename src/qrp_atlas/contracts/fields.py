@@ -117,6 +117,7 @@ STOCK_NAME = "stock_name"
 PUBLISH_DATE = "publish_date"
 MARKET = "market"
 COLUMN = "report_column"
+REPORT_COLUMN = COLUMN  # alias
 REPORT_TYPE = "report_type"
 ENCODE_URL = "encode_url"
 EM_RATING_CODE = "em_rating_code"
