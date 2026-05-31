@@ -115,7 +115,7 @@ def save_raw_csv(records: list[dict], date_tag: str) -> str:
     Returns:
         Path to the saved raw CSV file.
     """
-    out_dir = DATA_DIR / "raw" / "research_report"
+    out_dir = DATA_DIR / "raw" / "research_industry"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{date_tag}.csv"
 
@@ -144,7 +144,7 @@ def save_canonical_csv(records: list[dict], date_tag: str) -> str:
     Returns:
         Path to the saved canonical CSV file.
     """
-    out_dir = DATA_DIR / "canonical" / "research_report"
+    out_dir = DATA_DIR / "canonical" / "research_industry"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{date_tag}.csv"
 
