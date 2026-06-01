@@ -132,12 +132,13 @@ def download_pdf(url: str, dest_path: Path, timeout: int = 30) -> bool:
         return False
 
 
-def query_reports(mode: str) -> list[tuple]:
+def query_reports(mode: str, pdf_base_dir: Path) -> list[tuple]:
     """
     从数据库查询行业研报记录。
 
     Args:
         mode: 'today' 或 'all'
+        pdf_base_dir: PDF 存储根目录，用于判断文件是否已存在
 
     Returns:
         记录列表，每条记录为 (info_code, title, industry_name, indv_indu_name, attach_url, publish_date)
@@ -151,11 +152,27 @@ def query_reports(mode: str) -> list[tuple]:
     """
 
     if mode == "today":
-        query += " AND publish_date = CURRENT_DATE"
+        query += " AND publish_date >= CURRENT_DATE - INTERVAL '2 days'"
 
     rows = con.execute(query).fetchall()
     con.close()
-    return rows
+
+    # 过滤掉 PDF 已存在的记录
+    pending = []
+    for row in rows:
+        info_code, title, industry_name, indv_indu_name, attach_url, publish_date = row
+        effective_industry_name = industry_name if industry_name else (indv_indu_name if indv_indu_name else "")
+        pdf_path = build_pdf_path(
+            publish_date=publish_date,
+            title=title,
+            industry_name=effective_industry_name,
+            base_dir=pdf_base_dir,
+        )
+        if pdf_path.exists():
+            continue
+        pending.append(row)
+
+    return pending
 
 
 def main() -> None:
@@ -181,14 +198,16 @@ def main() -> None:
     # 数据目录
     pdf_base_dir = Path(__file__).resolve().parents[4] / "data" / "pdfs" / "research_industry"
 
-    rows = query_reports(args.mode)
+    rows = query_reports(args.mode, pdf_base_dir)
     total = len(rows)
 
     if total == 0:
-        print(f"[download_pdf] No records found with attach_url (mode={args.mode})")
+        if args.mode == "all":
+            print(f"[download_pdf] ✅ PDF 已全量下载，任务完成")
+        else:
+            print(f"[download_pdf] 今日无待下载研报")
         return
 
-    already_exist = 0
     downloaded = 0
     failed = 0
 
@@ -207,23 +226,19 @@ def main() -> None:
         display_title = title[:40] + "..." if len(title) > 40 else title
         print(f"[download_pdf] ({idx}/{total}) Downloading: {display_title}...")
 
-        if pdf_path.exists():
-            already_exist += 1
-            print(f"[download_pdf]   Already exists: {pdf_path}")
+        success = download_pdf(attach_url, pdf_path)
+        if success:
+            downloaded += 1
+            print(f"[download_pdf]   Saved: {pdf_path}")
         else:
-            success = download_pdf(attach_url, pdf_path)
-            if success:
-                downloaded += 1
-                print(f"[download_pdf]   Saved: {pdf_path}")
-            else:
-                failed += 1
-                print(f"[download_pdf]   Failed: {attach_url}")
+            failed += 1
+            print(f"[download_pdf]   Failed: {attach_url}")
 
         # 最后一个不需要等待
         if idx < total:
             time.sleep(sleep_interval())
 
-    print(f"[download_pdf] Summary: {total} total, {already_exist} already exist, {downloaded} downloaded, {failed} failed")
+    print(f"[download_pdf] Summary: {total} pending, {downloaded} downloaded, {failed} failed")
 
 
 if __name__ == "__main__":
