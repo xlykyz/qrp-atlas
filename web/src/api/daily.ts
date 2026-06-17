@@ -1,17 +1,11 @@
+import { normalizeDate } from '../shared/lib/date';
 import type { DailyRow } from '../types';
 import { request } from './client';
 
-/** 将 YYYYMMDD 格式统一转为 YYYY-MM-DD，已是 YYYY-MM-DD 则原样返回 */
-function normalizeDate(date: string): string {
-  if (/^\d{8}$/.test(date)) {
-    const m = date.match(/^(\d{4})(\d{2})(\d{2})$/);
-    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-  }
-  return date;
-}
-
 export function getDailyByDate(date: string): Promise<DailyRow[]> {
-  return request(`/api/daily?date=${normalizeDate(date)}`);
+  return request('/api/daily', {
+    query: { date: normalizeDate(date) },
+  });
 }
 
 export function getDailyByTicker(
@@ -19,10 +13,13 @@ export function getDailyByTicker(
   startDate?: string,
   endDate?: string,
 ): Promise<DailyRow[]> {
-  const params = new URLSearchParams({ ticker });
-  if (startDate) params.set('start_date', normalizeDate(startDate));
-  if (endDate) params.set('end_date', normalizeDate(endDate));
-  return request(`/api/daily?${params.toString()}`);
+  return request('/api/daily', {
+    query: {
+      ticker,
+      start_date: startDate ? normalizeDate(startDate) : undefined,
+      end_date: endDate ? normalizeDate(endDate) : undefined,
+    },
+  });
 }
 
 export function getDailyByDateRange(
@@ -30,10 +27,13 @@ export function getDailyByDateRange(
   endDate?: string,
   limit?: number,
 ): Promise<DailyRow[]> {
-  const params = new URLSearchParams({ start_date: normalizeDate(startDate) });
-  if (endDate) params.set('end_date', normalizeDate(endDate));
-  if (limit) params.set('limit', String(limit));
-  return request(`/api/daily?${params.toString()}`);
+  return request('/api/daily', {
+    query: {
+      start_date: normalizeDate(startDate),
+      end_date: endDate ? normalizeDate(endDate) : undefined,
+      limit,
+    },
+  });
 }
 
 export function getDailyDates(
@@ -41,9 +41,11 @@ export function getDailyDates(
   endDate?: string,
   limit?: number,
 ): Promise<string[]> {
-  const params = new URLSearchParams();
-  if (startDate) params.set('start_date', normalizeDate(startDate));
-  if (endDate) params.set('end_date', normalizeDate(endDate));
-  if (limit) params.set('limit', String(limit));
-  return request(`/api/daily/dates?${params.toString()}`);
+  return request('/api/daily/dates', {
+    query: {
+      start_date: startDate ? normalizeDate(startDate) : undefined,
+      end_date: endDate ? normalizeDate(endDate) : undefined,
+      limit,
+    },
+  });
 }

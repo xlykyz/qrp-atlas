@@ -1,17 +1,18 @@
-import type { TradeRecord, TradeWrite, TradePatch } from '../types';
+import type { TradePatch, TradeRecord, TradeWrite } from '../types';
 import { request } from './client';
 
 export function getTrades(tradeId?: string): Promise<TradeRecord[]> {
-  if (tradeId) {
-    return request(`/api/trades?trade_id=${tradeId}`);
-  }
-  return request('/api/trades');
+  return request('/api/trades', {
+    query: {
+      trade_id: tradeId,
+    },
+  });
 }
 
 export function createTrade(data: TradeWrite): Promise<TradeRecord> {
   return request('/api/trades', {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: data,
   });
 }
 
@@ -21,6 +22,6 @@ export function updateTrade(
 ): Promise<TradeRecord> {
   return request(`/api/trades/${tradeId}`, {
     method: 'PATCH',
-    body: JSON.stringify(data),
+    body: data,
   });
 }

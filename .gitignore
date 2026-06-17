@@ -58,3 +58,9 @@ deploy/*.sh
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Claude Code 工作目录
+.claude/
+
+# Agent 状态（本地管理，不同步）
+.agent/

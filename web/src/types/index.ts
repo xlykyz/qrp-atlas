@@ -76,6 +76,7 @@ export interface TradeWrite {
 export interface TradePatch {
   exit_date?: string | null;
   exit_price?: number | null;
+  half_sell_trigger?: number | null;
   half_sell_date?: string | null;
   half_sell_price?: number | null;
   notes?: string | null;
