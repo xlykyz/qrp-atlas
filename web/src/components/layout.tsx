@@ -89,7 +89,7 @@ export default function Layout() {
       </aside>
 
       {/* Right content area */}
-      <main className="flex flex-1 flex-col bg-white text-slate-900 dark:bg-slate-950 dark:text-white">
+      <main className="flex flex-1 flex-col min-w-0 overflow-hidden bg-white text-slate-900 dark:bg-slate-950 dark:text-white">
         <div className="flex-1 overflow-auto">
           {/* Top bar with title, controls and theme toggle */}
           <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-200 dark:border-slate-800">
