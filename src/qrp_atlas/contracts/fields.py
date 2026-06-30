@@ -94,6 +94,10 @@ DATE_FIELDS = (TRADE_DATE, ENTRY_DATE, EXIT_DATE, HALF_SELL_DATE)
 
 IDENTIFIER_FIELDS = (TICKER, TRADE_ID)
 
+# ── 指数字段 ──
+INDEX_CODE = "index_code"
+INDEX_NAME = "index_name"
+
 # ── 调研公告字段 ──
 SECU_CODE = "secu_code"
 SEC_NAME = "sec_name"
