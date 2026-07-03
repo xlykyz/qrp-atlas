@@ -25,11 +25,11 @@ HEADERS = {
 }
 
 
-def _fetch_pool(endpoint: str, pagesize: int = 200) -> list:
+def _fetch_pool(endpoint: str, pagesize: int = 200, sort: str = "fbt:asc") -> list:
     """拉取东财股池数据"""
     params = (
         f"ut={UT}&dpt={DPT}&Pageindex=0&pagesize={pagesize}"
-        f"&sort=fbt:asc&date={datetime.now().strftime('%Y%m%d')}"
+        f"&sort={sort}&date={datetime.now().strftime('%Y%m%d')}"
     )
     url = f"{BASE}/{endpoint}?{params}"
     req = urllib.request.Request(url, headers=HEADERS)
@@ -106,7 +106,7 @@ def fetch_dt_pool(trade_date: date = None) -> pd.DataFrame:
     if trade_date is None:
         trade_date = date.today()
 
-    pool = _fetch_pool("getTopicDTPool")
+    pool = _fetch_pool("getTopicDTPool", sort="fund:asc")
     records = []
     now = datetime.now()
     for s in pool:
