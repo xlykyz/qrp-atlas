@@ -156,8 +156,9 @@ export default function Overview() {
 
   const filteredData = useMemo(() => {
     return data.filter(row => {
-      if (row.is_st) return boardFilters['ST']
-      return boardFilters[row.board ?? ''] ?? false
+      const boardOk = boardFilters[row.board ?? ''] ?? false
+      const stOk = Boolean(row.is_st && boardFilters['ST'])
+      return boardOk || stOk
     })
   }, [data, boardFilters])
 
