@@ -231,13 +231,16 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
     is_st = df.get(IS_ST, False)
 
     ticker_prefix = df[TICKER].astype(str).str[:3]
-    # 创业板: 300/301/302  科创板: 688/689
+    ticker_suffix = df[TICKER].astype(str).str[-3:]
+    # 创业板: 300/301/302  科创板: 688/689  北交所: .BJ
     is_kcb = ticker_prefix.isin(["688", "689", "300", "301", "302"])
+    is_bj = ticker_suffix == ".BJ"
 
     # 确定每只股票的涨跌幅限制比例
     limit_pct = pd.Series(10.0, index=df.index)             # 主板: 10%
     limit_pct = limit_pct.mask(is_st, 5.0)                  # ST: 5%
     limit_pct = limit_pct.mask(is_kcb & ~is_st, 20.0)       # 科创/创业板非ST: 20%
+    limit_pct = limit_pct.mask(is_bj & ~is_st, 30.0)        # 北交所非ST: 30%
 
     pre_close = df[PRE_CLOSE]
     close = df[CLOSE].round(2)  # 确保价格保留两位小数

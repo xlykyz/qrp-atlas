@@ -14,12 +14,14 @@ def fix_all_limit_flags():
         #   - 主板: 10%
         #   - ST: 5%
         #   - 创业板(300/301/302)/科创板(688/689) 非ST: 20%
+        #   - 北交所(.BJ) 非ST: 30%
 
         con.execute("""
             UPDATE daily_market_snapshot
             SET is_limit_up = CASE
                 WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
                 WHEN is_st THEN close >= ROUND(pre_close * 1.05, 2) - 0.001
+                WHEN RIGHT(ticker, 3) = '.BJ' THEN close >= ROUND(pre_close * 1.30, 2) - 0.001
                 WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
                     THEN close >= ROUND(pre_close * 1.20, 2) - 0.001
                 ELSE close >= ROUND(pre_close * 1.10, 2) - 0.001
@@ -27,6 +29,7 @@ def fix_all_limit_flags():
             is_limit_down = CASE
                 WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
                 WHEN is_st THEN close <= ROUND(pre_close * 0.95, 2) + 0.001
+                WHEN RIGHT(ticker, 3) = '.BJ' THEN close <= ROUND(pre_close * 0.70, 2) + 0.001
                 WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
                     THEN close <= ROUND(pre_close * 0.80, 2) + 0.001
                 ELSE close <= ROUND(pre_close * 0.90, 2) + 0.001
