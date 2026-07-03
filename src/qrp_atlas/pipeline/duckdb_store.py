@@ -223,8 +223,10 @@ def save_zt_pool(df: pd.DataFrame, replace: bool = False) -> None:
             dates = df["trade_date"].unique().tolist()
             for d in dates:
                 con.execute("DELETE FROM zt_pool WHERE trade_date = ?", [d])
+        cols = ", ".join(df.columns)
+        placeholders = ", ".join("?" for _ in df.columns)
         con.register("tmp_df", df)
-        con.execute("INSERT INTO zt_pool SELECT * FROM tmp_df")
+        con.execute(f"INSERT INTO zt_pool ({cols}) SELECT * FROM tmp_df")
     finally:
         con.close()
 
@@ -242,8 +244,9 @@ def save_dt_pool(df: pd.DataFrame, replace: bool = False) -> None:
             dates = df["trade_date"].unique().tolist()
             for d in dates:
                 con.execute("DELETE FROM dt_pool WHERE trade_date = ?", [d])
+        cols = ", ".join(df.columns)
         con.register("tmp_df", df)
-        con.execute("INSERT INTO dt_pool SELECT * FROM tmp_df")
+        con.execute(f"INSERT INTO dt_pool ({cols}) SELECT * FROM tmp_df")
     finally:
         con.close()
 

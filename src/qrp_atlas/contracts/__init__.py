@@ -71,10 +71,16 @@ from .fields import (
     SOURCE,
     # ── 涨跌停股池字段 ──
     FIRST_BLOCK_TIME,
+    LAST_BLOCK_TIME,
     CONSECUTIVE_BOARDS,
     BLOCK_FUND,
     CONSECUTIVE_DAYS,
     OPEN_COUNT,
+    BLAST_COUNT,
+    BLOCK_STATS,
+    TOTAL_SHARES,
+    BOARD_AMOUNT,
+    PE_RATIO,
 )
 
 from .schema import (
@@ -255,8 +261,14 @@ __all__ = [
     "ZT_POOL",
     "DT_POOL",
     "FIRST_BLOCK_TIME",
+    "LAST_BLOCK_TIME",
     "CONSECUTIVE_BOARDS",
     "BLOCK_FUND",
     "CONSECUTIVE_DAYS",
     "OPEN_COUNT",
+    "BLAST_COUNT",
+    "BLOCK_STATS",
+    "TOTAL_SHARES",
+    "BOARD_AMOUNT",
+    "PE_RATIO",
 ]

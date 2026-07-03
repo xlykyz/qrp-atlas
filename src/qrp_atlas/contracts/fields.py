@@ -100,10 +100,16 @@ INDEX_NAME = "index_name"
 
 # ── 涨跌停股池字段 ──
 FIRST_BLOCK_TIME = "first_block_time"
+LAST_BLOCK_TIME = "last_block_time"
 CONSECUTIVE_BOARDS = "consecutive_boards"
 BLOCK_FUND = "block_fund"
 CONSECUTIVE_DAYS = "consecutive_days"
 OPEN_COUNT = "open_count"
+BLAST_COUNT = "blast_count"
+BLOCK_STATS = "block_stats"
+TOTAL_SHARES = "total_shares"
+BOARD_AMOUNT = "board_amount"
+PE_RATIO = "pe_ratio"
 
 # ── 调研公告字段 ──
 SECU_CODE = "secu_code"

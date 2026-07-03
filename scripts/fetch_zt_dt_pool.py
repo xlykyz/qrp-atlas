@@ -10,8 +10,9 @@ from qrp_atlas.contracts.fields import INDUSTRY_NAME
 from qrp_atlas.contracts import (
     TRADE_DATE, TICKER, NAME, CLOSE, PCT_CHANGE,
     AMOUNT, FLOAT_CAP, TURNOVER, CREATED_AT,
-    FIRST_BLOCK_TIME, CONSECUTIVE_BOARDS, BLOCK_FUND,
-    CONSECUTIVE_DAYS, OPEN_COUNT,
+    FIRST_BLOCK_TIME, LAST_BLOCK_TIME, CONSECUTIVE_BOARDS, BLOCK_FUND,
+    CONSECUTIVE_DAYS, OPEN_COUNT, BLAST_COUNT, BLOCK_STATS,
+    TOTAL_SHARES, BOARD_AMOUNT, PE_RATIO,
 )
 from qrp_atlas.pipeline.duckdb_store import save_zt_pool, save_dt_pool
 
@@ -80,10 +81,14 @@ def fetch_zt_pool(trade_date: date = None) -> pd.DataFrame:
             PCT_CHANGE: s.get("zdp"),
             AMOUNT: s.get("amount"),
             FLOAT_CAP: s.get("ltsz"),
+            TOTAL_SHARES: s.get("tshare"),
             TURNOVER: s.get("hs"),
             FIRST_BLOCK_TIME: _normalize_fbt(s.get("fbt")),
+            LAST_BLOCK_TIME: _normalize_fbt(s.get("lbt")),
             CONSECUTIVE_BOARDS: s.get("lbc", 0),
             BLOCK_FUND: s.get("fund"),
+            BLAST_COUNT: s.get("zbc", 0),
+            BLOCK_STATS: json.dumps(s.get("zttj"), ensure_ascii=False) if s.get("zttj") else None,
             INDUSTRY_NAME: s.get("hybk", ""),
             CREATED_AT: now,
         })
@@ -118,10 +123,14 @@ def fetch_dt_pool(trade_date: date = None) -> pd.DataFrame:
             PCT_CHANGE: s.get("zdp"),
             AMOUNT: s.get("amount"),
             FLOAT_CAP: s.get("ltsz"),
+            TOTAL_SHARES: s.get("tshare"),
             TURNOVER: s.get("hs"),
             BLOCK_FUND: s.get("fund"),
-            CONSECUTIVE_DAYS: s.get("dtc", 0),
-            OPEN_COUNT: s.get("kbc", 0),
+            CONSECUTIVE_DAYS: s.get("days", 0),
+            OPEN_COUNT: s.get("oc", 0),
+            LAST_BLOCK_TIME: _normalize_fbt(s.get("lbt")),
+            BOARD_AMOUNT: s.get("fba"),
+            PE_RATIO: s.get("pe"),
             INDUSTRY_NAME: s.get("hybk", ""),
             CREATED_AT: now,
         })
