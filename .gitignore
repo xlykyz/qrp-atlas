@@ -59,6 +59,13 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# 前端 Agent 配置（本地管理，不同步）
+web/AGENTS.md
+web/CLAUDE.md
+web/.agent/
+web/.codex/
+web/.claude/
+
 # Claude Code 工作目录
 .claude/
 
