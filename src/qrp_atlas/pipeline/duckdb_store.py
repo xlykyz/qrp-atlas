@@ -210,6 +210,44 @@ def list_tables() -> List[str]:
         con.close()
 
 
+def save_zt_pool(df: pd.DataFrame, replace: bool = False) -> None:
+    """保存涨停股池数据
+
+    Args:
+        df: 涨停股池 DataFrame
+        replace: 是否替换当日数据
+    """
+    con = get_connection()
+    try:
+        if replace:
+            dates = df["trade_date"].unique().tolist()
+            for d in dates:
+                con.execute("DELETE FROM zt_pool WHERE trade_date = ?", [d])
+        con.register("tmp_df", df)
+        con.execute("INSERT INTO zt_pool SELECT * FROM tmp_df")
+    finally:
+        con.close()
+
+
+def save_dt_pool(df: pd.DataFrame, replace: bool = False) -> None:
+    """保存跌停股池数据
+
+    Args:
+        df: 跌停股池 DataFrame
+        replace: 是否替换当日数据
+    """
+    con = get_connection()
+    try:
+        if replace:
+            dates = df["trade_date"].unique().tolist()
+            for d in dates:
+                con.execute("DELETE FROM dt_pool WHERE trade_date = ?", [d])
+        con.register("tmp_df", df)
+        con.execute("INSERT INTO dt_pool SELECT * FROM tmp_df")
+    finally:
+        con.close()
+
+
 def get_table_info(table_name: str) -> pd.DataFrame:
     """获取表结构信息"""
     con = get_connection(read_only=True)

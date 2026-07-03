@@ -98,6 +98,13 @@ IDENTIFIER_FIELDS = (TICKER, TRADE_ID)
 INDEX_CODE = "index_code"
 INDEX_NAME = "index_name"
 
+# ── 涨跌停股池字段 ──
+FIRST_BLOCK_TIME = "first_block_time"
+CONSECUTIVE_BOARDS = "consecutive_boards"
+BLOCK_FUND = "block_fund"
+CONSECUTIVE_DAYS = "consecutive_days"
+OPEN_COUNT = "open_count"
+
 # ── 调研公告字段 ──
 SECU_CODE = "secu_code"
 SEC_NAME = "sec_name"

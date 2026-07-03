@@ -64,6 +64,8 @@ from .fields import (
     INDUSTRY_CODE, INDUSTRY_NAME, EM_INDUSTRY_CODE,
     NOTICE_CONTENT, ATTACH_URL,
     INDEX_CODE, INDEX_NAME,
+    FIRST_BLOCK_TIME, CONSECUTIVE_BOARDS, BLOCK_FUND,
+    CONSECUTIVE_DAYS, OPEN_COUNT,
 )
 
 
@@ -373,7 +375,47 @@ INDEX_DAILY = TableSchema(
     primary_key=(TRADE_DATE, INDEX_CODE),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY)
+ZT_POOL = TableSchema(
+    name="zt_pool",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(CLOSE, "DOUBLE"),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(AMOUNT, "DOUBLE"),
+        ColumnSpec(FLOAT_CAP, "DOUBLE"),
+        ColumnSpec(TURNOVER, "DOUBLE"),
+        ColumnSpec(FIRST_BLOCK_TIME, "VARCHAR"),
+        ColumnSpec(CONSECUTIVE_BOARDS, "INTEGER"),
+        ColumnSpec(BLOCK_FUND, "DOUBLE"),
+        ColumnSpec(INDUSTRY_NAME, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, TICKER),
+)
+
+DT_POOL = TableSchema(
+    name="dt_pool",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(CLOSE, "DOUBLE"),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(AMOUNT, "DOUBLE"),
+        ColumnSpec(FLOAT_CAP, "DOUBLE"),
+        ColumnSpec(TURNOVER, "DOUBLE"),
+        ColumnSpec(BLOCK_FUND, "DOUBLE"),
+        ColumnSpec(CONSECUTIVE_DAYS, "INTEGER"),
+        ColumnSpec(OPEN_COUNT, "INTEGER"),
+        ColumnSpec(INDUSTRY_NAME, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, TICKER),
+)
+
+ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 

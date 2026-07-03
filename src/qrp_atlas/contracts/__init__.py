@@ -69,6 +69,12 @@ from .fields import (
     ADJUNCT_URL,
     ADJUNCT_SIZE,
     SOURCE,
+    # ── 涨跌停股池字段 ──
+    FIRST_BLOCK_TIME,
+    CONSECUTIVE_BOARDS,
+    BLOCK_FUND,
+    CONSECUTIVE_DAYS,
+    OPEN_COUNT,
 )
 
 from .schema import (
@@ -81,7 +87,11 @@ from .schema import (
     TRADING_CALENDAR,
     ADJ_FACTOR_CHANGES,
     CNINFO_RESEARCH_VISITS,
+    RESEARCH_REPORT_STOCK,
+    RESEARCH_REPORT_INDUSTRY,
     INDEX_DAILY,
+    ZT_POOL,
+    DT_POOL,
     ALL_TABLES,
     TABLE_BY_NAME,
     get_table,
@@ -242,4 +252,11 @@ __all__ = [
     "convert_date",
     "canonicalize",
     "quick_validate",
+    "ZT_POOL",
+    "DT_POOL",
+    "FIRST_BLOCK_TIME",
+    "CONSECUTIVE_BOARDS",
+    "BLOCK_FUND",
+    "CONSECUTIVE_DAYS",
+    "OPEN_COUNT",
 ]
