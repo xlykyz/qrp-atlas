@@ -245,14 +245,13 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
     pre_close = df[PRE_CLOSE]
     close = df[CLOSE].round(2)  # 确保价格保留两位小数
 
-    # 精确计算涨跌停价 → round(昨收 × (1 ± 比例), 2)
-    limit_up_price = (pre_close * (1 + limit_pct / 100)).round(2)
-    limit_down_price = (pre_close * (1 - limit_pct / 100)).round(2)
+    # 精确计算涨跌停价 → floor(昨收 × (1 ± 比例), 2) 向下取整
+    limit_up_price = (pre_close * (1 + limit_pct / 100) * 100).astype(int) / 100
+    limit_down_price = (pre_close * (1 - limit_pct / 100) * 100).astype(int) / 100
 
-    # 容忍 0.001 的浮点误差
-    EPS = 0.001
-    df[IS_LIMIT_UP] = close >= limit_up_price - EPS
-    df[IS_LIMIT_DOWN] = close <= limit_down_price + EPS
+    # 跌停判定: close <= 跌停价（向下取整到分）
+    df[IS_LIMIT_UP] = close >= limit_up_price
+    df[IS_LIMIT_DOWN] = close <= limit_down_price
 
     # 昨收缺失或为 0（新股首日）→ 不判定涨跌停
     mask_no_pre = pre_close.isna() | (pre_close == 0)

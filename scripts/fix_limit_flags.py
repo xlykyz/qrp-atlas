@@ -20,19 +20,19 @@ def fix_all_limit_flags():
             UPDATE daily_market_snapshot
             SET is_limit_up = CASE
                 WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
-                WHEN is_st THEN close >= ROUND(pre_close * 1.05, 2) - 0.001
-                WHEN RIGHT(ticker, 3) = '.BJ' THEN close >= ROUND(pre_close * 1.30, 2) - 0.001
+                WHEN is_st THEN close >= FLOOR(pre_close * 1.05 * 100) / 100.0
+                WHEN RIGHT(ticker, 3) = '.BJ' THEN close >= FLOOR(pre_close * 1.30 * 100) / 100.0
                 WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
-                    THEN close >= ROUND(pre_close * 1.20, 2) - 0.001
-                ELSE close >= ROUND(pre_close * 1.10, 2) - 0.001
+                    THEN close >= FLOOR(pre_close * 1.20 * 100) / 100.0
+                ELSE close >= FLOOR(pre_close * 1.10 * 100) / 100.0
             END,
             is_limit_down = CASE
                 WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
-                WHEN is_st THEN close <= ROUND(pre_close * 0.95, 2) + 0.001
-                WHEN RIGHT(ticker, 3) = '.BJ' THEN close <= ROUND(pre_close * 0.70, 2) + 0.001
+                WHEN is_st THEN close <= FLOOR(pre_close * 0.95 * 100) / 100.0
+                WHEN RIGHT(ticker, 3) = '.BJ' THEN close <= FLOOR(pre_close * 0.70 * 100) / 100.0
                 WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
-                    THEN close <= ROUND(pre_close * 0.80, 2) + 0.001
-                ELSE close <= ROUND(pre_close * 0.90, 2) + 0.001
+                    THEN close <= FLOOR(pre_close * 0.80 * 100) / 100.0
+                ELSE close <= FLOOR(pre_close * 0.90 * 100) / 100.0
             END
         """)
 
