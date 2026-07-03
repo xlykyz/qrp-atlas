@@ -161,7 +161,6 @@ function calcMACD(data: { time: Time; close: number }[]): {
 const BG_COLOR = '#0f172a'
 const TEXT_COLOR = '#94a3b8'
 const GRID_COLOR = '#1e293b'
-const BORDER_COLOR = '#334155'
 const UP_COLOR = '#22c55e'
 const DOWN_COLOR = '#ef4444'
 const WICK_UP_COLOR = '#22c55e'
@@ -206,7 +205,7 @@ export default function StockReview() {
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<StockInfo[]>([])
   const [stockList, setStockList] = useState<StockInfo[]>([])
-  const [stockListError, setStockListError] = useState(false)
+  const [, setStockListError] = useState(false)
   const [selectedStock, setSelectedStock] = useState<{
     ticker: string
     name: string
@@ -286,7 +285,7 @@ export default function StockReview() {
   const [subChart2Indicator, setSubChart2Indicator] = useState<'pct_change' | 'turnover' | 'rsi' | 'macd'>('pct_change')
 
   // ── state: phase notes ──
-  const [phaseRecord, setPhaseRecord] = useState<PhaseRecord | null>(null)
+  const [, setPhaseRecord] = useState<PhaseRecord | null>(null)
   const [phase, setPhase] = useState<string>('')
   const [M1_core, setM1_core] = useState(false)
   const [M2_front, setM2_front] = useState(false)
@@ -338,7 +337,6 @@ export default function StockReview() {
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
 
   const prevSubChart1Ref = useRef(subChart1Indicator)
-  const prevSubChart2Ref = useRef(subChart2Indicator)
   const initialFillDone = useRef(false)
 
   const hasAutoLoaded = useRef(false)
@@ -430,7 +428,7 @@ export default function StockReview() {
       setSearchResults(
         matched.slice(0, 20).map((r) => ({ ticker: r.ticker, name: r.name ?? r.ticker })),
       )
-    } catch (err) {
+    } catch {
       // Fallback: try a few recent dates
       try {
         const fallbackDate = new Date(now)
@@ -499,6 +497,7 @@ export default function StockReview() {
 
   useEffect(() => {
     if (!selectedStock) return
+    const selectedTicker = selectedStock.ticker
 
     let cancelled = false
 
@@ -507,7 +506,7 @@ export default function StockReview() {
       setDataError(null)
       try {
         const rows = await getDailyByTicker(
-          selectedStock.ticker,
+          selectedTicker,
           startDate,
           endDate,
         )
@@ -618,7 +617,7 @@ export default function StockReview() {
   // Merge built-in and custom MA configs
   const allMAConfigs = useMemo(() => {
     const builtin = MA_CONFIGS.map(cfg => ({ ...cfg, label: cfg.label }))
-    const custom = customMAs.map((m, i) => ({
+    const custom = customMAs.map((m) => ({
       key: `custom_${m.period}`,
       label: `MA${m.period}`,
       period: m.period,
@@ -664,7 +663,9 @@ export default function StockReview() {
       prevSubChart1Ref.current = subChart1Indicator
       const chart1 = volumeChart.current
       if (chart1 && volumeSeries.current) {
-        try { chart1.removeSeries(volumeSeries.current) } catch {}
+        try { chart1.removeSeries(volumeSeries.current) } catch {
+            // Series may already be detached during chart rebuild.
+          }
         volumeSeries.current = null
       }
       if (chart1) {
@@ -685,7 +686,9 @@ export default function StockReview() {
         const oldSeries = [pctSeries.current, subChart2MACDLine.current, subChart2SignalLine.current, subChart2Histogram.current]
         for (const s of oldSeries) {
           if (s) {
-            try { chart2.removeSeries(s) } catch {}
+            try { chart2.removeSeries(s) } catch {
+            // Series may already be detached during chart rebuild.
+          }
           }
         }
         pctSeries.current = null
@@ -697,11 +700,11 @@ export default function StockReview() {
         if (needsMACD) {
           subChart2Histogram.current = chart2.addSeries(HistogramSeries, { color: '#22c55e' })
           subChart2MACDLine.current = chart2.addSeries(LineSeries, {
-            color: '#3b82f6', lineWidth: 1.5, priceLineVisible: false,
+            color: '#3b82f6', lineWidth: 2, priceLineVisible: false,
             lastValueVisible: false, crosshairMarkerVisible: true,
           })
           subChart2SignalLine.current = chart2.addSeries(LineSeries, {
-            color: '#f59e0b', lineWidth: 1.5, priceLineVisible: false,
+            color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
             lastValueVisible: false, crosshairMarkerVisible: true,
           })
         } else {
@@ -1376,7 +1379,6 @@ export default function StockReview() {
                   width: w, height: 400,
                   layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                   grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-                  borderColor: BORDER_COLOR,
                   crosshair: {
                     mode: CrosshairMode.Normal,
                     vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
@@ -1384,13 +1386,13 @@ export default function StockReview() {
                   },
                   handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
                   handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
-                  timeScale: { borderColor: BORDER_COLOR, timeVisible: false, secondsVisible: false, tickMarkFormatter: (time, tickMarkType) => {
+                  timeScale: { timeVisible: false, secondsVisible: false, tickMarkFormatter: (time: Time) => {
                     const date = typeof time === 'string' ? new Date(time) : new Date((time as number) * 1000)
                     const month = date.getMonth() + 1
                     const day = date.getDate()
                     return `${month}/${day}`
                   } },
-                  rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
+                  rightPriceScale: { minimumWidth: 60 },
                 })
                 const candles = main.addSeries(CandlestickSeries, {
                   upColor: UP_COLOR, downColor: DOWN_COLOR,
@@ -1506,7 +1508,6 @@ export default function StockReview() {
                     width: w, height: 120,
                     layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                     grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-                    borderColor: BORDER_COLOR,
                     crosshair: {
                       mode: CrosshairMode.Normal,
                       vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
@@ -1514,8 +1515,8 @@ export default function StockReview() {
                     },
                     handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
                     handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
-                    timeScale: { borderColor: BORDER_COLOR, visible: false },
-                    rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
+                    timeScale: { visible: false },
+                    rightPriceScale: { minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
                   })
                   const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
                   volumeChart.current = vol
@@ -1570,7 +1571,6 @@ export default function StockReview() {
                     width: w, height: 80,
                     layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                     grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
-                    borderColor: BORDER_COLOR,
                     crosshair: {
                       mode: CrosshairMode.Normal,
                       vertLine: { color: '#6366f1', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#6366f1' },
@@ -1578,8 +1578,8 @@ export default function StockReview() {
                     },
                     handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
                     handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
-                    timeScale: { borderColor: BORDER_COLOR, visible: false },
-                    rightPriceScale: { borderColor: BORDER_COLOR, minimumWidth: 60 },
+                    timeScale: { visible: false },
+                    rightPriceScale: { minimumWidth: 60 },
                   })
                   const pctLine = pct.addSeries(LineSeries, {
                     color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
@@ -1659,7 +1659,7 @@ export default function StockReview() {
             {/* Phase select */}
             <div className="flex items-center gap-3">
               <label className="text-sm text-slate-500 dark:text-slate-400 whitespace-nowrap">市场阶段</label>
-              <Select value={phase} onValueChange={setPhase}>
+              <Select value={phase} onValueChange={(value) => setPhase(value ?? '')}>
                 <SelectTrigger className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white">
                   <SelectValue placeholder="选择阶段" />
                 </SelectTrigger>
@@ -1767,7 +1767,7 @@ export default function StockReview() {
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">路径类型</label>
-                    <Select value={newPathType} onValueChange={setNewPathType}>
+                    <Select value={newPathType} onValueChange={(value) => setNewPathType(value ?? '')}>
                       <SelectTrigger className="w-full border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm">
                         <SelectValue placeholder="选择路径" />
                       </SelectTrigger>

@@ -141,7 +141,6 @@ export default function ReviewLogs() {
     } finally {
       setPhaseLoading(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiStartDate, apiEndDate])
 
   // ── fetch trade ──
@@ -177,7 +176,6 @@ export default function ReviewLogs() {
     if (phaseLoaded) {
       fetchPhase()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiStartDate, apiEndDate])
 
   // Refresh

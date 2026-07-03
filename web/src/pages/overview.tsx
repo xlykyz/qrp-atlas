@@ -16,19 +16,19 @@ import type { DailyRow } from '@/types'
 
 // ── helpers ──
 
-function formatPct(v: number | null): string {
+function formatPct(v: number | null | undefined): string {
   if (v == null) return '—'
   const sign = v > 0 ? '+' : ''
   return `${sign}${v.toFixed(2)}%`
 }
 
-function formatAmount(v: number | null): string {
+function formatAmount(v: number | null | undefined): string {
   if (v == null) return '—'
   // amount 单位已修正为元，转为亿元
   return `${(v / 1e8).toFixed(2)}亿`
 }
 
-function pctColor(v: number | null): string {
+function pctColor(v: number | null | undefined): string {
   if (v == null) return 'text-gray-400'
   if (v > 0) return 'text-red-500'
   if (v < 0) return 'text-green-500'
@@ -77,7 +77,7 @@ export default function Overview() {
       setError(null)
       try {
         // Step 1: Fetch trading dates to find the right anchor date
-        const dates = await getDailyDates(null, todayYMD, 2)
+        const dates = await getDailyDates(undefined, todayYMD, 2)
         if (cancelled) return
 
         const now = new Date()
@@ -205,8 +205,8 @@ export default function Overview() {
 
   const sortedData = useMemo(() => {
     return [...filteredData].sort((a, b) => {
-      const aVal = (a as any)[sortKey] ?? 0
-      const bVal = (b as any)[sortKey] ?? 0
+      const aVal = a[sortKey] ?? 0
+      const bVal = b[sortKey] ?? 0
       if (typeof aVal === 'string' && typeof bVal === 'string') {
         return sortDir === 'desc' ? bVal.localeCompare(aVal) : aVal.localeCompare(bVal)
       }

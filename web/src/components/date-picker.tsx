@@ -69,7 +69,6 @@ export function DatePicker({ value, onChange, disabled }: DatePickerProps) {
             if (date) onChange(format(date, 'yyyy-MM-dd'))
           }}
           disabled={isDisabled}
-          initialFocus
         />
       </PopoverContent>
     </Popover>

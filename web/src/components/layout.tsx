@@ -33,7 +33,7 @@ export default function Layout() {
   // initial apply
   useEffect(() => {
     applyTheme(isDark)
-  }, [])
+  }, [isDark])
 
   // listen for system preference changes
   useEffect(() => {
