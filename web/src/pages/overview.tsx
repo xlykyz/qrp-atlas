@@ -156,10 +156,8 @@ export default function Overview() {
 
   const filteredData = useMemo(() => {
     return data.filter(row => {
-      // ST 特殊处理
-      const stOk = boardFilters['ST'] || !row.is_st
-      const boardOk = boardFilters[row.board ?? ''] ?? false
-      return stOk && boardOk
+      if (row.is_st) return boardFilters['ST']
+      return boardFilters[row.board ?? ''] ?? false
     })
   }, [data, boardFilters])
 

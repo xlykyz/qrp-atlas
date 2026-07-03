@@ -9,10 +9,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { querySql } from '@/api/dev'
 import { listTables, queryTable } from '@/api/tables'
 import type { ColumnInfo } from '@/api/tables'
 
 // ── helpers ──
+
+type DataMode = 'table' | 'sql'
 
 type NumericStats = {
   count: number
@@ -45,7 +48,7 @@ function isNumeric(val: unknown): boolean {
 }
 
 function isNumericType(type: string): boolean {
-  return ['DOUBLE', 'BIGINT', 'INTEGER', 'DECIMAL', 'FLOAT', 'INT'].includes(type.toUpperCase())
+  return ['DOUBLE', 'BIGINT', 'INTEGER', 'DECIMAL', 'FLOAT', 'INT', 'HUGEINT', 'UBIGINT', 'UINTEGER'].includes(type.toUpperCase())
 }
 
 function valueMatches(row: Record<string, unknown>, keyword: string): boolean {
@@ -118,17 +121,26 @@ function estimateColumnWidth(col: ColumnInfo, sampleValues: unknown[]): number {
   return Math.max(px, 90)
 }
 
+const SQL_EXAMPLES = [
+  'select * from daily_market_snapshot where pct_5d is null limit 200',
+  'select trade_date, count(*) as rows from daily_market_snapshot group by trade_date order by trade_date desc limit 30',
+  'show tables',
+]
+
 // ── component ──
 
 export default function RawPreview() {
   const navigate = useNavigate()
+
+  // View mode
+  const [mode, setMode] = useState<DataMode>('table')
 
   // Table list
   const [tables, setTables] = useState<string[]>([])
   const [selectedTable, setSelectedTable] = useState<string>('daily_market_snapshot')
   const [tablesLoading, setTablesLoading] = useState(true)
 
-  // Table data
+  // Shared result data
   const [columns, setColumns] = useState<ColumnInfo[]>([])
   const [data, setData] = useState<Record<string, unknown>[]>([])
   const [total, setTotal] = useState(0)
@@ -136,10 +148,18 @@ export default function RawPreview() {
   const [error, setError] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
 
-  // Query state
+  // Table query state
   const [page, setPage] = useState(1)
   const [pageInput, setPageInput] = useState('1')
   const [pageSize, setPageSize] = useState(500)
+
+  // SQL query state
+  const [sqlText, setSqlText] = useState(SQL_EXAMPLES[0])
+  const [sqlHasRun, setSqlHasRun] = useState(false)
+  const [sqlTruncated, setSqlTruncated] = useState(false)
+  const [sqlLimit, setSqlLimit] = useState<number | null>(null)
+
+  // Client-side exploration state
   const [keyword, setKeyword] = useState('')
   const [selectedNumericColumn, setSelectedNumericColumn] = useState<string>('')
 
@@ -159,6 +179,16 @@ export default function RawPreview() {
     const nextPage = clampPage(Number(pageInput))
     setPage(nextPage)
     setPageInput(String(nextPage))
+  }
+
+  function resetResult() {
+    setColumns([])
+    setData([])
+    setTotal(0)
+    setError(null)
+    setSortKey('')
+    setSortDir('desc')
+    setSelectedNumericColumn('')
   }
 
   // ── Derived metadata ──
@@ -250,10 +280,20 @@ export default function RawPreview() {
     setKeyword('')
   }, [selectedTable, pageSize])
 
-  // ── Fetch data when selectedTable/page changes ──
+  useEffect(() => {
+    setKeyword('')
+    setSortKey('')
+    setSortDir('desc')
+    if (mode === 'sql') {
+      setLoading(false)
+      resetResult()
+    }
+  }, [mode])
+
+  // ── Fetch table data when selectedTable/page changes ──
 
   useEffect(() => {
-    if (!selectedTable) return
+    if (mode !== 'table' || !selectedTable) return
     let cancelled = false
 
     async function loadData() {
@@ -261,6 +301,8 @@ export default function RawPreview() {
       setError(null)
       setSortKey('')
       setSortDir('desc')
+      setSqlTruncated(false)
+      setSqlLimit(null)
       try {
         const result = await queryTable(selectedTable, pageSize, offset)
         if (cancelled) return
@@ -279,7 +321,7 @@ export default function RawPreview() {
 
     loadData()
     return () => { cancelled = true }
-  }, [selectedTable, pageSize, offset, reloadToken])
+  }, [mode, selectedTable, pageSize, offset, reloadToken])
 
   useEffect(() => {
     if (selectedNumericColumn && numericColumns.some((col) => col.name === selectedNumericColumn)) return
@@ -294,6 +336,39 @@ export default function RawPreview() {
     } else {
       setSortKey(key)
       setSortDir('desc')
+    }
+  }
+
+  async function handleSqlExecute() {
+    const sql = sqlText.trim()
+    if (!sql) {
+      setError('SQL 不能为空')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    setSortKey('')
+    setSortDir('desc')
+    setKeyword('')
+    setSqlHasRun(true)
+
+    try {
+      const result = await querySql(sql)
+      setColumns(result.columns)
+      setData(result.rows)
+      setTotal(result.total)
+      setSqlLimit(result.limit ?? null)
+      setSqlTruncated(Boolean(result.truncated))
+    } catch (err) {
+      setColumns([])
+      setData([])
+      setTotal(0)
+      setSqlLimit(null)
+      setSqlTruncated(false)
+      setError(err instanceof Error ? err.message : 'SQL 执行失败')
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -317,7 +392,9 @@ export default function RawPreview() {
 
   const isBusy = loading || tablesLoading
   const shownStart = total === 0 ? 0 : offset + 1
-  const shownEnd = Math.min(offset + data.length, total)
+  const shownEnd = mode === 'table' ? Math.min(offset + data.length, total) : data.length
+  const hasResult = data.length > 0 || columns.length > 0
+  const shouldShowEmpty = !isBusy && !hasResult && (mode === 'table' || sqlHasRun)
 
   // ── Register header controls ──
 
@@ -333,7 +410,7 @@ export default function RawPreview() {
         <Select
           value={selectedTable}
           onValueChange={(v) => setSelectedTable(v ?? selectedTable)}
-          disabled={isBusy}
+          disabled={isBusy || mode === 'sql'}
         >
           <SelectTrigger className="w-64">
             <SelectValue />
@@ -352,7 +429,7 @@ export default function RawPreview() {
       setPageTitle('')
       setHeaderControls(null)
     }
-  }, [selectedTable, tables, isBusy, setPageTitle, setHeaderControls])
+  }, [selectedTable, tables, isBusy, mode, setPageTitle, setHeaderControls])
 
   // ── Row click ──
 
@@ -363,7 +440,7 @@ export default function RawPreview() {
     [navigate],
   )
 
-  const isSnapshotTable = selectedTable === 'daily_market_snapshot'
+  const isSnapshotTable = mode === 'table' && selectedTable === 'daily_market_snapshot'
 
   // ── Loading state ──
 
@@ -372,45 +449,6 @@ export default function RawPreview() {
       <div className="min-h-screen p-6">
         <div className="flex items-center justify-center h-64">
           <p className="text-lg text-slate-500 dark:text-gray-400">加载表列表...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (loading && data.length === 0) {
-    return (
-      <div className="min-h-screen p-6">
-        <div className="flex items-center justify-center h-64">
-          <p className="text-lg text-slate-500 dark:text-gray-400">正在加载数据...</p>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Error state ──
-
-  if (error && data.length === 0 && !loading) {
-    return (
-      <div className="min-h-screen p-6">
-        <div className="flex items-center justify-center h-64">
-          <div className="text-center">
-            <p className="text-lg text-red-400">{error}</p>
-            <Button onClick={() => setReloadToken((v) => v + 1)} className="mt-4" variant="outline">
-              重试
-            </Button>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const isEmpty = !isBusy && data.length === 0
-
-  if (isEmpty) {
-    return (
-      <div className="min-h-screen p-6">
-        <div className="flex items-center justify-center h-64">
-          <p className="text-lg text-slate-500 dark:text-gray-400">当前表无数据</p>
         </div>
       </div>
     )
@@ -463,79 +501,153 @@ export default function RawPreview() {
 
   return (
     <div className="w-full min-w-0 max-w-full overflow-hidden min-h-screen p-6">
-      <div className="mb-4 flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
-          当前页搜索
-          <input
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="代码、名称、日期或任意值"
-            className="h-9 w-72 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
-          每页行数
-          <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))} disabled={isBusy}>
-            <SelectTrigger className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {[100, 200, 500, 1000].map((size) => (
-                <SelectItem key={size} value={String(size)}>{size}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
-          数值分布
-          <Select value={selectedNumericColumn} onValueChange={(v) => setSelectedNumericColumn(v ?? '')} disabled={numericColumns.length === 0}>
-            <SelectTrigger className="w-48">
-              <SelectValue placeholder="无数值列" />
-            </SelectTrigger>
-            <SelectContent>
-              {numericColumns.map((col) => (
-                <SelectItem key={col.name} value={col.name}>{col.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
-        <Button variant="outline" onClick={() => setReloadToken((v) => v + 1)} disabled={isBusy}>
-          刷新
-        </Button>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900">
+          <button
+            type="button"
+            onClick={() => setMode('table')}
+            className={`rounded px-3 py-1.5 text-sm ${mode === 'table' ? 'bg-slate-200 text-slate-900 dark:bg-slate-700 dark:text-white' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'}`}
+          >
+            表预览
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('sql')}
+            className={`rounded px-3 py-1.5 text-sm ${mode === 'sql' ? 'bg-slate-200 text-slate-900 dark:bg-slate-700 dark:text-white' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'}`}
+          >
+            SQL 查询
+          </button>
+        </div>
+        {mode === 'table' && (
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
+              当前页搜索
+              <input
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                placeholder="代码、名称、日期或任意值"
+                className="h-9 w-72 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
+              每页行数
+              <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))} disabled={isBusy}>
+                <SelectTrigger className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {[100, 200, 500, 1000].map((size) => (
+                    <SelectItem key={size} value={String(size)}>{size}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+            <Button variant="outline" onClick={() => setReloadToken((v) => v + 1)} disabled={isBusy}>
+              刷新
+            </Button>
+          </div>
+        )}
+        {mode === 'sql' && hasResult && (
+          <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
+            结果内搜索
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="筛选当前结果"
+              className="h-9 w-72 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+            />
+          </label>
+        )}
       </div>
 
-      <div className="mb-6 grid gap-3 lg:grid-cols-[repeat(3,minmax(0,220px))_minmax(320px,1fr)]">
-        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
-          <CardContent className="p-4">
-            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">总行数</p>
-            <p className="text-2xl font-bold text-slate-900 dark:text-white">{total.toLocaleString()}</p>
-          </CardContent>
-        </Card>
-        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
-          <CardContent className="p-4">
-            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">当前窗口</p>
-            <p className="text-xl font-semibold text-slate-900 dark:text-white">{shownStart.toLocaleString()}-{shownEnd.toLocaleString()}</p>
-          </CardContent>
-        </Card>
-        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
-          <CardContent className="p-4">
-            <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">过滤结果</p>
-            <p className="text-xl font-semibold text-slate-900 dark:text-white">{sortedData.length.toLocaleString()}</p>
-          </CardContent>
-        </Card>
-        <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
-          <CardContent className="p-4">
-            <p className="text-sm text-slate-500 dark:text-gray-400 mb-2">列类型</p>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(columnTypeCounts).map(([type, count]) => (
-                <span key={type} className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                  {type} x {count}
-                </span>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {mode === 'sql' && (
+        <div className="mb-6 rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="mb-3 flex flex-wrap gap-2">
+            {SQL_EXAMPLES.map((sql) => (
+              <Button key={sql} variant="outline" size="sm" onClick={() => setSqlText(sql)}>
+                {sql.startsWith('show') ? 'SHOW TABLES' : sql.includes('is null') ? '空值样例' : '分组样例'}
+              </Button>
+            ))}
+          </div>
+          <textarea
+            value={sqlText}
+            onChange={(e) => setSqlText(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                void handleSqlExecute()
+              }
+            }}
+            rows={6}
+            spellCheck={false}
+            className="mb-3 w-full resize-y rounded-md border border-slate-200 bg-white p-3 font-mono text-sm text-slate-900 outline-none focus:border-slate-400 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => void handleSqlExecute()} disabled={loading || !sqlText.trim()}>
+              {loading ? '执行中...' : '执行 SQL'}
+            </Button>
+            {sqlTruncated && (
+              <span className="text-sm text-amber-600 dark:text-amber-400">
+                结果已截断，最多返回 {sqlLimit?.toLocaleString() ?? '限制'} 行
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {hasResult && (
+        <div className="mb-4 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs text-slate-500 dark:text-gray-400">
+            数值分布
+            <Select value={selectedNumericColumn} onValueChange={(v) => setSelectedNumericColumn(v ?? '')} disabled={numericColumns.length === 0}>
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder="无数值列" />
+              </SelectTrigger>
+              <SelectContent>
+                {numericColumns.map((col) => (
+                  <SelectItem key={col.name} value={col.name}>{col.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        </div>
+      )}
+
+      {hasResult && (
+        <div className="mb-6 grid gap-3 lg:grid-cols-[repeat(3,minmax(0,220px))_minmax(320px,1fr)]">
+          <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
+            <CardContent className="p-4">
+              <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">总行数</p>
+              <p className="text-2xl font-bold text-slate-900 dark:text-white">{total.toLocaleString()}</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
+            <CardContent className="p-4">
+              <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">当前窗口</p>
+              <p className="text-xl font-semibold text-slate-900 dark:text-white">
+                {mode === 'table' ? `${shownStart.toLocaleString()}-${shownEnd.toLocaleString()}` : data.length.toLocaleString()}
+              </p>
+            </CardContent>
+          </Card>
+          <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
+            <CardContent className="p-4">
+              <p className="text-sm text-slate-500 dark:text-gray-400 mb-1">过滤结果</p>
+              <p className="text-xl font-semibold text-slate-900 dark:text-white">{sortedData.length.toLocaleString()}</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800">
+            <CardContent className="p-4">
+              <p className="text-sm text-slate-500 dark:text-gray-400 mb-2">列类型</p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(columnTypeCounts).map(([type, count]) => (
+                  <span key={type} className="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                    {type} x {count}
+                  </span>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {numericStats && (
         <div className="mb-6 rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
@@ -563,19 +675,29 @@ export default function RawPreview() {
         </div>
       )}
 
-      {/* Error banner */}
       {error && (
         <div className="mb-4 rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/30 p-3 text-sm text-red-600 dark:text-red-400">
           {error}
         </div>
       )}
 
-      {/* Data table */}
-      {!isEmpty && (
+      {loading && !hasResult && (
+        <div className="flex items-center justify-center h-64">
+          <p className="text-lg text-slate-500 dark:text-gray-400">正在加载数据...</p>
+        </div>
+      )}
+
+      {shouldShowEmpty && (
+        <div className="flex items-center justify-center h-64 rounded-lg border border-slate-200 bg-slate-50 dark:border-slate-800 dark:bg-slate-900/50">
+          <p className="text-lg text-slate-500 dark:text-gray-400">没有返回数据</p>
+        </div>
+      )}
+
+      {hasResult && (
         <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 w-full min-w-0 max-w-full overflow-hidden">
           <div
             className="w-full min-w-0 max-w-full overflow-x-auto overflow-y-auto"
-            style={{ maxHeight: 'calc(100vh - 390px)' }}
+            style={{ maxHeight: mode === 'sql' ? 'calc(100vh - 520px)' : 'calc(100vh - 390px)' }}
           >
             <div style={{ width: tableWidth, minWidth: '100%' }}>
               <table className="w-full table-fixed caption-bottom text-sm">
@@ -611,7 +733,7 @@ export default function RawPreview() {
                 <tbody>
                   {sortedData.map((row, idx) => (
                     <tr
-                      key={`row-${offset + idx}`}
+                      key={`row-${mode}-${idx}`}
                       className={[
                         'border-b border-slate-200 dark:border-slate-800',
                         'hover:bg-slate-100 dark:hover:bg-slate-800/50',
@@ -654,36 +776,38 @@ export default function RawPreview() {
               </table>
             </div>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-sm dark:border-slate-800">
-            <span className="text-slate-500 dark:text-slate-400">
-              第 {page}/{totalPages} 页，当前载入 {data.length.toLocaleString()} 行
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" disabled={page <= 1 || isBusy} onClick={() => setPage((p) => Math.max(1, p - 1))}>
-                上一页
-              </Button>
-              <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
-                <span>跳到</span>
-                <input
-                  value={pageInput}
-                  onChange={(e) => setPageInput(e.target.value.replace(/\D/g, ''))}
-                  onBlur={handlePageJump}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handlePageJump()
-                  }}
-                  disabled={isBusy}
-                  className="h-7 w-16 rounded border border-slate-200 bg-white px-2 text-center font-mono text-sm text-slate-900 outline-none focus:border-slate-400 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                />
-                <span>页</span>
+          {mode === 'table' && (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 text-sm dark:border-slate-800">
+              <span className="text-slate-500 dark:text-slate-400">
+                第 {page}/{totalPages} 页，当前载入 {data.length.toLocaleString()} 行
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" disabled={page <= 1 || isBusy} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                  上一页
+                </Button>
+                <div className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                  <span>跳到</span>
+                  <input
+                    value={pageInput}
+                    onChange={(e) => setPageInput(e.target.value.replace(/\D/g, ''))}
+                    onBlur={handlePageJump}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handlePageJump()
+                    }}
+                    disabled={isBusy}
+                    className="h-7 w-16 rounded border border-slate-200 bg-white px-2 text-center font-mono text-sm text-slate-900 outline-none focus:border-slate-400 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                  />
+                  <span>页</span>
+                </div>
+                <Button variant="outline" size="sm" disabled={isBusy} onClick={handlePageJump}>
+                  跳转
+                </Button>
+                <Button variant="outline" size="sm" disabled={page >= totalPages || isBusy} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
+                  下一页
+                </Button>
               </div>
-              <Button variant="outline" size="sm" disabled={isBusy} onClick={handlePageJump}>
-                跳转
-              </Button>
-              <Button variant="outline" size="sm" disabled={page >= totalPages || isBusy} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
-                下一页
-              </Button>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>
