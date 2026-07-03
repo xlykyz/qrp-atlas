@@ -228,7 +228,8 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
     is_st = df.get(IS_ST, False)
     
     ticker_prefix = df[TICKER].astype(str).str[:3]
-    is_kcb = ticker_prefix.isin(["688", "300"])  # 科创板、创业板
+    # 创业板: 300/301/302  科创板: 688/689
+    is_kcb = ticker_prefix.isin(["688", "689", "300", "301", "302"])
     
     limit_up_threshold = pd.Series(9.9, index=df.index)
     limit_down_threshold = pd.Series(-9.9, index=df.index)
