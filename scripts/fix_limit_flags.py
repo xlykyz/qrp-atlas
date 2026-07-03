@@ -1,56 +1,66 @@
-"""修复数据库中 301/302/689 前缀股票的涨跌停标记"""
+"""用精确涨停价逻辑修复数据库中所有股票的涨跌停标记"""
 import duckdb
-import pandas as pd
-
 from qrp_atlas.config import DB_PATH
 
-def fix_limit_flags():
+def fix_all_limit_flags():
     con = duckdb.connect(str(DB_PATH))
     try:
-        # 获取所有受影响的股票（前缀 301/302/689）
-        rows = con.execute("""
-            SELECT DISTINCT ticker FROM daily_market_snapshot
-            WHERE ticker LIKE '301%' OR ticker LIKE '302%' OR ticker LIKE '689%'
-        """).fetchall()
-        tickers = [r[0] for r in rows]
-        print(f"需要修复的股票数: {len(tickers)}")
+        # 用精确涨停价计算逻辑更新全部历史数据
+        # 
+        # 涨停价 = round(pre_close * (1 + limit_pct/100), 2)
+        # 涨停判定: close >= 涨停价
+        #
+        # limit_pct:
+        #   - 主板: 10%
+        #   - ST: 5%
+        #   - 创业板(300/301/302)/科创板(688/689) 非ST: 20%
 
-        # 用固定后的逻辑批量更新
-        # 创业板(301/302)/科创板(689) 非ST阈值19.9，ST阈值4.9
         con.execute("""
             UPDATE daily_market_snapshot
             SET is_limit_up = CASE
-                WHEN ABS(pct_change) >= 100 THEN FALSE
-                WHEN is_st THEN pct_change >= 4.9
-                ELSE pct_change >= 19.9
+                WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
+                WHEN is_st THEN close >= ROUND(pre_close * 1.05, 2) - 0.001
+                WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
+                    THEN close >= ROUND(pre_close * 1.20, 2) - 0.001
+                ELSE close >= ROUND(pre_close * 1.10, 2) - 0.001
             END,
             is_limit_down = CASE
-                WHEN ABS(pct_change) >= 100 THEN FALSE
-                WHEN is_st THEN pct_change <= -4.9
-                ELSE pct_change <= -19.9
+                WHEN pre_close IS NULL OR pre_close = 0 THEN FALSE
+                WHEN is_st THEN close <= ROUND(pre_close * 0.95, 2) + 0.001
+                WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302')
+                    THEN close <= ROUND(pre_close * 0.80, 2) + 0.001
+                ELSE close <= ROUND(pre_close * 0.90, 2) + 0.001
             END
-            WHERE ticker LIKE '301%'
-               OR ticker LIKE '302%'
-               OR ticker LIKE '689%'
         """)
-        print("UPDATE 完成")
 
-        # 验证：查一下 >10% 但 <19.9% 的 301 股票是否已正确取消标记
+        total = con.execute("SELECT COUNT(*) FROM daily_market_snapshot").fetchone()[0]
+        print(f"✅ 已修复全部 {total} 条记录的涨跌停标记")
+
+        # 验证：查一个受四舍五入影响的边界案例
         latest = con.execute("SELECT MAX(trade_date) FROM daily_market_snapshot").fetchone()[0]
-        wrong = con.execute(f"""
-            SELECT COUNT(*) FROM daily_market_snapshot
-            WHERE (ticker LIKE '301%' OR ticker LIKE '302%')
-              AND trade_date = '{latest}'
-              AND pct_change > 10 AND pct_change < 19.9
-              AND is_limit_up = TRUE
-        """).fetchone()[0]
-        print(f"修复后最新交易日仍有误标的: {wrong} 条")
-        if wrong == 0:
-            print("✅ 全部修复成功")
-        else:
-            print("❌ 仍有残留，请检查")
+        rows = con.execute(f"""
+            SELECT ticker, name, trade_date, pre_close, close,
+                   ROUND(pct_change, 2) as pct,
+                   ROUND(pre_close * CASE
+                       WHEN is_st THEN 1.05
+                       WHEN substr(ticker, 1, 3) IN ('688','689','300','301','302') THEN 1.20
+                       ELSE 1.10
+                   END, 2) as theoretical_limit_up,
+                   is_limit_up
+            FROM daily_market_snapshot
+            WHERE trade_date = '{latest}'
+              AND pct_change BETWEEN 9.8 AND 10.2
+              AND substr(ticker, 1, 3) NOT IN ('688','689','300','301','302')
+            ORDER BY pct_change
+            LIMIT 10
+        """).fetchall()
+        print(f"\n最新交易日主板 pct 在9.8~10.2之间的股票涨停情况:")
+        for r in rows:
+            print(f"  {r[0]} {r[1]:<10s} pre={r[3]:>6.2f} close={r[4]:>6.2f} "
+                  f"pct={r[5]:>5.2f}% 精确涨停价={r[6]:>6.2f} limit_up={r[7]}")
+
     finally:
         con.close()
 
 if __name__ == "__main__":
-    fix_limit_flags()
+    fix_all_limit_flags()

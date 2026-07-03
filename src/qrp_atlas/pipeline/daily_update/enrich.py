@@ -208,9 +208,12 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
     派生 is_limit_up, is_limit_down 字段
 
     规则:
-    - 普通股票: 涨跌幅 >= 9.9% 或 <= -9.9%
-    - ST 股票: 涨跌幅 >= 4.9% 或 <= -4.9%
-    - 科创板/创业板: 涨跌幅 >= 19.9% 或 <= -19.9%
+    - 根据昨收精确计算涨跌停价，而非固定百分比阈值
+    - 普通股票: ±10% 涨跌停
+    - ST 股票: ±5% 涨跌停
+    - 科创板/创业板: ±20% 涨跌停
+    - 涨停判定: close >= round(pre_close * (1 + limit_pct/100), 2)
+    - 跌停判定: close <= round(pre_close * (1 - limit_pct/100), 2)
 
     Args:
         df: DataFrame
@@ -219,30 +222,40 @@ def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
         添加涨跌停标识后的 DataFrame
     """
     df = df.copy()
-    
-    if PCT_CHANGE not in df.columns:
+
+    if CLOSE not in df.columns or PRE_CLOSE not in df.columns:
         df[IS_LIMIT_UP] = False
         df[IS_LIMIT_DOWN] = False
         return df
-    
+
     is_st = df.get(IS_ST, False)
-    
+
     ticker_prefix = df[TICKER].astype(str).str[:3]
     # 创业板: 300/301/302  科创板: 688/689
     is_kcb = ticker_prefix.isin(["688", "689", "300", "301", "302"])
-    
-    limit_up_threshold = pd.Series(9.9, index=df.index)
-    limit_down_threshold = pd.Series(-9.9, index=df.index)
-    
-    limit_up_threshold = limit_up_threshold.mask(is_st, 4.9)
-    limit_down_threshold = limit_down_threshold.mask(is_st, -4.9)
-    
-    limit_up_threshold = limit_up_threshold.mask(is_kcb & ~is_st, 19.9)
-    limit_down_threshold = limit_down_threshold.mask(is_kcb & ~is_st, -19.9)
-    
-    df[IS_LIMIT_UP] = df[PCT_CHANGE] >= limit_up_threshold
-    df[IS_LIMIT_DOWN] = df[PCT_CHANGE] <= limit_down_threshold
-    
+
+    # 确定每只股票的涨跌幅限制比例
+    limit_pct = pd.Series(10.0, index=df.index)             # 主板: 10%
+    limit_pct = limit_pct.mask(is_st, 5.0)                  # ST: 5%
+    limit_pct = limit_pct.mask(is_kcb & ~is_st, 20.0)       # 科创/创业板非ST: 20%
+
+    pre_close = df[PRE_CLOSE]
+    close = df[CLOSE].round(2)  # 确保价格保留两位小数
+
+    # 精确计算涨跌停价 → round(昨收 × (1 ± 比例), 2)
+    limit_up_price = (pre_close * (1 + limit_pct / 100)).round(2)
+    limit_down_price = (pre_close * (1 - limit_pct / 100)).round(2)
+
+    # 容忍 0.001 的浮点误差
+    EPS = 0.001
+    df[IS_LIMIT_UP] = close >= limit_up_price - EPS
+    df[IS_LIMIT_DOWN] = close <= limit_down_price + EPS
+
+    # 昨收缺失或为 0（新股首日）→ 不判定涨跌停
+    mask_no_pre = pre_close.isna() | (pre_close == 0)
+    df.loc[mask_no_pre, IS_LIMIT_UP] = False
+    df.loc[mask_no_pre, IS_LIMIT_DOWN] = False
+
     return df
 
 
