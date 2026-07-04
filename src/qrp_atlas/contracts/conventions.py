@@ -255,3 +255,46 @@ def calc_limit_down_pct(is_st: bool = False) -> float:
         calc_limit_down_pct(True)  # -> -5.0
     """
     return LIMIT_DOWN_ST_PCT if is_st else LIMIT_DOWN_PCT
+
+
+# 板块分类（项目内 SSOT，API/管道统一调用此函数）
+BOARD_KCB = "科创板"
+BOARD_SH_MAIN = "上证主板"
+BOARD_SZ_MAIN = "深证主板"
+BOARD_CYB = "创业板"
+BOARD_BJ = "北交所"
+BOARD_OTHER = "其他"
+
+
+def get_board(ticker: str) -> str:
+    """根据 Ticker 判断所属板块
+
+    Args:
+        ticker: 6位股票代码（可带 .SH/.SZ/.BJ 后缀）
+
+    Returns:
+        板块名称: 科创板/上证主板/深证主板/创业板/北交所/其他
+
+    Example:
+        get_board("688001.SH")  # -> "科创板"
+        get_board("600000.SH")   # -> "上证主板"
+        get_board("000001.SZ")   # -> "深证主板"
+        get_board("300750.SZ")   # -> "创业板"
+        get_board("430047.BJ")   # -> "北交所"
+    """
+    raw = str(ticker).strip().upper()
+    code = raw.split(".", 1)[0] if "." in raw else raw
+    code = format_ticker(code)
+    exchange = get_exchange(code)
+
+    if code.startswith("688") or code.startswith("689"):
+        return BOARD_KCB
+    if code.startswith("60"):
+        return BOARD_SH_MAIN
+    if code.startswith("00"):
+        return BOARD_SZ_MAIN
+    if code.startswith("30"):
+        return BOARD_CYB
+    if exchange == "BJ":
+        return BOARD_BJ
+    return BOARD_OTHER

@@ -3,7 +3,7 @@
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from qrp_atlas.api.db import get_db
@@ -50,18 +50,42 @@ class TradePatch(BaseModel):
 
 
 @router.get("", response_model=list[TradeRead])
-def list_trades(trade_id: Optional[str] = None):
-    """查询交易记录"""
+def list_trades(
+    trade_id: Optional[str] = Query(None, description="精确匹配 trade_id"),
+    ticker: Optional[str] = Query(None, description="按 ticker 过滤"),
+    start_date: Optional[str] = Query(None, description="entry_date 起始 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="entry_date 截止"),
+    path_type: Optional[str] = Query(None, description="按路径类型过滤"),
+    limit: int = Query(500, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+):
+    """查询交易记录，支持按 trade_id / ticker / 入场日期 / path_type 过滤与分页。"""
     con = get_db()
     try:
+        where_clauses = []
+        params = []
         if trade_id:
-            rows = con.execute(
-                "SELECT * FROM trade_execution WHERE trade_id = ?", [trade_id]
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT * FROM trade_execution ORDER BY entry_date DESC"
-            ).fetchall()
+            where_clauses.append("trade_id = ?")
+            params.append(trade_id)
+        if ticker:
+            where_clauses.append("ticker = ?")
+            params.append(ticker)
+        if path_type:
+            where_clauses.append("path_type = ?")
+            params.append(path_type)
+        if start_date:
+            where_clauses.append("entry_date >= ?")
+            params.append(start_date)
+        if end_date:
+            where_clauses.append("entry_date <= ?")
+            params.append(end_date)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        rows = con.execute(
+            f"SELECT * FROM trade_execution WHERE {where_sql} "
+            f"ORDER BY entry_date DESC NULLS LAST, trade_id LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
         columns = [desc[0] for desc in con.description]
         return [row_to_dict(r, columns) for r in rows]
     finally:

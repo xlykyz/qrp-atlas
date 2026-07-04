@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from qrp_atlas.api.db import get_db
+from qrp_atlas.contracts.conventions import get_board
 
 router = APIRouter(prefix="/api/daily", tags=["行情数据"])
 
@@ -31,6 +32,7 @@ class DailyRow(BaseModel):
     pct_5d: Optional[float] = None
     pct_10d: Optional[float] = None
     pct_20d: Optional[float] = None
+    board: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -40,7 +42,8 @@ def query_daily(
     ticker: Optional[str] = Query(None, description="股票代码，如 000001.SZ"),
     start_date: Optional[str] = Query(None, description="起始日期 YYYYMMDD"),
     end_date: Optional[str] = Query(None, description="截止日期 YYYYMMDD"),
-    limit: int = Query(10000, description="最大返回行数"),
+    limit: int = Query(10000, ge=1, le=100000, description="最大返回行数"),
+    offset: int = Query(0, ge=0, description="跳过行数"),
 ):
     """查询每日行情数据"""
     con = get_db()
@@ -94,16 +97,21 @@ def query_daily(
                 FROM base
                 WHERE trade_date = ?
                 ORDER BY trade_date, ticker
-                LIMIT ?
+                LIMIT ? OFFSET ?
             """
-            rows = con.execute(window_query, [start_date_for_window, date, date, limit]).fetchall()
+            rows = con.execute(
+                window_query, [start_date_for_window, date, date, limit, offset]
+            ).fetchall()
             columns = [desc[0] for desc in con.description]
             result = [dict(zip(columns, row)) for row in rows]
         else:
             # ── 范围查询（无单一日期的基准）或其它组合：走原始逻辑 ──
             where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-            query = f"SELECT * FROM daily_market_snapshot WHERE {where_sql} ORDER BY trade_date, ticker LIMIT ?"
-            rows = con.execute(query, params + [limit]).fetchall()
+            query = (
+                f"SELECT * FROM daily_market_snapshot WHERE {where_sql} "
+                f"ORDER BY trade_date, ticker LIMIT ? OFFSET ?"
+            )
+            rows = con.execute(query, params + [limit, offset]).fetchall()
             columns = [desc[0] for desc in con.description]
             result = [dict(zip(columns, row)) for row in rows]
 
@@ -113,25 +121,9 @@ def query_daily(
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
 
-        # 添加 board 分类（对齐 pipeline enrich.py + conventions.py 规则）
+        # 添加 board 分类（统一调用 conventions.get_board）
         for row in result:
-            ticker = row.get("ticker", "")
-            ticker = str(ticker)
-            code = ticker.split(".")[0] if "." in ticker else ticker
-            exchange = ticker.split(".")[1] if "." in ticker and len(ticker.split(".")) > 1 else ""
-
-            if code.startswith("68"):
-                row["board"] = "科创板"
-            elif code.startswith("60"):
-                row["board"] = "上证主板"
-            elif code.startswith("30"):
-                row["board"] = "创业板"
-            elif code.startswith("00"):
-                row["board"] = "深证主板"
-            elif exchange == "BJ" or code.startswith(("43", "83", "87", "88", "92")):
-                row["board"] = "北交所"
-            else:
-                row["board"] = "其他"
+            row["board"] = get_board(row.get("ticker", ""))
 
         # 过滤退市股
         result = [row for row in result if not (row.get("name") and "退市" in str(row.get("name", "")))]
@@ -145,7 +137,7 @@ def query_daily(
 def query_trade_dates(
     start_date: Optional[str] = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="截止日期 YYYY-MM-DD"),
-    limit: int = Query(100, description="最大返回天数"),
+    limit: int = Query(100, ge=1, le=10000, description="最大返回天数"),
 ):
     """查询交易日列表（从 trading_calendar 表）"""
     con = get_db()

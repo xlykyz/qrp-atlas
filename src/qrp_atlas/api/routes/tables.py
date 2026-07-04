@@ -1,6 +1,6 @@
 """通用表浏览路由"""
 
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
@@ -48,6 +48,10 @@ def query_table(
     table_name: str,
     limit: int = Query(200, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    order_by: Optional[str] = Query(
+        None, description="排序字段名，必须在表 schema 内；默认按第一列"
+    ),
+    order: str = Query("desc", description="排序方向：asc / desc"),
 ):
     """查询任意表的数据"""
     con = get_db()
@@ -73,11 +77,25 @@ def query_table(
         ).fetchall()
         col_names = [c[0] for c in cols]
 
+        # 校验 order_by 白名单，防注入
+        if order_by:
+            if order_by not in col_names:
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"非法 order_by: {order_by}，可选: {col_names}",
+                )
+            sort_col = f'"{order_by}"'
+        else:
+            sort_col = "1"  # 默认按第一列
+
+        direction = "DESC" if order.lower() == "desc" else "ASC"
+
         total_row = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
         total = total_row[0] if total_row else 0
 
         rows = con.execute(
-            f'SELECT * FROM "{table_name}" ORDER BY 1 DESC LIMIT ? OFFSET ?',
+            f'SELECT * FROM "{table_name}" ORDER BY {sort_col} {direction} LIMIT ? OFFSET ?',
             [limit, offset],
         ).fetchall()
 

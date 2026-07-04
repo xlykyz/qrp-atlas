@@ -6,7 +6,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from qrp_atlas.api.db import get_db, get_db_path
-from qrp_atlas.api.routes import daily, dev, phase, stock, tables, trades
+from qrp_atlas.api.routes import (
+    adj_factor,
+    daily,
+    dev,
+    index,
+    phase,
+    research,
+    stock,
+    tables,
+    trades,
+    zt_pool,
+)
 
 
 @asynccontextmanager
@@ -42,6 +53,10 @@ app.include_router(stock.router)
 app.include_router(tables.router)
 app.include_router(trades.router)
 app.include_router(dev.router)
+app.include_router(index.router)
+app.include_router(zt_pool.router)
+app.include_router(adj_factor.router)
+app.include_router(research.router)
 
 
 # ── 系统端点 ──────────────────────────────────
