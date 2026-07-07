@@ -36,6 +36,10 @@ import {
   type Time,
   type SeriesMarker,
   type IPriceLine,
+  type MouseEventParams,
+  type SeriesType,
+  type LogicalRange,
+  type PriceFormat,
 } from 'lightweight-charts'
 
 // ── helpers ──
@@ -111,7 +115,168 @@ const MA_CONFIGS = [
 ] as const
 
 type MAKey = string
+type SubIndicatorKey = 'volume' | 'amount' | 'pct_change' | 'turnover' | 'rsi' | 'macd'
+type SubChartSingleSeries = ISeriesApi<'Histogram'> | ISeriesApi<'Line'>
+type SubChartSeries = ISeriesApi<SeriesType>
+type SubChartSeriesBundle = {
+  single: SubChartSingleSeries | null
+  macdLine: ISeriesApi<'Line'> | null
+  signalLine: ISeriesApi<'Line'> | null
+  histogram: ISeriesApi<'Histogram'> | null
+}
 
+const SUB_INDICATOR_OPTIONS: { value: SubIndicatorKey; label: string }[] = [
+  { value: 'volume', label: '成交量' },
+  { value: 'amount', label: '成交额' },
+  { value: 'pct_change', label: '涨跌幅' },
+  { value: 'turnover', label: '换手率' },
+  { value: 'rsi', label: 'RSI' },
+  { value: 'macd', label: 'MACD' },
+]
+
+function getSubIndicatorLabel(indicator: SubIndicatorKey): string {
+  return SUB_INDICATOR_OPTIONS.find((opt) => opt.value === indicator)?.label ?? indicator
+}
+
+function clearAllSeries(chart: IChartApi, seriesRefs: (SubChartSeries | null)[]) {
+  for (const s of seriesRefs) {
+    if (s) {
+      try { chart.removeSeries(s) } catch {
+        // Series may already be detached during chart rebuild.
+      }
+    }
+  }
+}
+
+function truncateAxisLabel(label: string): string {
+  return label.length > 8 ? label.slice(0, 7) + '...' : label
+}
+
+function formatCompactAxisNumber(value: number): string {
+  const abs = Math.abs(value)
+  if (abs >= 1e8) return (value / 1e8).toFixed(2) + '亿'
+  if (abs >= 1e4) return (value / 1e4).toFixed(1) + '万'
+  if (abs >= 1000) return value.toFixed(0)
+  if (abs >= 100) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+function boundedSubIndicatorPriceFormat(indicator: SubIndicatorKey): PriceFormat {
+  if (indicator === 'volume') {
+    return {
+      type: 'custom',
+      formatter: (price) => truncateAxisLabel(formatCompactAxisNumber(price)),
+      minMove: 1,
+    }
+  }
+  if (indicator === 'amount') {
+    return {
+      type: 'custom',
+      formatter: (price) => price.toFixed(2) + '亿',
+      minMove: 0.01,
+    }
+  }
+  if (indicator === 'pct_change' || indicator === 'turnover') {
+    return {
+      type: 'custom',
+      formatter: (price) => price.toFixed(2) + '%',
+      minMove: 0.01,
+    }
+  }
+  return {
+    type: 'custom',
+    formatter: (price) => truncateAxisLabel(price.toFixed(2)),
+    minMove: 0.01,
+  }
+}
+function getSubChartCrosshairSeries(
+  single: SubChartSingleSeries | null,
+  macdLine: ISeriesApi<'Line'> | null,
+  signalLine: ISeriesApi<'Line'> | null,
+  histogram: ISeriesApi<'Histogram'> | null,
+): SubChartSeries | null {
+  return (single ?? histogram ?? macdLine ?? signalLine) as SubChartSeries | null
+}
+
+function syncVisibleLogicalRangeFromMain(
+  main: IChartApi | null,
+  sub1: IChartApi | null,
+  sub2: IChartApi | null,
+) {
+  const range = main?.timeScale().getVisibleLogicalRange()
+  if (!range) return
+  sub1?.timeScale().setVisibleLogicalRange(range)
+  sub2?.timeScale().setVisibleLogicalRange(range)
+}
+
+function setMainVisibleRangeAndSyncSubCharts(
+  main: IChartApi | null,
+  sub1: IChartApi | null,
+  sub2: IChartApi | null,
+  range: { from: Time; to: Time },
+) {
+  main?.timeScale().setVisibleRange(range)
+  syncVisibleLogicalRangeFromMain(main, sub1, sub2)
+}
+
+function setAllVisibleLogicalRange(
+  main: IChartApi | null,
+  sub1: IChartApi | null,
+  sub2: IChartApi | null,
+  range: LogicalRange,
+) {
+  main?.timeScale().setVisibleLogicalRange(range)
+  sub1?.timeScale().setVisibleLogicalRange(range)
+  sub2?.timeScale().setVisibleLogicalRange(range)
+}
+function rebuildSubChart(chart: IChartApi, indicator: SubIndicatorKey): SubChartSeriesBundle {
+  if (indicator === 'macd') {
+    return {
+      single: null,
+      histogram: chart.addSeries(HistogramSeries, {
+        color: '#22c55e',
+        priceLineVisible: false,
+        lastValueVisible: false,
+        priceFormat: boundedSubIndicatorPriceFormat('macd'),
+      }),
+      macdLine: chart.addSeries(LineSeries, {
+        color: '#3b82f6', lineWidth: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: true,
+        priceFormat: boundedSubIndicatorPriceFormat('macd'),
+      }),
+      signalLine: chart.addSeries(LineSeries, {
+        color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
+        lastValueVisible: false, crosshairMarkerVisible: true,
+        priceFormat: boundedSubIndicatorPriceFormat('macd'),
+      }),
+    }
+  }
+
+  if (indicator === 'volume' || indicator === 'amount') {
+    return {
+      single: chart.addSeries(HistogramSeries, {
+        priceLineVisible: false,
+        lastValueVisible: false,
+        priceFormat: boundedSubIndicatorPriceFormat(indicator),
+      }),
+      macdLine: null,
+      signalLine: null,
+      histogram: null,
+    }
+  }
+
+  const color = indicator === 'rsi' ? '#a855f7' : '#f59e0b'
+  return {
+    single: chart.addSeries(LineSeries, {
+      color, lineWidth: 2, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: true,
+      priceFormat: boundedSubIndicatorPriceFormat(indicator),
+    }),
+    macdLine: null,
+    signalLine: null,
+    histogram: null,
+  }
+}
 function calcRSI(
   data: { time: Time; close: number }[],
   period = 14,
@@ -194,6 +359,7 @@ function readStoredAdjustmentMode(): AdjustmentMode {
 function isChartControlTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('[data-chart-control="true"]') !== null
 }
+const SUB_CHART_PRICE_SCALE_WIDTH = 60
 
 // ── slider dark-theme override styles ──
 const sliderStyles = `
@@ -277,6 +443,8 @@ export default function StockReview() {
     maValues: { label: string; value: number; color: string }[]
     distFromHigh: number | null
     distFromLow: number | null
+    sub1Value: { label: string; value: number | null } | null
+    sub2Value: { label: string; value: number | null } | null
   } | null>(null)
 
   useEffect(() => {
@@ -306,8 +474,9 @@ export default function StockReview() {
   }, [adjustmentMode])
 
   // ── state: sub-chart indicators ──
-  const [subChart1Indicator, setSubChart1Indicator] = useState<'volume' | 'amount'>('volume')
-  const [subChart2Indicator, setSubChart2Indicator] = useState<'pct_change' | 'turnover' | 'rsi' | 'macd'>('pct_change')
+  const [subChart1Indicator, setSubChart1Indicator] = useState<SubIndicatorKey>('volume')
+  const [subChart2Indicator, setSubChart2Indicator] = useState<SubIndicatorKey>('pct_change')
+  const [chartsReady, setChartsReady] = useState(false)
 
   // ── state: phase notes ──
   const [, setPhaseRecord] = useState<PhaseRecord | null>(null)
@@ -346,10 +515,12 @@ export default function StockReview() {
   const mainChartWheelRef = useRef<HTMLDivElement | null>(null)
 
   const candleSeries = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const volumeSeries = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const pctSeries = useRef<ISeriesApi<'Line'> | null>(null)
+  const volumeSeries = useRef<SubChartSingleSeries | null>(null)
+  const pctSeries = useRef<SubChartSingleSeries | null>(null)
 
-  // Sub-chart 2 MACD components (only used when subChart2Indicator === 'macd')
+  const subChart1MACDLine = useRef<ISeriesApi<'Line'> | null>(null)
+  const subChart1SignalLine = useRef<ISeriesApi<'Line'> | null>(null)
+  const subChart1Histogram = useRef<ISeriesApi<'Histogram'> | null>(null)
   const subChart2MACDLine = useRef<ISeriesApi<'Line'> | null>(null)
   const subChart2SignalLine = useRef<ISeriesApi<'Line'> | null>(null)
   const subChart2Histogram = useRef<ISeriesApi<'Histogram'> | null>(null)
@@ -358,12 +529,15 @@ export default function StockReview() {
   const chartDataRef = useRef<DailyRow[]>([])
   const maConfigRef = useRef<{ key: string; label: string; color: string }[]>([])
   const visibleMAsRef = useRef<Set<string>>(new Set())
+  const subChart1IndicatorRef = useRef<SubIndicatorKey>(subChart1Indicator)
+  const subChart2IndicatorRef = useRef<SubIndicatorKey>(subChart2Indicator)
+  const rsiDataRef = useRef<LineData[]>([])
+  const macdDataRef = useRef<ReturnType<typeof calcMACD> | null>(null)
 
   const isSyncing = useRef(false)
   const crosshairSynced = useRef(false)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
 
-  const prevSubChart1Ref = useRef(subChart1Indicator)
   const initialFillDone = useRef(false)
 
   const hasAutoLoaded = useRef(false)
@@ -528,6 +702,9 @@ export default function StockReview() {
     candleSeries.current = null
     volumeSeries.current = null
     pctSeries.current = null
+    subChart1MACDLine.current = null
+    subChart1SignalLine.current = null
+    subChart1Histogram.current = null
     subChart2MACDLine.current = null
     subChart2SignalLine.current = null
     subChart2Histogram.current = null
@@ -535,6 +712,7 @@ export default function StockReview() {
 
     // 重置状态 ref
     crosshairSynced.current = false
+    setChartsReady(false)
     initialFillDone.current = false
     mainChartContainerRef.current = null
     selectionStartX.current = null
@@ -649,7 +827,7 @@ export default function StockReview() {
       .filter((r) => r.amount != null && r.open != null && r.close != null)
       .map((r) => ({
         time: toChartTime(r.trade_date) as Time,
-        value: r.amount!,
+        value: r.amount! / 1e8,
         color: r.close! >= r.open! ? UP_COLOR : DOWN_COLOR,
       }))
   }, [chartData])
@@ -692,10 +870,20 @@ export default function StockReview() {
     return map
   }, [closeData, allMAConfigs])
 
-  // Sync maConfigRef with latest allMAConfigs (for crosshair tooltip callback)
+  // Sync refs used by chart callbacks
   useEffect(() => {
     maConfigRef.current = allMAConfigs.map(c => ({ key: c.key, label: c.label, color: c.color }))
   }, [allMAConfigs])
+
+  useEffect(() => {
+    subChart1IndicatorRef.current = subChart1Indicator
+    subChart2IndicatorRef.current = subChart2Indicator
+  }, [subChart1Indicator, subChart2Indicator])
+
+  useEffect(() => {
+    rsiDataRef.current = rsiData
+    macdDataRef.current = macdData
+  }, [macdData, rsiData])
 
   // TASK 6: Date list for slider
   const allDates = useMemo(() => {
@@ -720,81 +908,80 @@ export default function StockReview() {
         from: allDates[fromIdx] as Time,
         to: allDates[toIdx] as Time,
       }
-      mainChart.current?.timeScale().setVisibleRange(range)
-      volumeChart.current?.timeScale().setVisibleRange(range)
-      pctChart.current?.timeScale().setVisibleRange(range)
+      setMainVisibleRangeAndSyncSubCharts(mainChart.current, volumeChart.current, pctChart.current, range)
     },
     [allDates],
   )
 
-  // ── Effect: Rebuild sub-chart series (if needed) + set data ──
-  // Must rebuild series BEFORE setting data — separate effects cause stale-series bug
+  const getSubIndicatorValue = useCallback((indicator: SubIndicatorKey, timeStr: string, row: DailyRow | undefined): number | null => {
+    if (indicator === 'volume') return row?.volume ?? null
+    if (indicator === 'amount') return row?.amount != null ? row.amount / 1e8 : null
+    if (indicator === 'pct_change') return row?.pct_change ?? null
+    if (indicator === 'turnover') return row?.turnover ?? null
+    if (indicator === 'rsi') {
+      return rsiDataRef.current.find((d) => normalizeChartTime(d.time) === timeStr)?.value ?? null
+    }
+    const macdPoint = macdDataRef.current?.macdLine.find((d) => normalizeChartTime(d.time) === timeStr)
+    return macdPoint?.value ?? null
+  }, [])
+
+  const setSubChartData = useCallback((indicator: SubIndicatorKey, refs: SubChartSeriesBundle) => {
+    if (indicator === 'volume' && refs.single && volumeData.length > 0) {
+      refs.single.setData(volumeData)
+    } else if (indicator === 'amount' && refs.single && amountData.length > 0) {
+      refs.single.setData(amountData)
+    } else if (indicator === 'pct_change' && refs.single && pctData.length > 0) {
+      refs.single.setData(pctData)
+    } else if (indicator === 'turnover' && refs.single && turnoverData.length > 0) {
+      refs.single.setData(turnoverData)
+    } else if (indicator === 'rsi' && refs.single && rsiData.length > 0) {
+      refs.single.setData(rsiData)
+    } else if (indicator === 'macd') {
+      if (refs.macdLine && macdData.macdLine.length > 0) refs.macdLine.setData(macdData.macdLine)
+      if (refs.signalLine && macdData.signalLine.length > 0) refs.signalLine.setData(macdData.signalLine)
+      if (refs.histogram && macdData.histogram.length > 0) refs.histogram.setData(macdData.histogram)
+    }
+  }, [amountData, macdData, pctData, rsiData, turnoverData, volumeData])
+
+  // ── Effect: Rebuild sub-chart series + set data ──
+  // Always recreate sub-chart series on indicator changes to avoid stale series after rapid switches.
   useEffect(() => {
     if (!candleSeries.current || candleData.length === 0) return
 
-    // Save visible range before series recreation (restore after)
-    const savedRange = mainChart.current?.timeScale().getVisibleRange()
+    const savedLogicalRange = mainChart.current?.timeScale().getVisibleLogicalRange()
 
-    // ── Sub-chart 1: recreate series if indicator changed ──
-    if (subChart1Indicator !== prevSubChart1Ref.current) {
-      prevSubChart1Ref.current = subChart1Indicator
-      const chart1 = volumeChart.current
-      if (chart1 && volumeSeries.current) {
-        try { chart1.removeSeries(volumeSeries.current) } catch {
-            // Series may already be detached during chart rebuild.
-          }
-        volumeSeries.current = null
-      }
-      if (chart1) {
-        if (subChart1Indicator === 'volume') {
-          volumeSeries.current = chart1.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
-        } else {
-          volumeSeries.current = chart1.addSeries(HistogramSeries, {})
-        }
-      }
-    }
-    // ── Sub-chart 2: recreate series if needed ──
-    // Check: if we need MACD but current series is a single LineSeries (or vice versa), recreate
-    const needsMACD = subChart2Indicator === 'macd'
-    const hasMACD = subChart2MACDLine.current !== null
-    if (needsMACD !== hasMACD) {
-      const chart2 = pctChart.current
-      if (chart2) {
-        const oldSeries = [pctSeries.current, subChart2MACDLine.current, subChart2SignalLine.current, subChart2Histogram.current]
-        for (const s of oldSeries) {
-          if (s) {
-            try { chart2.removeSeries(s) } catch {
-            // Series may already be detached during chart rebuild.
-          }
-          }
-        }
-        pctSeries.current = null
-        subChart2MACDLine.current = null
-        subChart2SignalLine.current = null
-        subChart2Histogram.current = null
-      }
-      if (chart2) {
-        if (needsMACD) {
-          subChart2Histogram.current = chart2.addSeries(HistogramSeries, { color: '#22c55e' })
-          subChart2MACDLine.current = chart2.addSeries(LineSeries, {
-            color: '#3b82f6', lineWidth: 2, priceLineVisible: false,
-            lastValueVisible: false, crosshairMarkerVisible: true,
-          })
-          subChart2SignalLine.current = chart2.addSeries(LineSeries, {
-            color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
-            lastValueVisible: false, crosshairMarkerVisible: true,
-          })
-        } else {
-          const color = subChart2Indicator === 'rsi' ? '#a855f7' : '#f59e0b'
-          pctSeries.current = chart2.addSeries(LineSeries, {
-            color, lineWidth: 2, priceLineVisible: false,
-            lastValueVisible: false, crosshairMarkerVisible: true,
-          })
-        }
-      }
+    const chart1 = volumeChart.current
+    if (chart1) {
+      clearAllSeries(chart1, [
+        volumeSeries.current,
+        subChart1MACDLine.current,
+        subChart1SignalLine.current,
+        subChart1Histogram.current,
+      ])
+      const rebuilt = rebuildSubChart(chart1, subChart1Indicator)
+      volumeSeries.current = rebuilt.single
+      subChart1MACDLine.current = rebuilt.macdLine
+      subChart1SignalLine.current = rebuilt.signalLine
+      subChart1Histogram.current = rebuilt.histogram
+      setSubChartData(subChart1Indicator, rebuilt)
     }
 
-    // ── Set candle data ──
+    const chart2 = pctChart.current
+    if (chart2) {
+      clearAllSeries(chart2, [
+        pctSeries.current,
+        subChart2MACDLine.current,
+        subChart2SignalLine.current,
+        subChart2Histogram.current,
+      ])
+      const rebuilt = rebuildSubChart(chart2, subChart2Indicator)
+      pctSeries.current = rebuilt.single
+      subChart2MACDLine.current = rebuilt.macdLine
+      subChart2SignalLine.current = rebuilt.signalLine
+      subChart2Histogram.current = rebuilt.histogram
+      setSubChartData(subChart2Indicator, rebuilt)
+    }
+
     candleSeries.current.setData(candleData)
     for (const cfg of allMAConfigs) {
       const series = maSeries.current.get(cfg.key)
@@ -803,36 +990,11 @@ export default function StockReview() {
         series.setData(data)
       }
     }
-    // ── Set sub-chart 1 data ──
-    const sub1 = volumeSeries.current
-    if (sub1) {
-      if (subChart1Indicator === 'volume' && volumeData.length > 0) {
-        sub1.setData(volumeData)
-      } else if (subChart1Indicator === 'amount' && amountData.length > 0) {
-        sub1.setData(amountData)
-      }
-    }
-    // ── Set sub-chart 2 data ──
-    if (subChart2Indicator === 'pct_change' && pctSeries.current && pctData.length > 0) {
-      pctSeries.current.setData(pctData)
-    } else if (subChart2Indicator === 'turnover' && pctSeries.current && turnoverData.length > 0) {
-      pctSeries.current.setData(turnoverData)
-    } else if (subChart2Indicator === 'rsi' && pctSeries.current && rsiData.length > 0) {
-      pctSeries.current.setData(rsiData)
-    } else if (subChart2Indicator === 'macd') {
-      if (subChart2MACDLine.current && macdData.macdLine.length > 0) subChart2MACDLine.current.setData(macdData.macdLine)
-      if (subChart2SignalLine.current && macdData.signalLine.length > 0) subChart2SignalLine.current.setData(macdData.signalLine)
-      if (subChart2Histogram.current && macdData.histogram.length > 0) subChart2Histogram.current.setData(macdData.histogram)
+
+    if (savedLogicalRange && initialFillDone.current) {
+      setAllVisibleLogicalRange(mainChart.current, volumeChart.current, pctChart.current, savedLogicalRange)
     }
 
-    // Restore visible range after sub-chart series recreation
-    if (savedRange && initialFillDone.current) {
-      mainChart.current?.timeScale().setVisibleRange(savedRange)
-      volumeChart.current?.timeScale().setVisibleRange(savedRange)
-      pctChart.current?.timeScale().setVisibleRange(savedRange)
-    }
-
-    // ── Initial fill: show last ~90 trading days on first load ──
     if (candleData.length > 0 && !initialFillDone.current) {
       initialFillDone.current = true
       const endIdx = allDates.length - 1
@@ -842,12 +1004,66 @@ export default function StockReview() {
         from: allDates[startIdx] as Time,
         to: allDates[endIdx] as Time,
       }
-      mainChart.current?.timeScale().setVisibleRange(range)
-      volumeChart.current?.timeScale().setVisibleRange(range)
-      pctChart.current?.timeScale().setVisibleRange(range)
+      setMainVisibleRangeAndSyncSubCharts(mainChart.current, volumeChart.current, pctChart.current, range)
     }
-  }, [candleData, closeData, volumeData, pctData, maDataMap, amountData, turnoverData, rsiData, macdData, subChart1Indicator, subChart2Indicator])
+  }, [allDates, allMAConfigs, candleData, maDataMap, setSubChartData, subChart1Indicator, subChart2Indicator])
+  // ── Effect: 三图 crosshair + 时间轴同步（在所有图表 ref 就绪后统一注册）──
+  useEffect(() => {
+    const m = mainChart.current
+    const v = volumeChart.current
+    const p = pctChart.current
+    if (!chartsReady || !m || !v || !p) return
 
+    const charts = [m, v, p]
+    const unsubs: (() => void)[] = []
+
+    charts.forEach((source) => {
+      const handler = () => {
+        if (isSyncing.current) return
+        const range = source.timeScale().getVisibleLogicalRange()
+        if (!range) return
+        isSyncing.current = true
+        charts.filter((chart) => chart !== source).forEach((chart) => chart.timeScale().setVisibleLogicalRange(range))
+        isSyncing.current = false
+      }
+      source.timeScale().subscribeVisibleLogicalRangeChange(handler)
+      unsubs.push(() => source.timeScale().unsubscribeVisibleLogicalRangeChange(handler))
+    })
+
+    const syncCrosshair = (param: MouseEventParams) => {
+      const vSeries = getSubChartCrosshairSeries(
+        volumeSeries.current,
+        subChart1MACDLine.current,
+        subChart1SignalLine.current,
+        subChart1Histogram.current,
+      )
+      const pSeries = getSubChartCrosshairSeries(
+        pctSeries.current,
+        subChart2MACDLine.current,
+        subChart2SignalLine.current,
+        subChart2Histogram.current,
+      )
+      if (!param.time || !vSeries || !pSeries) {
+        v.clearCrosshairPosition()
+        p.clearCrosshairPosition()
+        return
+      }
+      const timeStr = normalizeChartTime(param.time as Time)
+      const row = timeStr ? chartDataRef.current.find((r) => toChartTime(r.trade_date) === timeStr) : undefined
+      const vPrice = timeStr ? getSubIndicatorValue(subChart1IndicatorRef.current, timeStr, row) : null
+      const pPrice = timeStr ? getSubIndicatorValue(subChart2IndicatorRef.current, timeStr, row) : null
+      v.setCrosshairPosition(vPrice ?? 0, param.time as Time, vSeries)
+      p.setCrosshairPosition(pPrice ?? 0, param.time as Time, pSeries)
+    }
+    m.subscribeCrosshairMove(syncCrosshair)
+    unsubs.push(() => m.unsubscribeCrosshairMove(syncCrosshair))
+
+    crosshairSynced.current = true
+    return () => {
+      unsubs.forEach((fn) => fn())
+      crosshairSynced.current = false
+    }
+  }, [chartsReady, getSubIndicatorValue])
   // ── Effect: Cleanup on unmount only ──
   useEffect(() => {
     return () => {
@@ -862,11 +1078,15 @@ export default function StockReview() {
       candleSeries.current = null
       volumeSeries.current = null
       pctSeries.current = null
+      subChart1MACDLine.current = null
+      subChart1SignalLine.current = null
+      subChart1Histogram.current = null
       subChart2MACDLine.current = null
       subChart2SignalLine.current = null
       subChart2Histogram.current = null
       maSeries.current.clear()
       crosshairSynced.current = false
+      setChartsReady(false)
       markersPlugin.current = null
       highPriceLine.current = null
       lowPriceLine.current = null
@@ -1550,6 +1770,22 @@ export default function StockReview() {
                   距低点 {crosshairData.distFromLow != null ? `+${crosshairData.distFromLow.toFixed(2)}%` : '—'}
                 </span>
               </div>
+              {crosshairData.sub1Value && (
+                <div>
+                  {crosshairData.sub1Value.label}
+                  <span className="font-mono ml-1">
+                    {crosshairData.sub1Value.value?.toFixed(2) ?? '—'}
+                  </span>
+                </div>
+              )}
+              {crosshairData.sub2Value && (
+                <div>
+                  {crosshairData.sub2Value.label}
+                  <span className="font-mono ml-1">
+                    {crosshairData.sub2Value.value?.toFixed(2) ?? '—'}
+                  </span>
+                </div>
+              )}
             </div>
           )}
           {/* MA toggle buttons */}
@@ -1845,7 +2081,7 @@ export default function StockReview() {
                     const day = date.getDate()
                     return `${month}/${day}`
                   } },
-                  rightPriceScale: { minimumWidth: 60 },
+                  rightPriceScale: { minimumWidth: SUB_CHART_PRICE_SCALE_WIDTH, entireTextOnly: true },
                 })
                 const candles = main.addSeries(CandlestickSeries, {
                   upColor: UP_COLOR, downColor: DOWN_COLOR,
@@ -1903,6 +2139,9 @@ export default function StockReview() {
                     }
                   }
 
+                  const sub1Indicator = subChart1IndicatorRef.current
+                  const sub2Indicator = subChart2IndicatorRef.current
+
                   setCrosshairData({
                     time: timeStr,
                     open: cd.open,
@@ -1913,6 +2152,14 @@ export default function StockReview() {
                     maValues,
                     distFromHigh,
                     distFromLow,
+                    sub1Value: {
+                      label: getSubIndicatorLabel(sub1Indicator),
+                      value: getSubIndicatorValue(sub1Indicator, timeStr, row),
+                    },
+                    sub2Value: {
+                      label: getSubIndicatorLabel(sub2Indicator),
+                      value: getSubIndicatorValue(sub2Indicator, timeStr, row),
+                    },
                   })
                 })
 
@@ -1924,7 +2171,7 @@ export default function StockReview() {
                     const ch = Math.floor(height)
                     mainChart.current?.resize(cw, ch)
                     volumeChart.current?.resize(cw, 120)
-                    pctChart.current?.resize(cw, 80)
+                    pctChart.current?.resize(cw, 120)
                   }
                 })
                 ro.observe(el)
@@ -1932,29 +2179,8 @@ export default function StockReview() {
 
                 // Series markers plugin
                 markersPlugin.current = createSeriesMarkers(candles, [])
-
-                // Crosshair sync (lazy — after all 3 charts are ready)
-                if (
-                  mainChart.current &&
-                  volumeChart.current &&
-                  pctChart.current &&
-                  !crosshairSynced.current
-                ) {
-                  crosshairSynced.current = true
-                  const m = mainChart.current
-                  const v = volumeChart.current
-                  const p = pctChart.current
-                  const syncCharts = (source: IChartApi) => {
-                    if (isSyncing.current) return
-                    const range = source.timeScale().getVisibleLogicalRange()
-                    if (!range) return
-                    isSyncing.current = true
-                    ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-                    isSyncing.current = false
-                  }
-                  m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
-                  v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
-                  p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                if (mainChart.current && volumeChart.current && pctChart.current) {
+                  setChartsReady(true)
                 }
               }}
                 className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
@@ -1972,15 +2198,16 @@ export default function StockReview() {
             <div className="relative">
               <select
                 value={subChart1Indicator}
-                onChange={(e) => setSubChart1Indicator(e.target.value as typeof subChart1Indicator)}
+                onChange={(e) => setSubChart1Indicator(e.target.value as SubIndicatorKey)}
                 className="absolute top-1 left-1 z-10 text-xs bg-slate-900/80 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300 backdrop-blur-sm"
               >
-                <option value="volume">成交量</option>
-                <option value="amount">成交额</option>
+                {SUB_INDICATOR_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
               </select>
               <div
                 ref={(el) => {
-                  if (!el || volumeSeries.current) return
+                  if (!el || volumeChart.current) return
                   const w = el.clientWidth || 800
                   const vol = createChart(el, {
                     width: w, height: 120,
@@ -1994,34 +2221,17 @@ export default function StockReview() {
                     handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
                     handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
                     timeScale: { visible: false },
-                    rightPriceScale: { minimumWidth: 60, scaleMargins: { top: 0.1, bottom: 0.1 } },
+                    rightPriceScale: { minimumWidth: SUB_CHART_PRICE_SCALE_WIDTH, scaleMargins: { top: 0.1, bottom: 0.1 }, entireTextOnly: true },
                   })
-                  const hist = vol.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+                  const hist = vol.addSeries(HistogramSeries, {
+                    priceFormat: boundedSubIndicatorPriceFormat('volume'),
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                  })
                   volumeChart.current = vol
                   volumeSeries.current = hist
-
-                  // Crosshair sync (lazy — after all 3 charts are ready)
-                  if (
-                    mainChart.current &&
-                    volumeChart.current &&
-                    pctChart.current &&
-                    !crosshairSynced.current
-                  ) {
-                    crosshairSynced.current = true
-                    const m = mainChart.current
-                    const v = volumeChart.current
-                    const p = pctChart.current
-                    const syncCharts = (source: IChartApi) => {
-                      if (isSyncing.current) return
-                      const range = source.timeScale().getVisibleLogicalRange()
-                      if (!range) return
-                      isSyncing.current = true
-                      ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-                      isSyncing.current = false
-                    }
-                    m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
-                    v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
-                    p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                  if (mainChart.current && volumeChart.current && pctChart.current) {
+                    setChartsReady(true)
                   }
                 }}
                 className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
@@ -2033,20 +2243,19 @@ export default function StockReview() {
             <div className="relative">
               <select
                 value={subChart2Indicator}
-                onChange={(e) => setSubChart2Indicator(e.target.value as typeof subChart2Indicator)}
+                onChange={(e) => setSubChart2Indicator(e.target.value as SubIndicatorKey)}
                 className="absolute top-1 left-1 z-10 text-xs bg-slate-900/80 border border-slate-700 rounded px-1.5 py-0.5 text-slate-300 backdrop-blur-sm"
               >
-                <option value="pct_change">涨跌幅</option>
-                <option value="turnover">换手率</option>
-                <option value="rsi">RSI</option>
-                <option value="macd">MACD</option>
+                {SUB_INDICATOR_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
               </select>
               <div
                 ref={(el) => {
-                  if (!el || pctSeries.current) return
+                  if (!el || pctChart.current) return
                   const w = el.clientWidth || 800
                   const pct = createChart(el, {
-                    width: w, height: 80,
+                    width: w, height: 120,
                     layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                     grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                     crosshair: {
@@ -2057,7 +2266,7 @@ export default function StockReview() {
                     handleScroll: { pressedMouseMove: false, vertTouchDrag: false, horzTouchDrag: false },
                     handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: false },
                     timeScale: { visible: false },
-                    rightPriceScale: { minimumWidth: 60 },
+                    rightPriceScale: { minimumWidth: SUB_CHART_PRICE_SCALE_WIDTH, entireTextOnly: true },
                   })
                   const pctLine = pct.addSeries(LineSeries, {
                     color: '#f59e0b', lineWidth: 2, priceLineVisible: false,
@@ -2065,33 +2274,12 @@ export default function StockReview() {
                   })
                   pctChart.current = pct
                   pctSeries.current = pctLine
-
-                  // Crosshair sync (lazy — after all 3 charts are ready)
-                  if (
-                    mainChart.current &&
-                    volumeChart.current &&
-                    pctChart.current &&
-                    !crosshairSynced.current
-                  ) {
-                    crosshairSynced.current = true
-                    const m = mainChart.current
-                    const v = volumeChart.current
-                    const p = pctChart.current
-                    const syncCharts = (source: IChartApi) => {
-                      if (isSyncing.current) return
-                      const range = source.timeScale().getVisibleLogicalRange()
-                      if (!range) return
-                      isSyncing.current = true
-                      ;[m, v, p].filter(c => c !== source).forEach(c => c.timeScale().setVisibleLogicalRange(range))
-                      isSyncing.current = false
-                    }
-                    m.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(m))
-                    v.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(v))
-                    p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
+                  if (mainChart.current && volumeChart.current && pctChart.current) {
+                    setChartsReady(true)
                   }
                 }}
                 className="w-full border-l border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
-                style={{ height: 80 }}
+                style={{ height: 120 }}
               />
             </div>
             {/* TASK 6: Time range slider */}
