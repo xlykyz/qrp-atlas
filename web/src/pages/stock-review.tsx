@@ -48,6 +48,15 @@ function toChartTime(ymd: string): string {
   return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
 }
 
+function normalizeChartTime(time: Time | null): string | null {
+  if (time == null) return null
+  if (typeof time === 'string') return time
+  if (typeof time === 'number') {
+    return new Date(time * 1000).toISOString().slice(0, 10)
+  }
+  return `${time.year}-${String(time.month).padStart(2, '0')}-${String(time.day).padStart(2, '0')}`
+}
+
 function formatPct(v: number | null | undefined): string {
   if (v == null) return '—'
   const sign = v > 0 ? '+' : ''
@@ -317,6 +326,8 @@ export default function StockReview() {
   const mainChart = useRef<IChartApi | null>(null)
   const volumeChart = useRef<IChartApi | null>(null)
   const pctChart = useRef<IChartApi | null>(null)
+  const mainChartContainerRef = useRef<HTMLDivElement | null>(null)
+  const mainChartWheelRef = useRef<HTMLDivElement | null>(null)
 
   const candleSeries = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeries = useRef<ISeriesApi<'Histogram'> | null>(null)
@@ -340,6 +351,12 @@ export default function StockReview() {
   const initialFillDone = useRef(false)
 
   const hasAutoLoaded = useRef(false)
+
+  const selectionStartX = useRef<number | null>(null)
+  const [selectionBox, setSelectionBox] = useState<{
+    left: number
+    width: number
+  } | null>(null)
 
   // ── TASK 2: URL param auto-load ──
 
@@ -491,6 +508,9 @@ export default function StockReview() {
     // 重置状态 ref
     crosshairSynced.current = false
     initialFillDone.current = false
+    mainChartContainerRef.current = null
+    selectionStartX.current = null
+    setSelectionBox(null)
   }, [selectedStock])
 
   // ── fetch chart data ──
@@ -650,6 +670,26 @@ export default function StockReview() {
     allDates.length - 1,
   ])
 
+  const applyVisibleDateRange = useCallback(
+    (startIdx: number, endIdx: number) => {
+      if (allDates.length === 0) return
+      const safeStart = Math.max(0, Math.min(startIdx, allDates.length - 1))
+      const safeEnd = Math.max(0, Math.min(endIdx, allDates.length - 1))
+      const [fromIdx, toIdx] = safeStart <= safeEnd
+        ? [safeStart, safeEnd]
+        : [safeEnd, safeStart]
+      setSliderValue([fromIdx, toIdx])
+      const range = {
+        from: allDates[fromIdx] as Time,
+        to: allDates[toIdx] as Time,
+      }
+      mainChart.current?.timeScale().setVisibleRange(range)
+      volumeChart.current?.timeScale().setVisibleRange(range)
+      pctChart.current?.timeScale().setVisibleRange(range)
+    },
+    [allDates],
+  )
+
   // ── Effect: Rebuild sub-chart series (if needed) + set data ──
   // Must rebuild series BEFORE setting data — separate effects cause stale-series bug
   useEffect(() => {
@@ -760,6 +800,7 @@ export default function StockReview() {
       initialFillDone.current = true
       const endIdx = allDates.length - 1
       const startIdx = Math.max(0, allDates.length - 90)
+      setSliderValue([startIdx, endIdx])
       const range = {
         from: allDates[startIdx] as Time,
         to: allDates[endIdx] as Time,
@@ -999,19 +1040,116 @@ export default function StockReview() {
     (value: number | number[]) => {
       if (!Array.isArray(value) || value.length < 2) return
       const [startIdx, endIdx] = value
-      setSliderValue([startIdx, endIdx])
-      if (allDates.length === 0) return
-      const range = {
-        from: allDates[startIdx] as Time,
-        to: allDates[endIdx] as Time,
-      }
-      mainChart.current?.timeScale().setVisibleRange(range)
-      volumeChart.current?.timeScale().setVisibleRange(range)
-      pctChart.current?.timeScale().setVisibleRange(range)
+      applyVisibleDateRange(startIdx, endIdx)
     },
-    [allDates],
+    [applyVisibleDateRange],
   )
 
+  const getChartX = useCallback((clientX: number) => {
+    const el = mainChartContainerRef.current
+    if (!el) return null
+    const rect = el.getBoundingClientRect()
+    return Math.max(0, Math.min(clientX - rect.left, rect.width))
+  }, [])
+
+  const updateSelectionBox = useCallback((fromX: number, toX: number) => {
+    setSelectionBox({
+      left: Math.min(fromX, toX),
+      width: Math.abs(toX - fromX),
+    })
+  }, [])
+
+  const handleChartPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || allDates.length === 0) return
+      const x = getChartX(event.clientX)
+      if (x == null) return
+      event.currentTarget.setPointerCapture(event.pointerId)
+      selectionStartX.current = x
+      updateSelectionBox(x, x)
+    },
+    [allDates.length, getChartX, updateSelectionBox],
+  )
+
+  const handleChartPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const startX = selectionStartX.current
+      if (startX == null) return
+      const x = getChartX(event.clientX)
+      if (x == null) return
+      updateSelectionBox(startX, x)
+    },
+    [getChartX, updateSelectionBox],
+  )
+
+  const finishChartSelection = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const startX = selectionStartX.current
+      if (startX == null) return
+      selectionStartX.current = null
+      setSelectionBox(null)
+
+      const endX = getChartX(event.clientX)
+      if (endX == null || Math.abs(endX - startX) < 8 || allDates.length === 0) return
+
+      const timeScale = mainChart.current?.timeScale()
+      const fromTime = normalizeChartTime(timeScale?.coordinateToTime(Math.min(startX, endX)) ?? null)
+      const toTime = normalizeChartTime(timeScale?.coordinateToTime(Math.max(startX, endX)) ?? null)
+      if (!fromTime || !toTime) return
+
+      const fromIdx = allDates.indexOf(fromTime)
+      const toIdx = allDates.indexOf(toTime)
+      if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return
+
+      applyVisibleDateRange(fromIdx, toIdx)
+    },
+    [allDates, applyVisibleDateRange, getChartX],
+  )
+
+  const zoomChartWindow = useCallback(
+    (deltaY: number) => {
+      if (deltaY === 0 || allDates.length <= 1) return
+
+      const [currentStart, currentEnd] = sliderValue
+      const currentSpan = currentEnd - currentStart + 1
+      const nextSpan = deltaY > 0
+        ? Math.ceil(currentSpan * 1.2)
+        : Math.floor(currentSpan / 1.2)
+      const clampedSpan = Math.max(5, Math.min(allDates.length, nextSpan))
+      if (clampedSpan === currentSpan) return
+
+      const nextEnd = currentEnd
+      const nextStart = Math.max(0, nextEnd - clampedSpan + 1)
+
+      applyVisibleDateRange(nextStart, nextEnd)
+    },
+    [allDates.length, applyVisibleDateRange, sliderValue],
+  )
+
+  const handleChartWheel = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      zoomChartWindow(event.deltaY)
+    },
+    [zoomChartWindow],
+  )
+
+  useEffect(() => {
+    const el = mainChartWheelRef.current
+    if (!el) return
+
+    const handleNativeWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      zoomChartWindow(event.deltaY)
+    }
+
+    el.addEventListener('wheel', handleNativeWheel, { passive: false })
+    return () => {
+      el.removeEventListener('wheel', handleNativeWheel)
+    }
+  }, [zoomChartWindow])
   // ── render ──
 
   return (
@@ -1322,6 +1460,15 @@ export default function StockReview() {
               <CardContent className="p-4">
                 <div className="flex items-center gap-6 flex-wrap">
                   <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">个股</span>
+                    <span className="ml-2 text-xl font-semibold text-slate-900 dark:text-white">
+                      {selectedStock?.name ?? '—'}
+                    </span>
+                    <span className="ml-2 text-sm text-slate-500 dark:text-slate-400">
+                      {selectedStock?.ticker ?? ''}
+                    </span>
+                  </div>
+                  <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">最新价</span>
                     <span className="ml-2 text-3xl font-bold text-slate-900 dark:text-white">
                       {latestRow.close?.toFixed(2) ?? '—'}
@@ -1372,11 +1519,21 @@ export default function StockReview() {
           <div className="space-y-0">
             {/* Main K-line chart */}
             <div
-              ref={(el) => {
-                if (!el || candleSeries.current) return
+              ref={mainChartWheelRef}
+              className="relative cursor-crosshair select-none touch-none overscroll-contain"
+              onPointerDown={handleChartPointerDown}
+              onPointerMove={handleChartPointerMove}
+              onPointerUp={finishChartSelection}
+              onPointerCancel={finishChartSelection}
+              onWheel={handleChartWheel}
+            >
+              <div
+                ref={(el) => {
+                  mainChartContainerRef.current = el
+                  if (!el || candleSeries.current) return
                 const w = el.clientWidth || 800
                 const main = createChart(el, {
-                  width: w, height: 400,
+                  width: w, height: el.clientHeight || 1600,
                   layout: { background: { type: ColorType.Solid, color: BG_COLOR }, textColor: TEXT_COLOR, attributionLogo: false },
                   grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                   crosshair: {
@@ -1452,9 +1609,10 @@ export default function StockReview() {
                 // ResizeObserver — observe main chart container
                 const ro = new ResizeObserver((entries) => {
                   for (const entry of entries) {
-                    const { width } = entry.contentRect
+                    const { width, height } = entry.contentRect
                     const cw = Math.floor(width)
-                    mainChart.current?.resize(cw, 400)
+                    const ch = Math.floor(height)
+                    mainChart.current?.resize(cw, ch)
                     volumeChart.current?.resize(cw, 120)
                     pctChart.current?.resize(cw, 80)
                   }
@@ -1486,9 +1644,16 @@ export default function StockReview() {
                   p.timeScale().subscribeVisibleLogicalRangeChange(() => syncCharts(p))
                 }
               }}
-              className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
-              style={{ height: 400 }}
-            />
+                className="w-full rounded-t-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 overflow-hidden"
+                style={{ height: 800 }}
+              />
+              {selectionBox && (
+                <div
+                  className="pointer-events-none absolute top-0 bottom-0 z-20 border border-indigo-300/90 bg-indigo-400/20"
+                  style={{ left: selectionBox.left, width: selectionBox.width }}
+                />
+              )}
+            </div>
 
             {/* Volume chart */}
             <div className="relative">
@@ -1632,7 +1797,7 @@ export default function StockReview() {
                   range
                   min={0}
                   max={allDates.length - 1}
-                  defaultValue={[Math.max(0, allDates.length - 90), allDates.length - 1]}
+                  value={sliderValue}
                   onChange={handleSliderChange}
                 />
                 <div className="flex items-center justify-between mt-1">

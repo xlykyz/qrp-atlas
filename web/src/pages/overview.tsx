@@ -103,8 +103,16 @@ export default function Overview() {
         setDateLoading(false)
 
         // Step 2: Fetch data for the effective date
-        const rows = await getDailyByDate(effectiveDate)
+        let rows = await getDailyByDate(effectiveDate)
         if (cancelled) return
+        // 如果当前有效日期无数据（如今天数据还未入库），回退到上一个交易日
+        if (rows.length === 0 && dates.length > 1) {
+          effectiveDate = dates[1]
+          rows = await getDailyByDate(effectiveDate)
+          if (cancelled) return
+          setAnchorDate(effectiveDate)
+          setSelectedDate(effectiveDate)
+        }
         if (rows.length > 0) {
           setData(rows)
         }
