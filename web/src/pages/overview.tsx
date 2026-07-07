@@ -77,7 +77,11 @@ export default function Overview() {
       setError(null)
       try {
         // Step 1: Fetch trading dates to find the right anchor date
-        const dates = await getDailyDates(undefined, todayYMD, 2)
+        let dates = await getDailyDates(undefined, todayYMD, 2)
+        if (!dates || dates.length === 0) {
+          // 今天不是交易日时，不加上限，取库里最新的交易日
+          dates = await getDailyDates(undefined, undefined, 2)
+        }
         if (cancelled) return
 
         const now = new Date()
