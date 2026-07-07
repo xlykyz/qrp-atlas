@@ -220,19 +220,6 @@ export default function StockReview() {
     name: string
   } | null>(null)
 
-  // ── state: date range ──
-
-  const now = useMemo(() => new Date(), [])
-  const todayYMD = useMemo(
-    () =>
-      `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`,
-    [now],
-  )
-  const defaultStart = '20120101'
-
-  const [startDate, setStartDate] = useState(defaultStart)
-  const [endDate, setEndDate] = useState(todayYMD)
-
   // ── state: data ──
 
   const [chartData, setChartData] = useState<DailyRow[]>([])
@@ -431,6 +418,11 @@ export default function StockReview() {
     const q = searchQuery.trim()
     if (!q) return
 
+    const todayYMD = (() => {
+      const d = new Date()
+      return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+    })()
+
     setSearching(true)
     setSearchResults([])
     try {
@@ -448,7 +440,7 @@ export default function StockReview() {
     } catch {
       // Fallback: try a few recent dates
       try {
-        const fallbackDate = new Date(now)
+        const fallbackDate = new Date()
         fallbackDate.setDate(fallbackDate.getDate() - 1)
         const fd = `${fallbackDate.getFullYear()}${String(fallbackDate.getMonth() + 1).padStart(2, '0')}${String(fallbackDate.getDate()).padStart(2, '0')}`
         const rows = await getDailyByDate(fd)
@@ -467,7 +459,7 @@ export default function StockReview() {
     } finally {
       setSearching(false)
     }
-  }, [searchQuery, todayYMD, now])
+  }, [searchQuery])
 
   const handleSelectStock = useCallback(
     (ticker: string, name: string) => {
@@ -527,8 +519,6 @@ export default function StockReview() {
       try {
         const rows = await getDailyByTicker(
           selectedTicker,
-          startDate,
-          endDate,
         )
         if (!cancelled) {
           // Sort ascending by trade_date for charting
@@ -553,7 +543,7 @@ export default function StockReview() {
     return () => {
       cancelled = true
     }
-  }, [selectedStock, startDate, endDate])
+  }, [selectedStock])
 
   // ── chart creation and data population ──
 
@@ -872,8 +862,8 @@ export default function StockReview() {
   // ── current date for phase ──
   const currentDate = useMemo(() => {
     if (chartData.length > 0) return chartData[chartData.length - 1].trade_date
-    return endDate
-  }, [chartData, endDate])
+    return ''
+  }, [chartData])
 
   // ── fetch phase for current date ──
   useEffect(() => {
@@ -1010,29 +1000,47 @@ export default function StockReview() {
     return pnl.toFixed(2)
   }, [])
 
-  // ── info panel data ──
+  // ── info panel data (from slider range) ──
 
-  const latestRow = useMemo(
-    () => (chartData.length > 0 ? chartData[chartData.length - 1] : null),
-    [chartData],
-  )
+  const sliderStats = useMemo(() => {
+    if (chartData.length === 0 || sliderValue[0] >= chartData.length || sliderValue[1] >= chartData.length) {
+      return null
+    }
 
-  const highInRange = useMemo(
-    () =>
-      chartData.reduce(
-        (max, r) => (r.high != null && r.high > max ? r.high : max),
-        -Infinity,
-      ),
-    [chartData],
-  )
-  const lowInRange = useMemo(
-    () =>
-      chartData.reduce(
-        (min, r) => (r.low != null && r.low < min ? r.low : min),
-        Infinity,
-      ),
-    [chartData],
-  )
+    const startIdx = Math.max(0, sliderValue[0])
+    const endIdx = Math.min(chartData.length - 1, sliderValue[1])
+    const sliced = chartData.slice(startIdx, endIdx + 1)
+    if (sliced.length === 0) return null
+
+    const lastRow = sliced[sliced.length - 1]
+
+    // 区间最高
+    const highInRange = sliced.reduce(
+      (max, r) => (r.high != null && r.high > max ? r.high : max),
+      -Infinity,
+    )
+    // 区间最低
+    const lowInRange = sliced.reduce(
+      (min, r) => (r.low != null && r.low < min ? r.low : min),
+      Infinity,
+    )
+
+    // 涨跌幅: 最后一根 K 线相对前一根的涨跌幅
+    let pctChange: number | null = null
+    if (endIdx > 0) {
+      const prevRow = chartData[endIdx - 1]
+      if (lastRow.close != null && prevRow.close != null && prevRow.close !== 0) {
+        pctChange = ((lastRow.close - prevRow.close) / prevRow.close) * 100
+      }
+    }
+
+    return {
+      lastRow,
+      high: highInRange !== -Infinity ? highInRange : null,
+      low: lowInRange !== Infinity ? lowInRange : null,
+      pctChange,
+    }
+  }, [chartData, sliderValue])
 
   // ── TASK 6: Time range slider handler ──
 
@@ -1264,36 +1272,6 @@ export default function StockReview() {
         </CardContent>
       </Card>
 
-      {/* ── Date range ── */}
-      {selectedStock && (
-        <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <label className="text-sm text-slate-500 dark:text-slate-400">开始日期</label>
-              <Input
-                type="date"
-                value={formatDate(startDate)}
-                onChange={(e) => {
-                  const v = e.target.value.replace(/-/g, '')
-                  setStartDate(v)
-                }}
-                className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-              />
-              <label className="text-sm text-slate-500 dark:text-slate-400">结束日期</label>
-              <Input
-                type="date"
-                value={formatDate(endDate)}
-                onChange={(e) => {
-                  const v = e.target.value.replace(/-/g, '')
-                  setEndDate(v)
-                }}
-                className="w-40 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white"
-              />
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {/* ── Initial state ── */}
       {!selectedStock && (
         <div className="flex items-center justify-center py-20">
@@ -1455,7 +1433,7 @@ export default function StockReview() {
           </div>
 
           {/* Info panel */}
-          {latestRow && (
+          {sliderStats && (
             <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50">
               <CardContent className="p-4">
                 <div className="flex items-center gap-6 flex-wrap">
@@ -1471,43 +1449,43 @@ export default function StockReview() {
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">最新价</span>
                     <span className="ml-2 text-3xl font-bold text-slate-900 dark:text-white">
-                      {latestRow.close?.toFixed(2) ?? '—'}
+                      {sliderStats.lastRow.close?.toFixed(2) ?? '—'}
                     </span>
                   </div>
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">涨跌幅</span>
                     <span
-                      className={`ml-2 text-xl font-semibold ${pctColor(latestRow.pct_change)}`}
+                      className={`ml-2 text-xl font-semibold ${pctColor(sliderStats.pctChange)}`}
                     >
-                      {formatPct(latestRow.pct_change)}
+                      {formatPct(sliderStats.pctChange)}
                     </span>
                   </div>
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">区间最高</span>
                     <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
-                      {highInRange !== -Infinity
-                        ? highInRange.toFixed(2)
+                      {sliderStats.high != null
+                        ? sliderStats.high.toFixed(2)
                         : '—'}
                     </span>
                   </div>
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">区间最低</span>
                     <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
-                      {lowInRange !== Infinity
-                        ? lowInRange.toFixed(2)
+                      {sliderStats.low != null
+                        ? sliderStats.low.toFixed(2)
                         : '—'}
                     </span>
                   </div>
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">成交量</span>
                     <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
-                      {formatVolume(latestRow.volume)}
+                      {formatVolume(sliderStats.lastRow.volume)}
                     </span>
                   </div>
                   <div>
                     <span className="text-sm text-slate-500 dark:text-slate-400">成交额</span>
                     <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
-                      {formatAmount(latestRow.amount)}
+                      {formatAmount(sliderStats.lastRow.amount)}
                     </span>
                   </div>
                 </div>
@@ -1914,7 +1892,7 @@ export default function StockReview() {
                     <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">入场日期</label>
                     <Input
                       type="date"
-                      value={newEntryDate ? formatDate(newEntryDate) : formatDate(currentDate || endDate)}
+                      value={newEntryDate ? formatDate(newEntryDate) : formatDate(currentDate || '')}
                       onChange={(e) => setNewEntryDate(e.target.value.replace(/-/g, ''))}
                       className="border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white text-sm"
                     />
