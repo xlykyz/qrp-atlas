@@ -26,12 +26,16 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type CandlestickData,
   type LineData,
   type HistogramData,
   type Time,
+  type SeriesMarker,
+  type IPriceLine,
 } from 'lightweight-charts'
 
 // ── helpers ──
@@ -271,6 +275,8 @@ export default function StockReview() {
     amount: number | null
     turnover: number | null
     maValues: { label: string; value: number; color: string }[]
+    distFromHigh: number | null
+    distFromLow: number | null
   } | null>(null)
 
   useEffect(() => {
@@ -361,6 +367,13 @@ export default function StockReview() {
   const initialFillDone = useRef(false)
 
   const hasAutoLoaded = useRef(false)
+
+  // ── refs for chart overlays (interval analysis) ──
+  const markersPlugin = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
+  const highPriceLine = useRef<IPriceLine | null>(null)
+  const lowPriceLine = useRef<IPriceLine | null>(null)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sliderStatsRef = useRef<any>(null)
 
   const selectionStartX = useRef<number | null>(null)
   const [selectionBox, setSelectionBox] = useState<{
@@ -528,6 +541,9 @@ export default function StockReview() {
     chartDataRef.current = []
     setChartData([])
     setChartDataTicker(null)
+    markersPlugin.current = null
+    highPriceLine.current = null
+    lowPriceLine.current = null
     setSelectionBox(null)
   }, [selectedStock])
 
@@ -851,6 +867,9 @@ export default function StockReview() {
       subChart2Histogram.current = null
       maSeries.current.clear()
       crosshairSynced.current = false
+      markersPlugin.current = null
+      highPriceLine.current = null
+      lowPriceLine.current = null
     }
   }, [])
 
@@ -1044,6 +1063,7 @@ export default function StockReview() {
     if (sliced.length === 0) return null
 
     const lastRow = sliced[sliced.length - 1]
+    const firstRow = sliced[0]
 
     // 区间最高
     const highInRange = sliced.reduce(
@@ -1065,13 +1085,157 @@ export default function StockReview() {
       }
     }
 
-    return {
+    // 区间涨幅 = (区间末根K线收盘价 - 区间首根K线开盘价) / 区间首根K线开盘价 × 100%
+    let rangeGain: number | null = null
+    if (firstRow.open != null && lastRow.close != null && firstRow.open !== 0) {
+      rangeGain = ((lastRow.close - firstRow.open) / firstRow.open) * 100
+    }
+
+    // 振幅 = (区间最高价 - 区间最低价) / 区间首根K线开盘价 × 100%
+    let rangeAmplitude: number | null = null
+    if (highInRange !== -Infinity && lowInRange !== Infinity && firstRow.open != null && firstRow.open !== 0) {
+      rangeAmplitude = ((highInRange - lowInRange) / firstRow.open) * 100
+    }
+
+    // 均价(VWAP) = 区间所有K线成交额之和 / 区间所有K线成交量之和
+    let vwap: number | null = null
+    let totalAmount = 0, totalVolume = 0
+    let hasAmountVolume = false
+    for (const r of sliced) {
+      if (r.amount != null && r.volume != null) {
+        totalAmount += r.amount
+        totalVolume += r.volume
+        hasAmountVolume = true
+      }
+    }
+    if (hasAmountVolume && totalVolume !== 0) {
+      vwap = totalAmount / totalVolume
+    }
+
+    // 量比 = 区间末根K线成交量 / (区间总成交量 / 区间K线根数)
+    let volumeRatio: number | null = null
+    let maxVolumeIdx = -1
+    let maxVolumeValue = 0
+    let maxVolumeRow: DailyRow | null = null
+    for (const r of sliced) {
+      if (r.volume != null && r.volume > maxVolumeValue) {
+        maxVolumeValue = r.volume
+        maxVolumeIdx = sliced.indexOf(r)
+        maxVolumeRow = r
+      }
+    }
+    if (lastRow.volume != null && totalVolume !== 0 && sliced.length > 0) {
+      volumeRatio = lastRow.volume / (totalVolume / sliced.length)
+    }
+
+    // 价格位置 = (最新价 - 区间最低) / (区间最高 - 区间最低) × 100%
+    let pricePosition: number | null = null
+    if (highInRange !== -Infinity && lowInRange !== Infinity && lastRow.close != null && highInRange !== lowInRange) {
+      pricePosition = ((lastRow.close - lowInRange) / (highInRange - lowInRange)) * 100
+    }
+
+    const result = {
       lastRow,
       high: highInRange !== -Infinity ? highInRange : null,
       low: lowInRange !== Infinity ? lowInRange : null,
       pctChange,
+      rangeGain,
+      rangeAmplitude,
+      vwap,
+      volumeRatio,
+      pricePosition,
+      maxVolumeIdx: maxVolumeIdx >= 0 ? startIdx + maxVolumeIdx : -1,
+      maxVolumeValue,
+      maxVolumeRow,
     }
+    return result
   }, [chartData, sliderValue])
+
+  // Sync sliderStats to ref for crosshair callback
+  useEffect(() => {
+    sliderStatsRef.current = sliderStats
+  }, [sliderStats])
+
+  // ── Effect: K线图 overlay 标记（区间高低点虚线 / 首尾标记 / 最大量标记）──
+  useEffect(() => {
+    if (!sliderStats || !candleSeries.current) return
+
+    const cs = candleSeries.current
+    const stats = sliderStats
+
+    // 高低点价格线
+    if (highPriceLine.current) {
+      try { cs.removePriceLine(highPriceLine.current) } catch { /* ignore */ }
+    }
+    if (lowPriceLine.current) {
+      try { cs.removePriceLine(lowPriceLine.current) } catch { /* ignore */ }
+    }
+    if (stats.high != null) {
+      highPriceLine.current = cs.createPriceLine({
+        price: stats.high,
+        color: '#f97316',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `高 ${stats.high.toFixed(2)}`,
+      })
+    }
+    if (stats.low != null) {
+      lowPriceLine.current = cs.createPriceLine({
+        price: stats.low,
+        color: '#22c55e',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `低 ${stats.low.toFixed(2)}`,
+      })
+      }
+
+      // 首尾 K 线 + 最大量标记
+    if (markersPlugin.current && allDates.length > 0) {
+      const markers: SeriesMarker<Time>[] = []
+      const [s, e] = sliderValue
+      if (s >= 0 && s < allDates.length) {
+        markers.push({
+          time: allDates[s] as Time,
+          position: 'belowBar',
+          color: '#22c55e',
+          shape: 'arrowUp',
+          id: 'first-candle',
+        })
+      }
+      if (e >= 0 && e < allDates.length && e !== s) {
+        markers.push({
+          time: allDates[e] as Time,
+          position: 'aboveBar',
+          color: '#ef4444',
+          shape: 'arrowDown',
+          id: 'last-candle',
+        })
+      }
+      if (stats.maxVolumeIdx >= 0 && stats.maxVolumeIdx < allDates.length) {
+        markers.push({
+          time: allDates[stats.maxVolumeIdx] as Time,
+          position: 'aboveBar',
+          color: '#f59e0b',
+          shape: 'circle',
+          id: 'max-volume',
+        })
+      }
+      markersPlugin.current.setMarkers(markers)
+    }
+
+    return () => {
+      if (highPriceLine.current) {
+        try { cs.removePriceLine(highPriceLine.current) } catch { /* ignore */ }
+        highPriceLine.current = null
+      }
+      if (lowPriceLine.current) {
+        try { cs.removePriceLine(lowPriceLine.current) } catch { /* ignore */ }
+        lowPriceLine.current = null
+      }
+    }
+  }, [sliderStats, allDates, sliderValue])
 
   // ── TASK 6: Time range slider handler ──
 
@@ -1378,6 +1542,14 @@ export default function StockReview() {
                   ))}
                 </div>
               )}
+              <div className="border-t border-slate-700 pt-1 mt-1">
+                <span className="text-red-400">
+                  距高点 {crosshairData.distFromHigh != null ? `${crosshairData.distFromHigh.toFixed(2)}%` : '—'}
+                </span>
+                <span className="text-green-400 ml-3">
+                  距低点 {crosshairData.distFromLow != null ? `+${crosshairData.distFromLow.toFixed(2)}%` : '—'}
+                </span>
+              </div>
             </div>
           )}
           {/* MA toggle buttons */}
@@ -1522,6 +1694,91 @@ export default function StockReview() {
                     </span>
                   </div>
                 </div>
+                {/* 进阶指标第二行 */}
+                <div className="border-t border-slate-200 dark:border-slate-700 pt-3 mt-3 flex items-center gap-6 flex-wrap">
+                  {/* 区间涨幅 */}
+                  <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">区间涨幅</span>
+                    <span
+                      className={`ml-2 text-lg font-medium ${pctColor(sliderStats.rangeGain)}`}
+                    >
+                      {sliderStats.rangeGain != null ? formatPct(sliderStats.rangeGain) : '—'}
+                    </span>
+                  </div>
+                  {/* 振幅 */}
+                  <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">振幅</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
+                      {sliderStats.rangeAmplitude != null ? `${sliderStats.rangeAmplitude.toFixed(2)}%` : '—'}
+                    </span>
+                  </div>
+                  {/* 均价 */}
+                  <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">均价</span>
+                    <span className="ml-2 text-lg font-medium text-slate-900 dark:text-white">
+                      {sliderStats.vwap != null ? sliderStats.vwap.toFixed(2) : '—'}
+                    </span>
+                  </div>
+                  {/* 量比 */}
+                  <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">量比</span>
+                    {sliderStats.volumeRatio != null && (
+                      <span
+                        className={`ml-2 text-lg font-medium ${
+                          sliderStats.volumeRatio >= 2.0
+                            ? 'text-red-500'
+                            : sliderStats.volumeRatio < 0.5
+                              ? 'text-orange-500'
+                              : 'text-slate-900 dark:text-white'
+                        }`}
+                      >
+                        {sliderStats.volumeRatio.toFixed(2)}
+                        {sliderStats.volumeRatio >= 2.0
+                          ? ' 放量'
+                          : sliderStats.volumeRatio < 0.5
+                            ? ' 缩量'
+                            : ''}
+                      </span>
+                    )}
+                    {sliderStats.volumeRatio == null && (
+                      <span className="ml-2 text-lg font-medium text-slate-400">—</span>
+                    )}
+                  </div>
+                  {/* 价格位置 */}
+                  <div>
+                    <span className="text-sm text-slate-500 dark:text-slate-400">价格位置</span>
+                    {sliderStats.pricePosition != null && (
+                      <div className="ml-2 flex items-center gap-2">
+                        <span className={`text-lg font-medium ${
+                          sliderStats.pricePosition < 30
+                            ? 'text-green-500'
+                            : sliderStats.pricePosition > 70
+                              ? 'text-red-500'
+                              : 'text-slate-900 dark:text-white'
+                        }`}>
+                          {sliderStats.pricePosition.toFixed(1)}%
+                        </span>
+                        <div className="w-6 h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${Math.max(0, Math.min(100, sliderStats.pricePosition))}%`,
+                              backgroundColor:
+                                sliderStats.pricePosition < 30
+                                  ? '#22c55e'
+                                  : sliderStats.pricePosition > 70
+                                    ? '#ef4444'
+                                    : '#94a3b8',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {sliderStats.pricePosition == null && (
+                      <span className="ml-2 text-lg font-medium text-slate-400">—</span>
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -1634,6 +1891,18 @@ export default function StockReview() {
                     }
                   }
 
+                  const stats = sliderStatsRef.current
+                  let distFromHigh: number | null = null
+                  let distFromLow: number | null = null
+                  if (stats && cd.close != null) {
+                    if (stats.high != null && stats.high !== 0) {
+                      distFromHigh = ((cd.close - stats.high) / stats.high) * 100
+                    }
+                    if (stats.low != null && stats.low !== 0) {
+                      distFromLow = ((cd.close - stats.low) / stats.low) * 100
+                    }
+                  }
+
                   setCrosshairData({
                     time: timeStr,
                     open: cd.open,
@@ -1642,6 +1911,8 @@ export default function StockReview() {
                     amount: row?.amount ?? null,
                     turnover: row?.turnover ?? null,
                     maValues,
+                    distFromHigh,
+                    distFromLow,
                   })
                 })
 
@@ -1658,6 +1929,9 @@ export default function StockReview() {
                 })
                 ro.observe(el)
                 resizeObserverRef.current = ro
+
+                // Series markers plugin
+                markersPlugin.current = createSeriesMarkers(candles, [])
 
                 // Crosshair sync (lazy — after all 3 charts are ready)
                 if (
