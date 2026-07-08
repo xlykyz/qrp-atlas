@@ -20,6 +20,7 @@ ENV/
 .venv/
 *.egg-info/
 *.pyc
+.pytest_cache/
 
 # 环境变量文件
 .env
