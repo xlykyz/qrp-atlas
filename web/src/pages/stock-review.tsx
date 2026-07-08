@@ -943,6 +943,32 @@ export default function StockReview() {
     }
   }, [amountData, macdData, pctData, rsiData, turnoverData, volumeData])
 
+  // ── Effect: Create/remove MA series dynamically when allMAConfigs changes ──
+  useEffect(() => {
+    const main = mainChart.current
+    if (!main || !candleSeries.current) return
+
+    // 创建缺失的 MA series（例如新增的自定义MA）
+    for (const cfg of allMAConfigs) {
+      if (!maSeries.current.has(cfg.key)) {
+        const s = main.addSeries(LineSeries, {
+          color: cfg.color, lineWidth: 1, priceLineVisible: false,
+          lastValueVisible: false,
+          visible: visibleMAs.has(cfg.key),
+        })
+        maSeries.current.set(cfg.key, s)
+      }
+    }
+
+    // 清理已被删除的 MA series（例如删除的自定义MA）
+    for (const [key, series] of maSeries.current.entries()) {
+      if (!allMAConfigs.some(cfg => cfg.key === key)) {
+        main.removeSeries(series)
+        maSeries.current.delete(key)
+      }
+    }
+  }, [allMAConfigs, visibleMAs])
+
   // ── Effect: Rebuild sub-chart series + set data ──
   // Always recreate sub-chart series on indicator changes to avoid stale series after rapid switches.
   useEffect(() => {
@@ -1396,8 +1422,7 @@ export default function StockReview() {
         color: '#f97316',
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `高 ${stats.high.toFixed(2)}`,
+        axisLabelVisible: false,
       })
     }
     if (stats.low != null) {
@@ -1406,8 +1431,7 @@ export default function StockReview() {
         color: '#22c55e',
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `低 ${stats.low.toFixed(2)}`,
+        axisLabelVisible: false,
       })
       }
 
@@ -2087,12 +2111,13 @@ export default function StockReview() {
                   upColor: UP_COLOR, downColor: DOWN_COLOR,
                   borderUpColor: WICK_UP_COLOR, borderDownColor: WICK_DOWN_COLOR,
                   wickUpColor: WICK_UP_COLOR, wickDownColor: WICK_DOWN_COLOR,
+                  priceLineVisible: false, lastValueVisible: false,
                 })
                 const maMap = new Map<MAKey, ISeriesApi<'Line'>>()
                 for (const cfg of allMAConfigs) {
                   const s = main.addSeries(LineSeries, {
                     color: cfg.color, lineWidth: 1, priceLineVisible: false,
-                    lastValueVisible: false, title: cfg.label,
+                    lastValueVisible: false,
                     visible: visibleMAs.has(cfg.key),
                   })
                   maMap.set(cfg.key, s)
