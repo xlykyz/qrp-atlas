@@ -19,6 +19,7 @@ export interface DailyRow {
   pct_5d?: number | null;
   pct_10d?: number | null;
   pct_20d?: number | null;
+  adj_factor?: number | null;
   created_at?: string | null;
   board?: string | null;
 }
