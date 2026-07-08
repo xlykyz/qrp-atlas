@@ -63,6 +63,11 @@ def normalize_price_frame(
         ]
         return pd.DataFrame(columns=cols)
 
+    required = ["trade_date", id_col, name_col, "open", "high", "low", "close"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"normalize_price_frame missing required columns: {missing}")
+
     out = pd.DataFrame()
     out["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce", format="mixed")
     out["asset_id"] = df[id_col].astype(str)
@@ -132,7 +137,7 @@ def _build_where(
     """构造 WHERE 子句片段和参数。"""
     clauses: list[str] = []
     params: list = []
-    if column_values:
+    if column_values is not None:
         values = list(column_values)
         if values:
             placeholders = ", ".join("?" * len(values))

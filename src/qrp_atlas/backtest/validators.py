@@ -69,7 +69,7 @@ def validate_price_df(price_df: pd.DataFrame) -> None:
         price_df: 标准 PriceFrame。
 
     Raises:
-        ValueError: 缺少必需列、非 DataFrame、trade_date 不可解析为日期等结构性错误。
+        ValueError: 缺少必需列、非 DataFrame、asset_id+trade_date 重复行等结构性错误。
     """
     if not isinstance(price_df, pd.DataFrame):
         raise ValueError("price_df must be a pandas DataFrame")
@@ -77,6 +77,14 @@ def validate_price_df(price_df: pd.DataFrame) -> None:
     missing = _missing_columns(price_df.columns, PRICE_REQUIRED_COLUMNS)
     if missing:
         raise ValueError(f"price_df missing required columns: {missing}")
+
+    if len(price_df) > 0:
+        dup_mask = price_df.duplicated(subset=["asset_id", "trade_date"], keep=False)
+        dup_count = int(dup_mask.sum())
+        if dup_count > 0:
+            raise ValueError(
+                f"price_df has {dup_count} rows with duplicate (asset_id, trade_date) pairs"
+            )
 
 
 def validate_signals_df(signals_df: pd.DataFrame) -> None:
@@ -152,4 +160,9 @@ def validate_config(config: BacktestConfig) -> None:
     if config.cost.stamp_tax_rate < 0:
         raise ValueError(
             f"cost.stamp_tax_rate must be >= 0, got: {config.cost.stamp_tax_rate}"
+        )
+
+    if config.cost.slippage_bps < 0:
+        raise ValueError(
+            f"cost.slippage_bps must be >= 0, got: {config.cost.slippage_bps}"
         )

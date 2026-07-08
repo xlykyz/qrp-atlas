@@ -4,10 +4,11 @@ test_units.py - validators / metrics / data 适配层单元测试
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from qrp_atlas.backtest.data import normalize_price_frame
+from qrp_atlas.backtest.data import _build_where, normalize_price_frame
 from qrp_atlas.backtest.metrics import summarize_trades
 from qrp_atlas.backtest.models import (
     BacktestConfig,
@@ -313,3 +314,72 @@ def test_normalize_price_frame_drops_invalid_dates():
     )
     out = normalize_price_frame(df, asset_type="stock", id_col="ticker", name_col="name")
     assert len(out) == 1
+
+
+# ────────────────────────────────────────────────────────────
+# validators: slippage_bps < 0
+# ────────────────────────────────────────────────────────────
+def test_validate_config_negative_slippage():
+    cfg = _make_valid_config(
+        cost=CostRule(commission_rate=0.00025, stamp_tax_rate=0.0005, slippage_bps=-1.0)
+    )
+    with pytest.raises(ValueError, match="slippage_bps"):
+        validate_config(cfg)
+
+
+# ────────────────────────────────────────────────────────────
+# validators: price_df 重复 asset_id + trade_date
+# ────────────────────────────────────────────────────────────
+def test_validate_price_df_duplicate_rows():
+    df = pd.DataFrame(
+        [
+            ("2024-01-01", "000001.SZ", "X", "stock", 10.0, 10.5, 9.8, 10.2),
+            ("2024-01-01", "000001.SZ", "X", "stock", 10.0, 10.5, 9.8, 10.2),
+        ],
+        columns=["trade_date", "asset_id", "asset_name", "asset_type", "open", "high", "low", "close"],
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_price_df(df)
+
+
+def test_validate_price_df_no_duplicate_across_assets():
+    # 不同 asset_id 同一日期不算重复
+    df = pd.DataFrame(
+        [
+            ("2024-01-01", "000001.SZ", "X", "stock", 10.0, 10.5, 9.8, 10.2),
+            ("2024-01-01", "000002.SZ", "Y", "stock", 5.0, 5.2, 4.9, 5.1),
+        ],
+        columns=["trade_date", "asset_id", "asset_name", "asset_type", "open", "high", "low", "close"],
+    )
+    validate_price_df(df)  # not raise
+
+
+# ────────────────────────────────────────────────────────────
+# data._build_where: pandas Index / numpy array
+# ────────────────────────────────────────────────────────────
+def test_build_where_with_pandas_index():
+    idx = pd.Index(["000001.SZ", "000002.SZ"])
+    where_sql, params = _build_where(
+        column_values=idx, column_name="ticker", start_date=None, end_date=None
+    )
+    assert "ticker IN (?, ?)" in where_sql
+    assert params == ["000001.SZ", "000002.SZ"]
+
+
+def test_build_where_with_numpy_array():
+    arr = np.array(["000001.SZ", "000002.SZ"])
+    where_sql, params = _build_where(
+        column_values=arr, column_name="ticker", start_date=None, end_date=None
+    )
+    assert "ticker IN (?, ?)" in where_sql
+    assert params == ["000001.SZ", "000002.SZ"]
+
+
+def test_build_where_with_none_no_in_clause():
+    # column_values=None 时不生成 IN 子句
+    where_sql, params = _build_where(
+        column_values=None, column_name="ticker", start_date="2024-01-01", end_date=None
+    )
+    assert "IN" not in where_sql
+    assert "trade_date >=" in where_sql
+    assert params == ["2024-01-01"]

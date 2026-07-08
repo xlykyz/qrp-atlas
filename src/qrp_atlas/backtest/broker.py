@@ -19,6 +19,7 @@ broker.py - 单笔交易撮合
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
+import math
 
 import numpy as np
 import pandas as pd
@@ -112,8 +113,12 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 def _is_valid_price(value: Optional[float]) -> bool:
-    """价格合法：非 None 且 > 0。"""
-    return value is not None and value > 0
+    """价格合法：非 None、finite 且 > 0。"""
+    if value is None:
+        return False
+    if not math.isfinite(value):
+        return False
+    return value > 0
 
 
 def _get_value(signal: Union[pd.Series, Dict[str, Any]], key: str, default: Any = None) -> Any:
@@ -275,8 +280,22 @@ def simulate_signal(
     net_return = gross_return - buy_cost - sell_cost
 
     window = api.df.iloc[entry_pos : exit_pos + 1]
-    lows = window["low"].to_numpy(dtype=float)
-    highs = window["high"].to_numpy(dtype=float)
+    lows = pd.to_numeric(window["low"], errors="coerce").to_numpy(dtype=float)
+    highs = pd.to_numeric(window["high"], errors="coerce").to_numpy(dtype=float)
+
+    if not np.all(np.isfinite(lows)) or not np.all(np.isfinite(highs)):
+        return skip(
+            REASON_INVALID_PRICE,
+            f"non-finite high/low in window [entry_pos={entry_pos}, exit_pos={exit_pos}] "
+            f"for asset {asset_id!r}",
+        )
+    if np.any(lows <= 0) or np.any(highs <= 0):
+        return skip(
+            REASON_INVALID_PRICE,
+            f"non-positive high/low in window [entry_pos={entry_pos}, exit_pos={exit_pos}] "
+            f"for asset {asset_id!r}",
+        )
+
     mae = float((lows / entry_price).min() - 1.0)
     mfe = float((highs / entry_price).max() - 1.0)
 

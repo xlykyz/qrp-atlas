@@ -381,3 +381,71 @@ def test_mixed_signals(default_config, default_price_df):
     reasons = {s.reason for s in result.skipped}
     assert "NO_PRICE_DATA" in reasons
     assert "INVALID_DIRECTION" in reasons
+
+
+# ────────────────────────────────────────────────────────────
+# 额外: MAE/MFE 窗口内 high/low 为 NaN → INVALID_PRICE
+# ────────────────────────────────────────────────────────────
+def test_mae_mfe_window_nan_high(default_config):
+    rows = [
+        ("2024-01-01", "000001.SZ", "X", 10.0, 10.5, 9.8, 10.2),
+        ("2024-01-02", "000001.SZ", "X", 10.2, 10.8, 10.0, 10.5),
+        ("2024-01-03", "000001.SZ", "X", 10.5, None, 10.3, 10.8),  # high=None
+        ("2024-01-04", "000001.SZ", "X", 10.8, 11.0, 10.5, 10.6),
+        ("2024-01-05", "000001.SZ", "X", 10.6, 10.9, 10.4, 10.7),
+        ("2024-01-06", "000001.SZ", "X", 10.7, 11.2, 10.6, 11.0),
+    ]
+    price_df = pd.DataFrame(
+        rows,
+        columns=["trade_date", "asset_id", "asset_name", "open", "high", "low", "close"],
+    ).assign(asset_type="stock")
+    signals_df = make_signals(signal_date="2024-01-01")
+    result = BacktestEngine().run(price_df, signals_df, default_config)
+
+    assert result.summary["trade_count"] == 0
+    assert result.summary["skipped_count"] == 1
+    assert result.skipped[0].reason == "INVALID_PRICE"
+    assert "non-finite" in (result.skipped[0].detail or "")
+
+
+def test_mae_mfe_window_nan_low(default_config):
+    rows = [
+        ("2024-01-01", "000001.SZ", "X", 10.0, 10.5, 9.8, 10.2),
+        ("2024-01-02", "000001.SZ", "X", 10.2, 10.8, None, 10.5),  # low=None
+        ("2024-01-03", "000001.SZ", "X", 10.5, 11.0, 10.3, 10.8),
+        ("2024-01-04", "000001.SZ", "X", 10.8, 11.0, 10.5, 10.6),
+        ("2024-01-05", "000001.SZ", "X", 10.6, 10.9, 10.4, 10.7),
+        ("2024-01-06", "000001.SZ", "X", 10.7, 11.2, 10.6, 11.0),
+    ]
+    price_df = pd.DataFrame(
+        rows,
+        columns=["trade_date", "asset_id", "asset_name", "open", "high", "low", "close"],
+    ).assign(asset_type="stock")
+    signals_df = make_signals(signal_date="2024-01-01")
+    result = BacktestEngine().run(price_df, signals_df, default_config)
+
+    assert result.summary["skipped_count"] == 1
+    assert result.skipped[0].reason == "INVALID_PRICE"
+    assert "non-finite" in (result.skipped[0].detail or "")
+
+
+def test_mae_mfe_window_non_positive_low(default_config):
+    # low=0 → non-positive → INVALID_PRICE
+    rows = [
+        ("2024-01-01", "000001.SZ", "X", 10.0, 10.5, 9.8, 10.2),
+        ("2024-01-02", "000001.SZ", "X", 10.2, 10.8, 0.0, 10.5),  # low=0
+        ("2024-01-03", "000001.SZ", "X", 10.5, 11.0, 10.3, 10.8),
+        ("2024-01-04", "000001.SZ", "X", 10.8, 11.0, 10.5, 10.6),
+        ("2024-01-05", "000001.SZ", "X", 10.6, 10.9, 10.4, 10.7),
+        ("2024-01-06", "000001.SZ", "X", 10.7, 11.2, 10.6, 11.0),
+    ]
+    price_df = pd.DataFrame(
+        rows,
+        columns=["trade_date", "asset_id", "asset_name", "open", "high", "low", "close"],
+    ).assign(asset_type="stock")
+    signals_df = make_signals(signal_date="2024-01-01")
+    result = BacktestEngine().run(price_df, signals_df, default_config)
+
+    assert result.summary["skipped_count"] == 1
+    assert result.skipped[0].reason == "INVALID_PRICE"
+    assert "non-positive" in (result.skipped[0].detail or "")
