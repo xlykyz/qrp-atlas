@@ -34,6 +34,25 @@ import pandas as pd
 from .schema import get_table
 from .conventions import NUMERIC_COLUMNS, BOOLEAN_COLUMNS, DATE_COLUMNS
 
+_NUMERIC_DUCKDB_TYPES = {"DOUBLE", "INTEGER", "BIGINT", "DECIMAL", "FLOAT"}
+
+
+def _schema_columns_by_dtype(table_name: str) -> tuple[list[str], list[str], list[str]]:
+    """按 DuckDB dtype 从 schema 推导数值、布尔、日期列。"""
+    schema = get_table(table_name)
+    numeric_columns = []
+    boolean_columns = []
+    date_columns = []
+    for col in schema.columns:
+        dtype = col.dtype.upper().split("(", 1)[0]
+        if dtype in _NUMERIC_DUCKDB_TYPES:
+            numeric_columns.append(col.name)
+        elif dtype == "BOOLEAN":
+            boolean_columns.append(col.name)
+        elif dtype in {"DATE", "TIMESTAMP"}:
+            date_columns.append(col.name)
+    return numeric_columns, boolean_columns, date_columns
+
 
 class ValidationError(Exception):
     """校验异常基类"""
@@ -177,7 +196,8 @@ def validate_schema(
         validate_schema(df, "daily_market_snapshot", allow_extra=False)
     """
     schema = get_table(table_name)
-    required = set(schema.column_names())
+    required = {col.name for col in schema.columns if col.nullable is False}
+    expected = set(schema.column_names())
     try:
         check_missing_columns(df, required, table_name)
     except MissingColumnsError:
@@ -185,12 +205,39 @@ def validate_schema(
     extra_cols = set()
     if not allow_extra:
         try:
-            _, extra_cols = check_extra_columns(df, required, table_name, strict=True)
+            _, extra_cols = check_extra_columns(df, expected, table_name, strict=True)
         except ExtraColumnsError:
             raise
     else:
-        _, extra_cols = check_extra_columns(df, required, table_name, strict=False)
+        _, extra_cols = check_extra_columns(df, expected, table_name, strict=False)
     return True, set(), extra_cols
+
+
+def align_to_schema(
+    df: pd.DataFrame,
+    table_name: str,
+    fill_missing_optional: bool = True,
+    drop_extra: bool = False,
+) -> pd.DataFrame:
+    """按 schema 补齐 optional columns，并按 schema 顺序重排列。"""
+    schema = get_table(table_name)
+    df = df.copy()
+
+    required = {col.name for col in schema.columns if col.nullable is False}
+    expected = list(schema.column_names())
+    check_missing_columns(df, required, table_name)
+
+    if fill_missing_optional:
+        for col in schema.columns:
+            if col.nullable and col.name not in df.columns:
+                df[col.name] = None
+
+    schema_cols = [col for col in expected if col in df.columns]
+    if drop_extra:
+        return df[schema_cols]
+
+    extra_cols = [col for col in df.columns if col not in expected]
+    return df[schema_cols + extra_cols]
 
 
 def convert_numeric(
@@ -306,6 +353,11 @@ def canonicalize(
     Example:
         df = canonicalize(df)
     """
+    if table_name:
+        schema_numeric, schema_boolean, schema_date = _schema_columns_by_dtype(table_name)
+        numeric_columns = numeric_columns or schema_numeric
+        boolean_columns = boolean_columns or schema_boolean
+        date_columns = date_columns or schema_date
     df = convert_numeric(df, numeric_columns)
     df = convert_boolean(df, boolean_columns)
     df = convert_date(df, date_columns, format=date_format)
@@ -341,5 +393,5 @@ def quick_validate(
     """
     validate_schema(df, table_name, allow_extra=allow_extra)
     if auto_convert:
-        df = canonicalize(df)
+        df = canonicalize(df, table_name)
     return df

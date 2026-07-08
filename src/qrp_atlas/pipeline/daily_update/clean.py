@@ -3,55 +3,13 @@ import pandas as pd
 from qrp_atlas.contracts import (
     TICKER,
     TRADE_DATE,
-    NAME,
-    OPEN,
-    HIGH,
-    LOW,
-    CLOSE,
     VOLUME,
     AMOUNT,
-    PCT_CHANGE,
-    TURNOVER,
-    MARKET_CAP,
-    FLOAT_CAP,
-    PRE_CLOSE,
-    get_table,
+    align_to_schema,
+    apply_mapping,
     canonicalize,
-    TUSHARE_DAILY,
-    SINA_REALTIME,
+    normalize_ticker,
 )
-from qrp_atlas.contracts.conventions import normalize_ticker
-
-
-AKSHARE_REALTIME_MAPPING = {
-    "代码": TICKER,
-    "名称": NAME,
-    "最新价": CLOSE,
-    "涨跌幅": PCT_CHANGE,
-    "涨跌额": "chg",
-    "成交量": VOLUME,
-    "成交额": AMOUNT,
-    "振幅": "amplitude",
-    "最高": HIGH,
-    "最低": LOW,
-    "今开": OPEN,
-    "昨收": PRE_CLOSE,
-    "换手率": TURNOVER,
-    "市盈率-动态": "pe_ttm",
-    "市净率": "pb",
-    "总市值": MARKET_CAP,
-    "流通市值": FLOAT_CAP,
-    "涨速": "rise_speed",
-    "5分钟涨跌": "min5_chg",
-    "60日涨跌幅": "day60_pct",
-    "年初至今涨跌幅": "ytd_pct",
-}
-
-SOURCE_MAPPINGS = {
-    "akshare_realtime": AKSHARE_REALTIME_MAPPING,
-    "sina_realtime": SINA_REALTIME,
-    "tushare_daily": TUSHARE_DAILY,
-}
 
 
 def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> pd.DataFrame:
@@ -70,11 +28,7 @@ def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> 
     Returns:
         清洗后的 DataFrame
     """
-    if source not in SOURCE_MAPPINGS:
-        raise ValueError(f"Unknown source: {source}. Available: {list(SOURCE_MAPPINGS.keys())}")
-    
-    mapping = SOURCE_MAPPINGS[source]
-    df = df.rename(columns=mapping)
+    df = apply_mapping(df, source)
 
     if source == "tushare_daily":
         df[TRADE_DATE] = pd.to_datetime(df[TRADE_DATE], format="%Y%m%d")
@@ -90,15 +44,12 @@ def clean_daily_snapshot(df: pd.DataFrame, source: str = "akshare_realtime") -> 
     if TICKER in df.columns:
         df[TICKER] = df[TICKER].apply(lambda x: normalize_ticker(x) if pd.notna(x) else x)
 
-    schema = get_table("daily_market_snapshot")
-    required_cols = list(schema.column_names())
-    
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None
-    
-    df = df[[col for col in required_cols if col in df.columns]]
-    
+    df = align_to_schema(
+        df,
+        "daily_market_snapshot",
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
     df = canonicalize(df, "daily_market_snapshot")
     
     df = df.drop_duplicates(subset=[TRADE_DATE, TICKER], keep="last")

@@ -2,7 +2,7 @@ import duckdb
 import pandas as pd
 
 from qrp_atlas.config import DB_PATH, ensure_dirs
-from qrp_atlas.contracts import init_database, quick_validate
+from qrp_atlas.contracts import align_to_schema, init_database, quick_validate
 
 
 def load_daily_market_snapshot(df: pd.DataFrame, trade_date: str) -> int:
@@ -24,7 +24,13 @@ def load_daily_market_snapshot(df: pd.DataFrame, trade_date: str) -> int:
     """
     ensure_dirs()
     
-    df = quick_validate(df, "daily_market_snapshot")
+    df = align_to_schema(
+        df,
+        "daily_market_snapshot",
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
+    df = quick_validate(df, "daily_market_snapshot", allow_extra=False)
     
     con = duckdb.connect(str(DB_PATH))
     try:

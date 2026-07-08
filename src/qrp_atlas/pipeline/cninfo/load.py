@@ -6,20 +6,13 @@ load.py - 调研公告数据入库模块
 
 from typing import Any
 
+import pandas as pd
+
 from qrp_atlas.contracts import (
-    SECU_CODE,
-    SEC_NAME,
-    NOTICE_DATE,
-    RECEIVE_DATE,
-    RECEIVE_WAY,
-    RECEIVE_PLACE,
-    RECEPTIONIST,
-    CONTENT,
-    ORG_COUNT,
-    SOURCE,
-    ANNOUNCEMENT_TITLE,
-    ADJUNCT_URL,
-    ADJUNCT_SIZE,
+    CREATED_AT,
+    CNINFO_RESEARCH_VISITS,
+    align_to_schema,
+    quick_validate,
 )
 
 
@@ -38,39 +31,29 @@ def upsert_research_visits(con: Any, records: list[dict], incremental: bool = Fa
     if not records:
         return 0
 
-    table_name = "cninfo_research_visits"
-    columns = [
-        SECU_CODE,
-        SEC_NAME,
-        NOTICE_DATE,
-        RECEIVE_DATE,
-        RECEIVE_WAY,
-        RECEIVE_PLACE,
-        RECEPTIONIST,
-        CONTENT,
-        ORG_COUNT,
-        SOURCE,
-        # 东财数据不包含这些字段，设为 NULL
-        ANNOUNCEMENT_TITLE,
-        ADJUNCT_URL,
-        ADJUNCT_SIZE,
-    ]
+    table_name = CNINFO_RESEARCH_VISITS.name
+    df = pd.DataFrame(records)
+    df = align_to_schema(
+        df,
+        table_name,
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
+    df = quick_validate(df, table_name, allow_extra=False)
 
+    columns = [c for c in CNINFO_RESEARCH_VISITS.column_names() if c != CREATED_AT]
     col_names = ", ".join(columns)
-    placeholders = ", ".join(["?" for _ in columns])
 
     # 主更新 = INSERT OR REPLACE, 增量 = INSERT OR IGNORE
     action = "INSERT OR IGNORE" if incremental else "INSERT OR REPLACE"
     sql = f"""
     {action} INTO {table_name} ({col_names})
-    VALUES ({placeholders})
+    SELECT {col_names} FROM tmp_df
     """
 
-    count = 0
-    for record in records:
-        values = [record.get(col) for col in columns]
-        con.execute(sql, values)
-        count += 1
+    con.register("tmp_df", df)
+    con.execute(sql)
+    count = len(df)
 
     print(
         f"Loaded {count} records into {table_name}",

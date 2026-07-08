@@ -8,17 +8,12 @@ from collections import defaultdict
 from typing import Any
 
 from qrp_atlas.contracts import (
-    SECU_CODE,
-    SEC_NAME,
-    NOTICE_DATE,
-    RECEIVE_DATE,
-    RECEIVE_WAY,
-    RECEIVE_PLACE,
-    RECEPTIONIST,
-    CONTENT,
     ORG_COUNT,
     SOURCE,
+    get_mapping,
 )
+
+FIELD_MAP = get_mapping("eastmoney_research_visits")
 
 
 def clean_eastmoney(records: list[dict]) -> list[dict]:
@@ -54,14 +49,14 @@ def clean_eastmoney(records: list[dict]) -> list[dict]:
         receive_date = receive_start_date[:10] if receive_start_date else ""
 
         cleaned_record = {
-            SECU_CODE: secu_code,
-            SEC_NAME: record.get("SECURITY_NAME_ABBR", ""),
-            NOTICE_DATE: notice_date,
-            RECEIVE_DATE: receive_date,
-            RECEIVE_WAY: record.get("RECEIVE_WAY_EXPLAIN", ""),
-            RECEIVE_PLACE: record.get("RECEIVE_PLACE", ""),
-            RECEPTIONIST: record.get("RECEPTIONIST", ""),
-            CONTENT: record.get("CONTENT", ""),
+            FIELD_MAP["SECUCODE"]: secu_code,
+            FIELD_MAP["SECURITY_NAME_ABBR"]: record.get("SECURITY_NAME_ABBR", ""),
+            FIELD_MAP["NOTICE_DATE"]: notice_date,
+            FIELD_MAP["RECEIVE_START_DATE"]: receive_date,
+            FIELD_MAP["RECEIVE_WAY_EXPLAIN"]: record.get("RECEIVE_WAY_EXPLAIN", ""),
+            FIELD_MAP["RECEIVE_PLACE"]: record.get("RECEIVE_PLACE", ""),
+            FIELD_MAP["RECEPTIONIST"]: record.get("RECEPTIONIST", ""),
+            FIELD_MAP["CONTENT"]: record.get("CONTENT", ""),
             ORG_COUNT: group_counts[(secu_code, receive_start_date)],
             SOURCE: "eastmoney",
         }

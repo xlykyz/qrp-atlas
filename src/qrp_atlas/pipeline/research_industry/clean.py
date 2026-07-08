@@ -10,66 +10,11 @@ import logging
 from pathlib import Path
 
 from qrp_atlas.config.paths import DATA_DIR
+from qrp_atlas.contracts import get_mapping
 
 logger = logging.getLogger(__name__)
 
-# camelCase API key → snake_case DB key
-FIELD_MAP = {
-    "infoCode": "info_code",
-    "title": "title",
-    "stockCode": "stock_code",
-    "stockName": "stock_name",
-    "publishDate": "publish_date",
-    "market": "market",
-    "column": "report_column",  # renamed to avoid DuckDB reserved word
-    "reportType": "report_type",
-    "encodeUrl": "encode_url",
-    "emRatingCode": "em_rating_code",
-    "emRatingValue": "em_rating_value",
-    "emRatingName": "em_rating_name",
-    "lastEmRatingCode": "last_em_rating_code",
-    "lastEmRatingValue": "last_em_rating_value",
-    "lastEmRatingName": "last_em_rating_name",
-    "sRatingCode": "s_rating_code",
-    "sRatingName": "s_rating_name",
-    "ratingChange": "rating_change",
-    "indvAimPriceT": "indv_aim_price_t",
-    "indvAimPriceL": "indv_aim_price_l",
-    "predictThisYearEps": "predict_this_year_eps",
-    "predictThisYearPe": "predict_this_year_pe",
-    "predictNextYearEps": "predict_next_year_eps",
-    "predictNextYearPe": "predict_next_year_pe",
-    "predictNextTwoYearEps": "predict_next_two_year_eps",
-    "predictNextTwoYearPe": "predict_next_two_year_pe",
-    "predictLastYearEps": "predict_last_year_eps",
-    "predictLastYearPe": "predict_last_year_pe",
-    "actualLastYearEps": "actual_last_year_eps",
-    "actualLastTwoYearEps": "actual_last_two_year_eps",
-    "orgCode": "org_code",
-    "orgName": "org_name",
-    "orgSName": "org_sname",
-    "orgType": "org_type",
-    "author": "author",
-    "authorID": "author_id",
-    "researcher": "researcher",
-    "count": "count",
-    "indvInduCode": "indv_indu_code",
-    "indvInduName": "indv_indu_name",
-    "indvIsNew": "indv_is_new",
-    "newListingDate": "new_listing_date",
-    "newPurchaseDate": "new_purchase_date",
-    "newIssuePrice": "new_issue_price",
-    "newPeIssueA": "new_pe_issue_a",
-    "attachPages": "attach_pages",
-    "attachSize": "attach_size",
-    "attachType": "attach_type",
-    "industryCode": "industry_code",
-    "industryName": "industry_name",
-    "emIndustryCode": "em_industry_code",
-    # From detail page (already snake_case in zwinfo)
-    "noticeContent": "notice_content",
-    "attachUrl": "attach_url",
-}
+FIELD_MAP = get_mapping("eastmoney_research_industry")
 
 # Fields that arrive as Python lists and need JSON string serialization
 LIST_FIELDS = {"author", "authorID"}

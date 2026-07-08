@@ -6,21 +6,12 @@
 import logging
 from typing import Any
 
+import pandas as pd
+
+from qrp_atlas.contracts import CREATED_AT, align_to_schema, quick_validate
 from qrp_atlas.contracts.schema import RESEARCH_REPORT_STOCK
 
 logger = logging.getLogger(__name__)
-
-# Columns whose DuckDB dtype is numeric but may arrive as empty string
-_NUMERIC_DUCKDB_TYPES = {"DOUBLE", "INTEGER", "BIGINT", "DECIMAL", "FLOAT"}
-_COL_DTYPE = {col.name: col.dtype for col in RESEARCH_REPORT_STOCK.columns}
-
-
-def _coerce_params(params: list, columns: list[str]) -> list:
-    """Convert '' → None for numeric DuckDB columns."""
-    return [
-        None if (val == "" and _COL_DTYPE.get(col) in _NUMERIC_DUCKDB_TYPES) else val
-        for col, val in zip(columns, params)
-    ]
 
 
 def load_report(con: Any, records: list[dict], incremental: bool = False) -> int:
@@ -41,15 +32,26 @@ def load_report(con: Any, records: list[dict], incremental: bool = False) -> int
         logger.warning("load_report: no records to load")
         return 0
 
+    df = pd.DataFrame(records)
+    df = align_to_schema(
+        df,
+        RESEARCH_REPORT_STOCK.name,
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
+    df = quick_validate(df, RESEARCH_REPORT_STOCK.name, allow_extra=False)
+
     # Column names from schema (exclude created_at, which has DEFAULT)
-    columns = [c for c in RESEARCH_REPORT_STOCK.column_names() if c != "created_at"]
+    columns = [c for c in RESEARCH_REPORT_STOCK.column_names() if c != CREATED_AT]
     col_list = ", ".join(columns)
-    placeholders = ", ".join(["?"] * len(columns))
     insert_sql_keyword = "INSERT OR IGNORE" if incremental else "INSERT OR REPLACE"
-    insert_sql = f"{insert_sql_keyword} INTO {RESEARCH_REPORT_STOCK.name} ({col_list}) VALUES ({placeholders})"
+    insert_sql = (
+        f"{insert_sql_keyword} INTO {RESEARCH_REPORT_STOCK.name} ({col_list}) "
+        f"SELECT {col_list} FROM tmp_df"
+    )
 
     # Collect info_codes present *before* this load run
-    info_codes = [r.get("info_code") for r in records if r.get("info_code")]
+    info_codes = df["info_code"].dropna().astype(str).tolist()
     codes_before: set = set()
     if info_codes:
         placeholders_in = ", ".join(["?" for _ in info_codes])
@@ -61,12 +63,8 @@ def load_report(con: Any, records: list[dict], incremental: bool = False) -> int
             ).fetchall()
         }
 
-    # Build param rows with empty-string coercion for numeric columns
-    params_list = [
-        _coerce_params([record.get(col) for col in columns], columns)
-        for record in records
-    ]
-    con.executemany(insert_sql, params_list)
+    con.register("tmp_df", df)
+    con.execute(insert_sql)
 
     # Count rows with info_codes that were NOT present before
     codes_after: set = set()
