@@ -22,6 +22,18 @@ ENV/
 *.pyc
 .pytest_cache/
 
+# 测试覆盖率产物
+.coverage
+htmlcov/
+coverage.xml
+.coverage.*
+
+# 测试用临时数据库（DuckDB / SQLite 等）
+*.duckdb
+*.duckdb.wal
+local_data/
+tmp/
+
 # 环境变量文件
 .env
 

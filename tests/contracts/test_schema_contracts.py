@@ -1,0 +1,121 @@
+"""contracts/schema 表结构契约测试。
+
+覆盖：
+- DAILY_MARKET_SNAPSHOT 主键为 (trade_date, ticker)
+- ADJ_FACTOR_CHANGES 主键为 (ticker, trade_date)
+- ADJ_FACTOR_CHANGES 至少包含 ticker / trade_date / adj_factor
+- 所有 TableSchema.duckdb_create_sql() 都能在 DuckDB 中建表（含 IF NOT EXISTS 幂等）
+- 所有主键字段必须 nullable=False
+"""
+
+from __future__ import annotations
+
+import duckdb
+import pytest
+
+from qrp_atlas.contracts import (
+    ADJ_FACTOR,
+    ADJ_FACTOR_CHANGES,
+    ALL_TABLES,
+    DAILY_MARKET_SNAPSHOT,
+    TICKER,
+    TRADE_DATE,
+    init_database,
+)
+
+
+def test_daily_market_snapshot_primary_key():
+    pk = DAILY_MARKET_SNAPSHOT.primary_key
+    assert TRADE_DATE in pk
+    assert TICKER in pk
+    # 顺序按 SSOT 约定：trade_date 在前
+    assert pk == (TRADE_DATE, TICKER)
+
+
+def test_adj_factor_changes_primary_key():
+    pk = ADJ_FACTOR_CHANGES.primary_key
+    assert TICKER in pk
+    assert TRADE_DATE in pk
+    assert pk == (TICKER, TRADE_DATE)
+
+
+def test_adj_factor_changes_has_required_columns():
+    names = ADJ_FACTOR_CHANGES.column_names()
+    assert TICKER in names
+    assert TRADE_DATE in names
+    assert ADJ_FACTOR in names
+
+
+def test_all_tables_create_sql_executable_in_duckdb(tmp_path):
+    """每张表的 duckdb_create_sql() 必须能在 DuckDB 中执行建表。"""
+    db_path = tmp_path / "schema.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        for table in ALL_TABLES:
+            sql = table.duckdb_create_sql()
+            # 首次建表
+            con.execute(sql)
+            # 二次执行 IF NOT EXISTS 不应报错
+            con.execute(sql)
+            # 表确实存在
+            row = con.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table.name],
+            ).fetchone()
+            assert row and row[0] == 1, f"table {table.name} not created"
+    finally:
+        con.close()
+
+
+def test_init_database_creates_all_tables(tmp_path):
+    """init_database() 在全新 DuckDB 上应能建出全部 contracts 表。"""
+    db_path = tmp_path / "init.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        init_database(con)
+        expected = {t.name for t in ALL_TABLES}
+        rows = con.execute("SHOW TABLES").fetchall()
+        actual = {r[0] for r in rows}
+        assert expected <= actual, (
+            f"missing tables: {expected - actual}"
+        )
+    finally:
+        con.close()
+
+
+def test_primary_key_columns_are_not_nullable():
+    """所有主键字段必须 nullable=False（SSOT 契约）。"""
+    problems = []
+    for table in ALL_TABLES:
+        nullable_pk_cols = [
+            col.name
+            for col in table.columns
+            if col.name in table.primary_key and col.nullable
+        ]
+        if nullable_pk_cols:
+            problems.append((table.name, nullable_pk_cols))
+    assert not problems, f"primary key columns nullable=True: {problems}"
+
+
+def test_daily_market_snapshot_has_ohlcv_columns():
+    """DAILY_MARKET_SNAPSHOT 应包含 OHLCV + pre_close 基本字段。"""
+    names = set(DAILY_MARKET_SNAPSHOT.column_names())
+    for required in ("open", "high", "low", "close", "volume", "amount", "pre_close"):
+        assert required in names, f"missing column {required}"
+
+
+@pytest.mark.parametrize(
+    "table_name,expected_pk",
+    [
+        ("daily_market_snapshot", (TRADE_DATE, TICKER)),
+        ("adj_factor_changes", (TICKER, TRADE_DATE)),
+        ("trading_calendar", (TRADE_DATE,)),
+        ("stock_info", (TICKER,)),
+        ("market_phase", (TRADE_DATE,)),
+    ],
+)
+def test_known_primary_keys(table_name: str, expected_pk: tuple):
+    from qrp_atlas.contracts import get_table
+
+    table = get_table(table_name)
+    assert table.primary_key == expected_pk

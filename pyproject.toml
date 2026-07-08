@@ -18,6 +18,15 @@ dependencies = [
     "python-dotenv",
     "streamlit",
     "plotly",
+    "fastapi",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "fastapi",
+    "httpx",
 ]
 
 # ==========================
@@ -29,3 +38,11 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# ==========================
+# pytest 配置
+# ==========================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
