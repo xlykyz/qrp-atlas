@@ -6,6 +6,7 @@ const navItems = [
   { to: '/stock', label: '个股复盘' },
   { to: '/logs', label: '复盘日志' },
   { to: '/raw', label: '🛠️ 数据库预览' },
+  { to: '/backtest', label: '回测分析' },
 ]
 
 function getInitialTheme(): boolean {

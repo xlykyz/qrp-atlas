@@ -1,0 +1,13 @@
+{
+  "run_id": "sample_run_001",
+  "total_return_pct": 42.5,
+  "annual_return_pct": 12.3,
+  "max_drawdown_pct": -8.7,
+  "win_rate_pct": 46.2,
+  "profit_loss_ratio": 1.58,
+  "trade_count": 128,
+  "avg_holding_days": 3.4,
+  "max_trade_loss_pct": -9.8,
+  "max_trade_profit_pct": 31.2,
+  "skipped_count": 14
+}

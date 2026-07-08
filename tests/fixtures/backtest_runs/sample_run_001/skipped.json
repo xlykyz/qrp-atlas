@@ -1,0 +1,26 @@
+[
+  {
+    "asset_id": "000001.SZ",
+    "signal_date": "2024-01-05",
+    "reason": "INVALID_PRICE",
+    "detail": "non-finite high/low in MAE/MFE window"
+  },
+  {
+    "asset_id": "600519.SH",
+    "signal_date": "2024-01-08",
+    "reason": "MISSING_BAR",
+    "detail": "no price bar on entry date 2024-01-08"
+  },
+  {
+    "asset_id": "000858.SZ",
+    "signal_date": "2024-01-09",
+    "reason": "OVERLAP_BLOCKED",
+    "detail": "existing open position on 000858.SZ"
+  },
+  {
+    "asset_id": "002594.SZ",
+    "signal_date": "2024-01-10",
+    "reason": "INVALID_PRICE",
+    "detail": "negative open price after adjustment"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "run_id": "sample_run_001",
+  "name": "Sample Backtest Run",
+  "strategy_name": "limit_up_trend_v01",
+  "universe": "A_SHARE",
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "created_at": "2026-07-09T15:30:00",
+  "status": "success"
+}

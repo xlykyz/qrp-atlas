@@ -1,0 +1,27 @@
+{
+  "name": "limit_up_trend_v01",
+  "universe": "A_SHARE",
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "entry": {
+    "timing": "next_open",
+    "price_field": "open"
+  },
+  "exit": {
+    "type": "hold_n_bars",
+    "bars": 5,
+    "price_field": "close"
+  },
+  "position": {
+    "initial_cash": 1000000,
+    "position_pct": 0.1,
+    "max_positions": 10,
+    "allow_overlap": false,
+    "compound": true
+  },
+  "cost": {
+    "commission_rate": 0.00025,
+    "stamp_tax_rate": 0.0005,
+    "slippage_bps": 5
+  }
+}

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -15,6 +16,11 @@ DAILY_MARKET_SNAPSHOT_CANONICAL_DIR = CANONICAL_DIR / "daily_market_snapshot"
 RESEARCH_PDFS_DIR = RAW_DIR / "research_pdfs"
 
 WEB_DIR = PROJECT_ROOT / "web"
+
+BACKTEST_RUNS_DIR = Path(
+    os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
+    or (PROJECT_ROOT / "tests" / "fixtures" / "backtest_runs")
+)
 
 
 def ensure_dirs() -> None:

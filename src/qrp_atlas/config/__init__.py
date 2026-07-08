@@ -1,5 +1,6 @@
 # qrp_atlas.config
 from .paths import (
+    BACKTEST_RUNS_DIR,
     CANONICAL_DIR,
     DATA_DIR,
     DB_DIR,
@@ -24,6 +25,7 @@ __all__ = [
     "DAILY_SNAPSHOT_RAW_DIR",
     "DAILY_MARKET_SNAPSHOT_CANONICAL_DIR",
     "WEB_DIR",
+    "BACKTEST_RUNS_DIR",
     "ensure_dirs",
     "DB_READ_ONLY",
     "TUSHARE_TOKEN",
