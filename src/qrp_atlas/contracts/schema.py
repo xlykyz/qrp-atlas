@@ -224,7 +224,7 @@ CNINFO_RESEARCH_VISITS = TableSchema(
         ColumnSpec(SECU_CODE, "VARCHAR", nullable=False),
         ColumnSpec(SEC_NAME, "VARCHAR"),
         ColumnSpec(NOTICE_DATE, "DATE", nullable=False),
-        ColumnSpec(RECEIVE_DATE, "DATE"),
+        ColumnSpec(RECEIVE_DATE, "DATE", nullable=False),
         ColumnSpec(RECEIVE_WAY, "VARCHAR"),
         ColumnSpec(RECEIVE_PLACE, "VARCHAR"),
         ColumnSpec(RECEPTIONIST, "VARCHAR"),

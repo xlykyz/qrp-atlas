@@ -196,7 +196,7 @@ def validate_schema(
         validate_schema(df, "daily_market_snapshot", allow_extra=False)
     """
     schema = get_table(table_name)
-    required = {col.name for col in schema.columns if col.nullable is False}
+    required = {col.name for col in schema.columns if col.nullable is False} | set(schema.primary_key)
     expected = set(schema.column_names())
     try:
         check_missing_columns(df, required, table_name)
@@ -223,7 +223,7 @@ def align_to_schema(
     schema = get_table(table_name)
     df = df.copy()
 
-    required = {col.name for col in schema.columns if col.nullable is False}
+    required = {col.name for col in schema.columns if col.nullable is False} | set(schema.primary_key)
     expected = list(schema.column_names())
     check_missing_columns(df, required, table_name)
 
