@@ -22,6 +22,7 @@ from typing import Optional
 import duckdb
 import pandas as pd
 
+from qrp_atlas.contracts import conventions
 from qrp_atlas.config import DB_PATH
 from qrp_atlas.contracts import (
     TICKER,
@@ -33,8 +34,6 @@ from qrp_atlas.contracts import (
     PCT_CHANGE,
     PRE_CLOSE,
     IS_ST,
-    IS_LIMIT_UP,
-    IS_LIMIT_DOWN,
 )
 
 
@@ -203,63 +202,6 @@ def _derive_is_st(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _derive_limit_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    派生 is_limit_up, is_limit_down 字段
-
-    规则:
-    - 根据昨收精确计算涨跌停价，而非固定百分比阈值
-    - 普通股票: ±10% 涨跌停
-    - ST 股票: ±5% 涨跌停
-    - 科创板/创业板: ±20% 涨跌停
-    - 涨停判定: close >= round(pre_close * (1 + limit_pct/100), 2)
-    - 跌停判定: close <= round(pre_close * (1 - limit_pct/100), 2)
-
-    Args:
-        df: DataFrame
-
-    Returns:
-        添加涨跌停标识后的 DataFrame
-    """
-    df = df.copy()
-
-    if CLOSE not in df.columns or PRE_CLOSE not in df.columns:
-        df[IS_LIMIT_UP] = False
-        df[IS_LIMIT_DOWN] = False
-        return df
-
-    is_st = df.get(IS_ST, False)
-
-    ticker_prefix = df[TICKER].astype(str).str[:3]
-    ticker_suffix = df[TICKER].astype(str).str[-3:]
-    # 创业板: 300/301/302  科创板: 688/689  北交所: .BJ
-    is_kcb = ticker_prefix.isin(["688", "689", "300", "301", "302"])
-    is_bj = ticker_suffix == ".BJ"
-
-    # 确定每只股票的涨跌幅限制比例
-    limit_pct = pd.Series(10.0, index=df.index)             # 主板非ST: 10%
-    limit_pct = limit_pct.mask(is_kcb, 20.0)                 # 科创/创业板: 20%（含ST）
-    limit_pct = limit_pct.mask(is_bj, 30.0)                  # 北交所: 30%（含ST）
-    limit_pct = limit_pct.mask(is_st & ~is_kcb & ~is_bj, 5.0) # 仅主板ST降为5%
-
-    pre_close = df[PRE_CLOSE]
-    close = df[CLOSE].round(2)  # 确保价格保留两位小数
-
-    # 精确计算涨跌停价 → round(昨收 × (1 ± 比例), 2) 四舍五入到分
-    limit_up_price = (pre_close * (1 + limit_pct / 100)).round(2)
-    limit_down_price = (pre_close * (1 - limit_pct / 100)).round(2)
-
-    df[IS_LIMIT_UP] = close >= limit_up_price
-    df[IS_LIMIT_DOWN] = close <= limit_down_price
-
-    # 昨收缺失或为 0（新股首日）→ 不判定涨跌停
-    mask_no_pre = pre_close.isna() | (pre_close == 0)
-    df.loc[mask_no_pre, IS_LIMIT_UP] = False
-    df.loc[mask_no_pre, IS_LIMIT_DOWN] = False
-
-    return df
-
-
 def _calculate_pct_change(df: pd.DataFrame) -> pd.DataFrame:
     """
     计算缺失的 pct_change 字段
@@ -362,7 +304,7 @@ def enrich_daily_snapshot(
 
     df = _calculate_pct_change(df)
     df = _derive_is_st(df)
-    df = _derive_limit_flags(df)
+    df = conventions.derive_limit_flags(df, trade_date=trade_date)
     
     return df
 
