@@ -281,6 +281,32 @@ def save_dt_pool(df: pd.DataFrame, replace: bool = False) -> None:
         con.close()
 
 
+def save_daily_basic(df: pd.DataFrame, replace: bool = False) -> None:
+    """保存每日基本面指标数据
+
+    Args:
+        df: 包含 daily_basic 数据的 DataFrame
+        replace: 是否替换当日数据
+    """
+    from qrp_atlas.contracts import DAILY_BASIC, TRADE_DATE
+
+    df = align_to_schema(df, DAILY_BASIC.name, fill_missing_optional=True, drop_extra=True)
+    df = quick_validate(df, DAILY_BASIC.name, allow_extra=False)
+
+    con = get_connection()
+    try:
+        if replace:
+            dates = df[TRADE_DATE].unique().tolist()
+            for d in dates:
+                con.execute(f"DELETE FROM {DAILY_BASIC.name} WHERE {TRADE_DATE} = ?", [d])
+        insert_cols = [col for col in DAILY_BASIC.column_names() if col != CREATED_AT]
+        cols = ", ".join(insert_cols)
+        con.register("tmp_df", df)
+        con.execute(f"INSERT INTO {DAILY_BASIC.name} ({cols}) SELECT {cols} FROM tmp_df")
+    finally:
+        con.close()
+
+
 def get_table_info(table_name: str) -> pd.DataFrame:
     """获取表结构信息"""
     con = get_connection(read_only=True)
