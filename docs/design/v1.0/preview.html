@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QRP Atlas — 设计预览</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        brand: {
+          50:  '#eff6ff', 100:'#dbeafe', 200:'#bfdbfe', 300:'#93c5fd',
+          400:'#60a5fa', 500:'#3b82f6', 600:'#2563eb', 700:'#1d4ed8',
+          800:'#1e40af', 900:'#1e3a8a', 950:'#172554',
+        },
+        amber: { 400:'#fbbf24', 450:'#f59e0b', 500:'#d97706' },
+        up:    { DEFAULT:'#dc2626', bg:'#fef2f2', dark:'#f87171', darkbg:'rgba(220,38,38,0.12)' },
+        down:  { DEFAULT:'#16a34a', bg:'#f0fdf4', dark:'#4ade80', darkbg:'rgba(22,163,74,0.12)' },
+        sidebar:{ bg:'#0b1424', end:'#111d33', text:'#94a3b8', active:'rgba(59,130,246,0.18)' },
+        surface:{ DEFAULT:'#ffffff', alt:'#f1f5f9', dark:'#111827', darkalt:'#1a2332' },
+      },
+      fontFamily: { sans: ['Inter Variable','system-ui','-apple-system','sans-serif'], mono: ['JetBrains Mono','Fira Code','monospace'] },
+      fontSize: { '2xs': ['0.625rem',{lineHeight:'0.875rem'}] }
+    }
+  }
+}
+</script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg:        #f8fafc;
+    --surface:   #ffffff;
+    --surface-alt:#f1f5f9;
+    --border:    #e2e8f0;
+    --text:      #0f172a;
+    --text-sec:  #475569;
+    --text-muted:#94a3b8;
+  }
+  .dark {
+    --bg:        #0b1121;
+    --surface:   #111827;
+    --surface-alt:#1a2332;
+    --border:    #1e293b;
+    --text:      #f1f5f9;
+    --text-sec:  #94a3b8;
+    --text-muted:#64748b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter Variable', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    transition: background 0.3s, color 0.3s;
+  }
+
+  /* smooth section transitions */
+  .section {
+    padding: 3rem 2rem;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  .section-header {
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.375rem;
+  }
+  .section-header p {
+    color: var(--text-sec);
+    font-size: 0.875rem;
+  }
+
+  /* color swatch */
+  .swatch-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 0.75rem;
+  }
+  .swatch {
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .swatch-color {
+    height: 80px;
+    position: relative;
+  }
+  .swatch-info {
+    padding: 0.625rem 0.75rem;
+  }
+  .swatch-name {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .swatch-hex {
+    font-size: 0.6875rem;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted);
+  }
+
+  /* type scale */
+  .type-sample {
+    margin-bottom: 1.5rem;
+    padding: 1.25rem;
+    border-radius: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .type-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #3b82f6;
+    margin-bottom: 0.5rem;
+  }
+
+  /* component gallery */
+  .comp-row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 1.25rem;
+  }
+  .comp-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    min-width: 100px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.15s ease;
+    font-family: inherit;
+    line-height: 1.25rem;
+  }
+  .btn-primary { background: #3b82f6; color: #fff; }
+  .btn-primary:hover { background: #2563eb; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.35); }
+  .btn-secondary { background: var(--surface-alt); color: var(--text); border-color: var(--border); }
+  .btn-secondary:hover { background: var(--border); }
+  .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn-outline:hover { background: var(--surface-alt); }
+  .btn-ghost { background: transparent; color: var(--text-sec); border-color: transparent; }
+  .btn-ghost:hover { background: var(--surface-alt); color: var(--text); }
+  .btn-success { background: #16a34a; color: #fff; }
+  .btn-success:hover { background: #15803d; }
+  .btn-danger { background: #dc2626; color: #fff; }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-sm { padding: 0.25rem 0.625rem; font-size: 0.75rem; border-radius: 0.375rem; }
+  .btn-lg { padding: 0.625rem 1.5rem; font-size: 1rem; border-radius: 0.625rem; }
+
+  /* cards */
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    padding: 1.25rem;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+  }
+  .kpi-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+  .kpi-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 0.375rem;
+    line-height: 1.2;
+  }
+  .kpi-delta {
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  /* table */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+  .data-table thead { position: sticky; top: 0; z-index: 1; }
+  .data-table th {
+    background: var(--surface-alt);
+    color: var(--text-sec);
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.625rem 0.875rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .data-table td {
+    padding: 0.5625rem 0.875rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  .data-table tbody tr { transition: background 0.12s; }
+  .data-table tbody tr:nth-child(even) { background: var(--surface-alt); }
+  .data-table tbody tr:hover { background: rgba(59,130,246,0.04); }
+
+  /* pct bar */
+  .pct-bar-wrap { position: relative; }
+  .pct-bar-bg { position: absolute; inset: 0; border-radius: 2px; opacity: 0.15; }
+  .pct-text { position: relative; z-index: 1; font-weight: 500; }
+
+  /* badge */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1875rem 0.5625rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .badge-up { background: rgba(220,38,38,0.08); color: #dc2626; border-color: rgba(220,38,38,0.15); }
+  .badge-down { background: rgba(22,163,74,0.08); color: #16a34a; border-color: rgba(22,163,74,0.15); }
+  .badge-neutral { background: rgba(100,116,139,0.08); color: #64748b; border-color: rgba(100,116,139,0.12); }
+  .badge-primary { background: rgba(59,130,246,0.08); color: #3b82f6; border-color: rgba(59,130,246,0.15); }
+  .badge-amber { background: rgba(245,158,11,0.1); color: #d97706; border-color: rgba(245,158,11,0.18); }
+
+  /* input */
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+  .field label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-sec);
+  }
+  .field input, .field select {
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.875rem;
+    font-family: inherit;
+    transition: all 0.15s;
+    outline: none;
+  }
+  .field input:focus, .field select:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+  }
+  .field input::placeholder { color: var(--text-muted); }
+
+  /* tabs */
+  .tab-bar {
+    display: inline-flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background: var(--surface-alt);
+    border-radius: 0.625rem;
+  }
+  .tab-item {
+    padding: 0.375rem 0.875rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--text-sec);
+    transition: all 0.15s;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .tab-item.active {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .tab-item:hover:not(.active) { color: var(--text); }
+
+  /* layout mock */
+  .mock-layout {
+    display: flex;
+    border-radius: 1rem;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .mock-sidebar {
+    width: 240px;
+    background: linear-gradient(180deg, #0b1424 0%, #13203d 100%);
+    color: #94a3b8;
+    padding: 1.25rem 0;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .mock-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.5rem 1.25rem 1rem;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    margin-bottom: 0.75rem;
+  }
+  .mock-brand-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.8125rem;
+  }
+  .mock-brand-text {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.01em;
+  }
+  .mock-nav { flex: 1; padding: 0 0.625rem; }
+  .mock-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    transition: all 0.12s;
+    margin-bottom: 0.125rem;
+    position: relative;
+  }
+  .mock-nav-item:hover { background: rgba(255,255,255,0.04); color: #cbd5e1; }
+  .mock-nav-item.active {
+    background: rgba(59,130,246,0.15);
+    color: #fff;
+  }
+  .mock-nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 18px;
+    background: #3b82f6;
+    border-radius: 0 2px 2px 0;
+  }
+  .mock-nav-icon { width: 16px; height: 16px; opacity: 0.6; }
+  .mock-nav-item.active .mock-nav-icon { opacity: 1; }
+  .mock-nav-item:hover .mock-nav-icon { opacity: 0.85; }
+  .mock-sidebar-footer {
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    font-size: 0.6875rem;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .mock-theme-btn {
+    background: rgba(255,255,255,0.06);
+    border: none;
+    color: #94a3b8;
+    padding: 0.3125rem 0.5rem;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    font-size: 0.75rem;
+    transition: all 0.12s;
+  }
+  .mock-theme-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
+
+  .mock-main {
+    flex: 1;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .mock-topbar {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .mock-topbar-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .mock-topbar-flex { flex: 1; }
+  .mock-content { padding: 1.5rem; display: grid; grid-template-columns: repeat(4,1fr); gap: 1rem; }
+
+  /* comparison section */
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+  }
+  .compare-col {
+    border-radius: 0.75rem;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .compare-col-header {
+    padding: 0.75rem 1rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .compare-col-header.before { background: #fef2f2; color: #dc2626; }
+  .compare-col-header.after  { background: #f0fdf4; color: #16a34a; }
+  .compare-col-body { padding: 1rem; background: var(--surface); }
+
+  /* phase card */
+  .phase-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0.625rem;
+    padding: 1rem;
+    transition: box-shadow 0.15s;
+  }
+  .phase-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+  .phase-card.up    { border-left: 3px solid #16a34a; }
+  .phase-card.down  { border-left: 3px solid #dc2626; }
+  .phase-card.side  { border-left: 3px solid #d97706; }
+  .phase-card.neutral { border-left: 3px solid #94a3b8; }
+
+  /* dark mode overrides for manual colors */
+  .dark .kpi-card:hover { box-shadow: 0 8px 24px rgba(0,0,0,0.25); }
+  .dark .mock-theme-btn { background: rgba(255,255,255,0.04); }
+  .dark .badge-up { background: rgba(248,113,113,0.1); color: #f87171; border-color: rgba(248,113,113,0.18); }
+  .dark .badge-down { background: rgba(74,222,128,0.1); color: #4ade80; border-color: rgba(74,222,128,0.18); }
+  .dark .badge-neutral { background: rgba(148,163,184,0.1); color: #94a3b8; border-color: rgba(148,163,184,0.15); }
+  .dark .badge-primary { background: rgba(96,165,250,0.1); color: #60a5fa; border-color: rgba(96,165,250,0.18); }
+  .dark .badge-amber { background: rgba(251,191,36,0.1); color: #fbbf24; border-color: rgba(251,191,36,0.18); }
+
+  .toggle-container {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 100;
+    display: flex;
+    gap: 0.5rem;
+  }
+  .toggle-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    color: var(--text);
+    font-weight: 500;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: all 0.15s;
+  }
+  .toggle-btn:hover { background: var(--border); }
+
+  /* nav header */
+  .nav-header {
+    text-align: center;
+    padding: 4rem 2rem 2rem;
+  }
+  .nav-header h1 {
+    font-size: 2.5rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    margin-bottom: 0.5rem;
+  }
+  .nav-header p {
+    color: var(--text-sec);
+    font-size: 1.125rem;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  .nav-pills {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    padding: 0 2rem 3rem;
+  }
+  .nav-pill {
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-sec);
+    font-weight: 500;
+    transition: all 0.12s;
+    text-decoration: none;
+  }
+  .nav-pill:hover { background: var(--surface-alt); color: var(--text); }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="toggle-container">
+  <button class="toggle-btn" onclick="document.documentElement.classList.toggle('dark')" title="切换主题">
+    <span class="light-only">🌙 暗色模式</span>
+    <span class="dark-only">☀️ 亮色模式</span>
+  </button>
+</div>
+<style>
+  .dark .light-only { display: none; }
+  .light-only { display: inline; }
+  html:not(.dark) .dark-only { display: none; }
+  .dark .dark-only { display: inline; }
+</style>
+
+<!-- Hero -->
+<div class="nav-header">
+  <div style="display:inline-flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem;">
+    <div style="width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:1.25rem;font-weight:700;">A</div>
+  </div>
+  <h1>QRP Atlas 设计系统</h1>
+  <p>从"能用"到"好用且好看"—— 一套为金融数据应用定制的视觉语言。浏览下方各板块查看完整设计方案。</p>
+</div>
+
+<div class="nav-pills">
+  <a href="#colors" class="nav-pill">🎨 色彩系统</a>
+  <a href="#type" class="nav-pill">🔤 字体层级</a>
+  <a href="#components" class="nav-pill">🧩 组件库</a>
+  <a href="#layout" class="nav-pill">📐 页面布局</a>
+  <a href="#compare" class="nav-pill">🔄 Before/After</a>
+</div>
+
+<!-- ── Colors ── -->
+<div id="colors" class="section">
+  <div class="section-header"><h2>🎨 色彩系统</h2><p>核心品牌色 Atlas Sapphire + 温暖 Amber 强调色 + 语义色（A 股惯例：红涨绿跌）</p></div>
+
+  <h3 style="font-size:0.9375rem;font-weight:600;margin-bottom:1rem">品牌主色 — Atlas Sapphire</h3>
+  <div class="swatch-grid">
+    <div class="swatch"><div class="swatch-color" style="background:#eff6ff"></div><div class="swatch-info"><div class="swatch-name">50 · Ghost</div><div class="swatch-hex">#eff6ff</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#bfdbfe"></div><div class="swatch-info"><div class="swatch-name">200 · Soft</div><div class="swatch-hex">#bfdbfe</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#60a5fa"></div><div class="swatch-info"><div class="swatch-name">400 · Light</div><div class="swatch-hex">#60a5fa</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#3b82f6"></div><div class="swatch-info"><div class="swatch-name">500 · Base ★</div><div class="swatch-hex">#3b82f6</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#2563eb"></div><div class="swatch-info"><div class="swatch-name">600 · Hover</div><div class="swatch-hex">#2563eb</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#1d4ed8"></div><div class="swatch-info"><div class="swatch-name">700 · Deep</div><div class="swatch-hex">#1d4ed8</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#1e3a8a;color:#fff"></div><div class="swatch-info"><div class="swatch-name">900 · Dark</div><div class="swatch-hex">#1e3a8a</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#172554;color:#fff"></div><div class="swatch-info"><div class="swatch-name">950 · Midnight</div><div class="swatch-hex">#172554</div></div></div>
+  </div>
+
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:1.5rem 0 1rem">语义色 — 涨跌 & 强调</h3>
+  <div class="swatch-grid">
+    <div class="swatch"><div class="swatch-color" style="background:#dc2626"></div><div class="swatch-info"><div class="swatch-name">Up · 涨</div><div class="swatch-hex">#dc2626</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#fef2f2"></div><div class="swatch-info"><div class="swatch-name">Up BG</div><div class="swatch-hex">#fef2f2</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#16a34a"></div><div class="swatch-info"><div class="swatch-name">Down · 跌</div><div class="swatch-hex">#16a34a</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#f0fdf4"></div><div class="swatch-info"><div class="swatch-name">Down BG</div><div class="swatch-hex">#f0fdf4</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#f59e0b"></div><div class="swatch-info"><div class="swatch-name">Amber · 高亮</div><div class="swatch-hex">#f59e0b</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#fbbf24"></div><div class="swatch-info"><div class="swatch-name">Amber Light</div><div class="swatch-hex">#fbbf24</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#0f172a;color:#fff"></div><div class="swatch-info"><div class="swatch-name">Text Primary</div><div class="swatch-hex">#0f172a</div></div></div>
+    <div class="swatch"><div class="swatch-color" style="background:#64748b;color:#fff"></div><div class="swatch-info"><div class="swatch-name">Text Muted</div><div class="swatch-hex">#64748b</div></div></div>
+  </div>
+</div>
+
+<!-- ── Typography ── -->
+<div id="type" class="section">
+  <div class="section-header"><h2>🔤 字体层级</h2><p>基于 Geist Variable（或 Inter）的现代无衬线体系，配合 JetBrains Mono 等宽字体用于数据展示</p></div>
+
+  <div class="type-sample">
+    <div class="type-label">Display · KPI 数字</div>
+    <div style="font-size:2.5rem;font-weight:700;letter-spacing:-0.03em;line-height:1.15;margin-bottom:0.25rem;">5,284 <span style="font-size:1rem;color:var(--text-muted);font-weight:500">只</span></div>
+    <div style="font-size:1.5rem;font-weight:700;letter-spacing:-0.02em;line-height:1.15;">+8.32% <span style="font-size:0.8125rem;color:#16a34a;font-weight:500;">▲ 432 ↑</span></div>
+  </div>
+
+  <div class="type-sample">
+    <div class="type-label">Heading · 页面标题</div>
+    <div style="font-size:1.5rem;font-weight:700;letter-spacing:-0.02em;">今日概览</div>
+    <div style="font-size:1.125rem;font-weight:600;letter-spacing:-0.01em;color:var(--text-sec);">板块过滤器</div>
+  </div>
+
+  <div class="type-sample">
+    <div class="type-label">Body · 正文 & 数据</div>
+    <div style="font-size:0.9375rem;margin-bottom:0.25rem;">浦发银行 <span style="font-family:'JetBrains Mono',monospace;color:#3b82f6;">600000</span></div>
+    <div style="font-size:0.8125rem;color:var(--text-sec);">收盘价 12.45 · 成交额 32.18亿 · 换手率 2.41%</div>
+  </div>
+
+  <div class="type-sample">
+    <div class="type-label">Caption · 辅助 & 标签</div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+      <span style="font-size:0.625rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);">UPDATED 2026-07-09 15:30</span>
+      <span style="font-size:0.6875rem;color:var(--text-sec);">数据来源: 通达信</span>
+      <span style="font-size:0.75rem;font-family:'JetBrains Mono',monospace;color:var(--text-muted);">v1.0.0</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Components ── -->
+<div id="components" class="section">
+  <div class="section-header"><h2>🧩 组件库</h2><p>核心 UI 组件的新设计规范</p></div>
+
+  <!-- Buttons -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin-bottom:1rem;">Buttons</h3>
+  <div class="comp-row"><span class="comp-label">Primary</span><button class="btn btn-primary">主要操作</button><button class="btn btn-primary" disabled>禁用</button></div>
+  <div class="comp-row"><span class="comp-label">Secondary</span><button class="btn btn-secondary">次要操作</button><button class="btn btn-outline">边框按钮</button><button class="btn btn-ghost">幽灵按钮</button></div>
+  <div class="comp-row"><span class="comp-label">Semantic</span><button class="btn btn-success">买入</button><button class="btn btn-danger">卖出</button></div>
+  <div class="comp-row"><span class="comp-label">Sizes</span><button class="btn btn-primary btn-sm">小号</button><button class="btn btn-primary">默认</button><button class="btn btn-primary btn-lg">大号</button></div>
+
+  <!-- Badges -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:2rem 0 1rem;">Badges & Tags</h3>
+  <div class="comp-row"><span class="comp-label">Phase</span>
+    <span class="badge badge-up">↗ 上升期</span>
+    <span class="badge badge-amber">↔ 震荡期</span>
+    <span class="badge badge-down">↘ 下降期</span>
+    <span class="badge badge-neutral">○ 混沌期</span>
+  </div>
+  <div class="comp-row"><span class="comp-label">Data</span>
+    <span class="badge badge-up">+8.32%</span>
+    <span class="badge badge-down">-2.15%</span>
+    <span class="badge badge-primary">涨停</span>
+    <span class="badge badge-amber">ST</span>
+    <span class="badge badge-neutral">平盘</span>
+  </div>
+
+  <!-- KPI Cards -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:2rem 0 1rem;">KPI Cards</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;">
+    <div class="kpi-card">
+      <div class="kpi-label">📊 股票总数</div>
+      <div class="kpi-value">5,284</div>
+      <div class="kpi-delta"><span class="badge badge-neutral">覆盖全市场</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">📈 上涨家数</div>
+      <div class="kpi-value">2,841</div>
+      <div class="kpi-delta" style="color:#dc2626;">▲ 53.8% <span style="color:var(--text-muted)">占比</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">📉 下跌家数</div>
+      <div class="kpi-value">2,103</div>
+      <div class="kpi-delta" style="color:#16a34a;">▼ 39.8% <span style="color:var(--text-muted)">占比</span></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">🔥 涨停 / 🧊 跌停</div>
+      <div class="kpi-value"><span style="color:#dc2626;">87</span> <span style="font-size:1rem;color:var(--text-muted);font-weight:400;">/</span> <span style="color:#16a34a;">12</span></div>
+      <div class="kpi-delta"><span style="color:#f59e0b;">⚡ 市场热度高</span></div>
+    </div>
+  </div>
+
+  <!-- Data Table -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:2rem 0 1rem;">Data Table（带涨跌背景条）</h3>
+  <div style="border-radius:0.75rem;overflow:hidden;border:1px solid var(--border);">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>代码</th><th>名称</th><th style="text-align:right">收盘价</th><th style="text-align:right">涨跌幅</th>
+          <th style="text-align:right">5日</th><th style="text-align:right">成交额</th><th style="text-align:right">换手率</th><th>标记</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="font-family:'JetBrains Mono',monospace;color:#3b82f6;cursor:pointer;">600000</td>
+          <td>浦发银行</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">12.45</td>
+          <td style="text-align:right;" class="pct-bar-wrap">
+            <span class="pct-bar-bg" style="background:#dc2626;right:55%"></span>
+            <span class="pct-text" style="color:#dc2626;">+8.32%</span>
+          </td>
+          <td style="text-align:right;color:#dc2626;">+12.51%</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">32.18亿</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">2.41%</td>
+          <td><span class="badge badge-up">涨停</span></td>
+        </tr>
+        <tr>
+          <td style="font-family:'JetBrains Mono',monospace;color:#3b82f6;cursor:pointer;">000001</td>
+          <td>平安银行</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">15.20</td>
+          <td style="text-align:right;" class="pct-bar-wrap">
+            <span class="pct-bar-bg" style="background:#16a34a;left:70%"></span>
+            <span class="pct-text" style="color:#16a34a;">-1.55%</span>
+          </td>
+          <td style="text-align:right;color:#16a34a;">-3.21%</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">18.74亿</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">1.02%</td>
+          <td><span class="badge badge-neutral">—</span></td>
+        </tr>
+        <tr>
+          <td style="font-family:'JetBrains Mono',monospace;color:#3b82f6;cursor:pointer;">300750</td>
+          <td>宁德时代</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">198.50</td>
+          <td style="text-align:right;" class="pct-bar-wrap">
+            <span class="pct-bar-bg" style="background:#dc2626;right:82%"></span>
+            <span class="pct-text" style="color:#dc2626;">+2.18%</span>
+          </td>
+          <td style="text-align:right;color:#dc2626;">+5.67%</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">45.62亿</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">3.87%</td>
+          <td><span class="badge badge-primary">创业板</span></td>
+        </tr>
+        <tr>
+          <td style="font-family:'JetBrains Mono',monospace;color:#3b82f6;cursor:pointer;">600519</td>
+          <td>贵州茅台</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">1,680.00</td>
+          <td style="text-align:right;" class="pct-bar-wrap">
+            <span class="pct-bar-bg" style="background:#16a34a;left:88%"></span>
+            <span class="pct-text" style="color:#16a34a;">-0.41%</span>
+          </td>
+          <td style="text-align:right;color:#dc2626;">+0.87%</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">28.15亿</td>
+          <td style="text-align:right;font-family:'JetBrains Mono',monospace;">0.35%</td>
+          <td><span class="badge badge-neutral">—</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:0.75rem;font-size:0.75rem;color:var(--text-muted);">
+    <span>共 5,284 条 · 显示 1-4</span>
+    <span style="display:flex;gap:0.25rem;">
+      <button class="btn btn-outline btn-sm">上一页</button>
+      <button class="btn btn-primary btn-sm">1</button>
+      <button class="btn btn-outline btn-sm">2</button>
+      <button class="btn btn-outline btn-sm">下一页</button>
+    </span>
+  </div>
+
+  <!-- Tabs -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:2rem 0 1rem;">Tabs & Inputs</h3>
+  <div class="tab-bar">
+    <button class="tab-item active">判读记录</button>
+    <button class="tab-item">交易记录</button>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-top:1.5rem;">
+    <div class="field">
+      <label>日期范围</label>
+      <input type="date" value="2026-06-09">
+    </div>
+    <div class="field">
+      <label>股票搜索</label>
+      <input type="text" placeholder="输入代码或名称...">
+    </div>
+    <div class="field">
+      <label>板块筛选</label>
+      <select>
+        <option>全部板块</option>
+        <option>上证主板</option>
+        <option>创业板</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Phase Cards -->
+  <h3 style="font-size:0.9375rem;font-weight:600;margin:2rem 0 1rem;">Phase Record Cards</h3>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;">
+    <div class="phase-card up">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.625rem;">
+        <span class="badge badge-up">↗ 上升期</span>
+        <span style="font-size:0.75rem;color:var(--text-muted);">2026-07-08</span>
+      </div>
+      <div style="display:flex;gap:0.75rem;font-size:0.75rem;">
+        <span style="color:#16a34a;font-weight:600;">M1 ●</span>
+        <span style="color:#16a34a;font-weight:600;">M2 ●</span>
+        <span style="color:var(--text-muted);">M3 ○</span>
+        <span style="color:#d97706;font-weight:600;">V ●</span>
+      </div>
+      <div style="font-size:0.8125rem;color:var(--text-sec);margin-top:0.5rem;">放量突破前高，MACD 金叉确认，短期趋势偏强。</div>
+    </div>
+    <div class="phase-card down">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.625rem;">
+        <span class="badge badge-down">↘ 下降期</span>
+        <span style="font-size:0.75rem;color:var(--text-muted);">2026-07-07</span>
+      </div>
+      <div style="display:flex;gap:0.75rem;font-size:0.75rem;">
+        <span style="color:var(--text-muted);">M1 ○</span>
+        <span style="color:var(--text-muted);">M2 ○</span>
+        <span style="color:var(--text-muted);">M3 ○</span>
+        <span style="color:#dc2626;font-weight:600;">V ●</span>
+      </div>
+      <div style="font-size:0.8125rem;color:var(--text-sec);margin-top:0.5rem;">缩量阴跌，均线空头排列，建议观望。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Layout Mock ── -->
+<div id="layout" class="section">
+  <div class="section-header"><h2>📐 页面布局</h2><p>完整 Layout 预览：Sidebar + Topbar + Content Area</p></div>
+
+  <div class="mock-layout" style="min-height:480px;">
+    <!-- Sidebar -->
+    <div class="mock-sidebar">
+      <div class="mock-brand">
+        <div class="mock-brand-icon">A</div>
+        <div class="mock-brand-text">QRP Atlas</div>
+      </div>
+      <div class="mock-nav">
+        <div class="mock-nav-item active">
+          <svg class="mock-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          今日概览
+        </div>
+        <div class="mock-nav-item">
+          <svg class="mock-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          个股复盘
+        </div>
+        <div class="mock-nav-item">
+          <svg class="mock-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="12" y1="12" x2="12" y2="12"/><line x1="8" y1="6" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="18"/></svg>
+          复盘日志
+        </div>
+        <div class="mock-nav-item">
+          <svg class="mock-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6a9 3 0 0 0 18 0V5"/><path d="M3 12v6a9 3 0 0 0 18 0v-6"/></svg>
+          数据库预览
+        </div>
+        <div class="mock-nav-item">
+          <svg class="mock-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          回测分析
+        </div>
+      </div>
+      <div class="mock-sidebar-footer">
+        <span>v1.0.0</span>
+        <button class="mock-theme-btn" title="切换主题">🌓</button>
+      </div>
+    </div>
+
+    <!-- Main -->
+    <div class="mock-main">
+      <div class="mock-topbar">
+        <div class="mock-topbar-title">今日概览</div>
+        <div class="mock-topbar-flex"></div>
+        <div style="display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem;color:var(--text-sec);">
+          <span>日期选择器</span>
+          <span>|</span>
+          <span>控件区</span>
+        </div>
+      </div>
+      <div class="mock-content">
+        <div class="kpi-card">
+          <div class="kpi-label">📊 股票总数</div>
+          <div class="kpi-value">5,284</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">📈 上涨家数</div>
+          <div class="kpi-value">2,841</div>
+          <div class="kpi-delta" style="color:#dc2626;">▲ 53.8%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">📉 下跌家数</div>
+          <div class="kpi-value">2,103</div>
+          <div class="kpi-delta" style="color:#16a34a;">▼ 39.8%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">🔥 涨停 / 🧊 跌停</div>
+          <div class="kpi-value"><span style="color:#dc2626;">87</span> <span style="font-size:1rem;color:var(--text-muted);">/</span> <span style="color:#16a34a;">12</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Before/After ── -->
+<div id="compare" class="section">
+  <div class="section-header"><h2>🔄 Before / After 对比</h2><p>关键页面改造前后的视觉差异</p></div>
+
+  <div class="compare-grid">
+    <!-- Sidebar -->
+    <div class="compare-col">
+      <div class="compare-col-header before">BEFORE · Sidebar</div>
+      <div class="compare-col-body">
+        <div style="background:#0f172a;border-radius:0.5rem;padding:0.75rem;color:#94a3b8;font-size:0.75rem;">
+          <div style="font-weight:700;color:#fff;margin-bottom:0.75rem;">QRP Atlas</div>
+          <div style="padding:0.375rem 0.5rem;background:#1e293b;border-radius:0.25rem;color:#fff;margin-bottom:0.25rem;">今日概览</div>
+          <div style="padding:0.375rem 0.5rem;">个股复盘</div>
+          <div style="padding:0.375rem 0.5rem;">复盘日志</div>
+          <div style="padding:0.375rem 0.5rem;">🛠️ 数据库预览</div>
+          <div style="padding:0.375rem 0.5rem;">回测分析</div>
+        </div>
+        <div style="margin-top:0.5rem;font-size:0.6875rem;color:#dc2626;">
+          ✕ 纯黑 slate，无品牌识别度<br>
+          ✕ emoji 图标，不专业<br>
+          ✕ 无 Logo / 版本信息<br>
+          ✕ 选中态无指示器
+        </div>
+      </div>
+    </div>
+    <div class="compare-col">
+      <div class="compare-col-header after">AFTER · Sidebar</div>
+      <div class="compare-col-body">
+        <div style="background:linear-gradient(180deg,#0b1424,#13203d);border-radius:0.5rem;padding:0.75rem;color:#94a3b8;font-size:0.75rem;">
+          <div style="display:flex;align-items:center;gap:0.375rem;margin-bottom:0.625rem;padding-bottom:0.5rem;border-bottom:1px solid rgba(255,255,255,0.06);">
+            <div style="width:20px;height:20px;border-radius:5px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:0.5625rem;font-weight:700;">A</div>
+            <span style="font-weight:700;color:#fff;font-size:0.8125rem;">QRP Atlas</span>
+          </div>
+          <div style="padding:0.3125rem 0.5rem;background:rgba(59,130,246,0.15);border-radius:0.375rem;color:#fff;position:relative;margin-bottom:0.125rem;">
+            <span style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:14px;background:#3b82f6;border-radius:0 2px 2px 0;"></span>
+            <span style="padding-left:0.375rem;">⬛ 今日概览</span>
+          </div>
+          <div style="padding:0.3125rem 0.5rem;">📈 个股复盘</div>
+          <div style="padding:0.3125rem 0.5rem;">📋 复盘日志</div>
+          <div style="padding:0.3125rem 0.5rem;">🗄️ 数据库预览</div>
+          <div style="padding:0.3125rem 0.5rem;">📊 回测分析</div>
+          <div style="margin-top:0.5rem;padding-top:0.375rem;border-top:1px solid rgba(255,255,255,0.06);font-size:0.625rem;display:flex;justify-content:space-between;">
+            <span>v1.0.0</span><span>🌓</span>
+          </div>
+        </div>
+        <div style="margin-top:0.5rem;font-size:0.6875rem;color:#16a34a;">
+          ✓ Navy 渐变背景，品牌感强<br>
+          ✓ lucide 图标，统一专业<br>
+          ✓ Logo mark + 版本号<br>
+          ✓ 蓝色竖线活跃指示器
+        </div>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div class="compare-col">
+      <div class="compare-col-header before">BEFORE · 数据表格</div>
+      <div class="compare-col-body">
+        <table style="width:100%;font-size:0.6875rem;border-collapse:collapse;">
+          <thead><tr style="border-bottom:1px solid #e2e8f0;">
+            <th style="padding:0.375rem 0.5rem;text-align:left;font-weight:600;">代码</th>
+            <th style="text-align:right;">涨跌幅</th>
+          </tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:0.3125rem 0.5rem;">600000</td><td style="text-align:right;color:#ef4444;">+8.32%</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:0.3125rem 0.5rem;">000001</td><td style="text-align:right;color:#22c55e;">-1.55%</td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9;"><td style="padding:0.3125rem 0.5rem;">300750</td><td style="text-align:right;color:#ef4444;">+2.18%</td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:0.5rem;font-size:0.6875rem;color:#dc2626;">
+          ✕ 纯文字颜色，无背景指示<br>
+          ✕ 无斑马纹，行间难区分<br>
+          ✕ 表头视觉重量不够
+        </div>
+      </div>
+    </div>
+    <div class="compare-col">
+      <div class="compare-col-header after">AFTER · 数据表格</div>
+      <div class="compare-col-body">
+        <table style="width:100%;font-size:0.6875rem;border-collapse:collapse;">
+          <thead><tr style="background:#f1f5f9;">
+            <th style="padding:0.375rem 0.5rem;text-align:left;font-size:0.5625rem;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;font-weight:600;">代码</th>
+            <th style="text-align:right;font-size:0.5625rem;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;font-weight:600;">涨跌幅</th>
+          </tr></thead>
+          <tbody>
+            <tr style="border-bottom:1px solid #f1f5f9;background:#fff;"><td style="padding:0.3125rem 0.5rem;font-family:'JetBrains Mono',monospace;color:#3b82f6;">600000</td><td style="text-align:right;position:relative;"><span style="position:absolute;inset:0;background:#fef2f2;width:70%;border-radius:2px;"></span><span style="position:relative;color:#dc2626;font-weight:500;">+8.32%</span></td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9;background:#f8fafc;"><td style="padding:0.3125rem 0.5rem;font-family:'JetBrains Mono',monospace;color:#3b82f6;">000001</td><td style="text-align:right;position:relative;"><span style="position:absolute;inset:0;background:#f0fdf4;width:30%;right:0;border-radius:2px;"></span><span style="position:relative;color:#16a34a;font-weight:500;">-1.55%</span></td></tr>
+            <tr style="border-bottom:1px solid #f1f5f9;background:#fff;"><td style="padding:0.3125rem 0.5rem;font-family:'JetBrains Mono',monospace;color:#3b82f6;">300750</td><td style="text-align:right;position:relative;"><span style="position:absolute;inset:0;background:#fef2f2;width:45%;border-radius:2px;"></span><span style="position:relative;color:#dc2626;font-weight:500;">+2.18%</span></td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:0.5rem;font-size:0.6875rem;color:#16a34a;">
+          ✓ 涨跌幅背景条 + 文字颜色<br>
+          ✓ 斑马纹交替行<br>
+          ✓ 代码等宽字体 + 品牌色链接<br>
+          ✓ 表头 uppercase + tracking
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div style="text-align:center;padding:3rem 2rem;color:var(--text-muted);font-size:0.75rem;border-top:1px solid var(--border);margin-top:2rem;">
+  <p>QRP Atlas Design System v1.0 · 2026-07-09</p>
+  <p style="margin-top:0.25rem;">设计方案输出至 <code style="font-family:'JetBrains Mono',monospace;background:var(--surface-alt);padding:0.125rem 0.375rem;border-radius:0.25rem;">docs/design/</code> · 不动源文件，仅作为规范参考</p>
+</div>
+
+</body>
+</html>
