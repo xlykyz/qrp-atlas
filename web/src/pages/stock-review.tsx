@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { getDailyByDate, getDailyByTicker } from '@/api/daily'
+import { getDailyByDate, getDailyByTicker, type AdjustmentMode } from '@/api/daily'
 import { getPhase, createPhase } from '@/api/phase'
 import { getTrades, createTrade, updateTrade } from '@/api/trades'
 import { getStockList, type StockInfo } from '@/api/stock'
@@ -174,6 +174,22 @@ const UP_COLOR = '#22c55e'
 const DOWN_COLOR = '#ef4444'
 const WICK_UP_COLOR = '#22c55e'
 const WICK_DOWN_COLOR = '#ef4444'
+const ADJUSTMENT_STORAGE_KEY = 'stock-review-adjustment-mode'
+const ADJUSTMENT_OPTIONS: { value: AdjustmentMode; label: string }[] = [
+  { value: 'raw', label: '除权' },
+  { value: 'qfq', label: '前复权' },
+  { value: 'hfq', label: '后复权' },
+]
+
+function readStoredAdjustmentMode(): AdjustmentMode {
+  if (typeof window === 'undefined') return 'raw'
+  const value = window.localStorage.getItem(ADJUSTMENT_STORAGE_KEY)
+  return value === 'qfq' || value === 'hfq' || value === 'raw' ? value : 'raw'
+}
+
+function isChartControlTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('[data-chart-control="true"]') !== null
+}
 
 // ── slider dark-theme override styles ──
 const sliderStyles = `
@@ -223,8 +239,10 @@ export default function StockReview() {
   // ── state: data ──
 
   const [chartData, setChartData] = useState<DailyRow[]>([])
+  const [chartDataTicker, setChartDataTicker] = useState<string | null>(null)
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState<string | null>(null)
+  const [adjustmentMode, setAdjustmentMode] = useState<AdjustmentMode>(() => readStoredAdjustmentMode())
 
   // ── state: MA visibility ──
 
@@ -275,6 +293,11 @@ export default function StockReview() {
   useEffect(() => {
     localStorage.setItem('stock-review-recent-searches', JSON.stringify(recentSearches))
   }, [recentSearches])
+
+  // ── Persist adjustment mode to localStorage ──
+  useEffect(() => {
+    localStorage.setItem(ADJUSTMENT_STORAGE_KEY, adjustmentMode)
+  }, [adjustmentMode])
 
   // ── state: sub-chart indicators ──
   const [subChart1Indicator, setSubChart1Indicator] = useState<'volume' | 'amount'>('volume')
@@ -502,6 +525,9 @@ export default function StockReview() {
     initialFillDone.current = false
     mainChartContainerRef.current = null
     selectionStartX.current = null
+    chartDataRef.current = []
+    setChartData([])
+    setChartDataTicker(null)
     setSelectionBox(null)
   }, [selectedStock])
 
@@ -519,11 +545,15 @@ export default function StockReview() {
       try {
         const rows = await getDailyByTicker(
           selectedTicker,
+          undefined,
+          undefined,
+          adjustmentMode,
         )
         if (!cancelled) {
           // Sort ascending by trade_date for charting
           rows.sort((a, b) => a.trade_date.localeCompare(b.trade_date))
           setChartData(rows)
+          setChartDataTicker(selectedTicker)
           chartDataRef.current = rows
         }
       } catch (err) {
@@ -532,6 +562,7 @@ export default function StockReview() {
             err instanceof Error ? err.message : '数据加载失败',
           )
           setChartData([])
+          setChartDataTicker(null)
           chartDataRef.current = []
         }
       } finally {
@@ -543,17 +574,17 @@ export default function StockReview() {
     return () => {
       cancelled = true
     }
-  }, [selectedStock])
+  }, [selectedStock, adjustmentMode])
 
   // ── chart creation and data population ──
 
   const chartReady = useMemo(
     () =>
       chartData.length > 0 &&
-      !dataLoading &&
+      chartDataTicker === selectedStock?.ticker &&
       !dataError &&
       selectedStock !== null,
-    [chartData.length, dataLoading, dataError, selectedStock],
+    [chartData.length, chartDataTicker, dataError, selectedStock],
   )
 
   // Prepare chart data
@@ -1136,6 +1167,7 @@ export default function StockReview() {
 
   const handleChartWheel = useCallback(
     (event: React.WheelEvent<HTMLDivElement>) => {
+      if (isChartControlTarget(event.target)) return
       event.preventDefault()
       event.stopPropagation()
       zoomChartWindow(event.deltaY)
@@ -1148,6 +1180,7 @@ export default function StockReview() {
     if (!el) return
 
     const handleNativeWheel = (event: WheelEvent) => {
+      if (isChartControlTarget(event.target)) return
       event.preventDefault()
       event.stopPropagation()
       zoomChartWindow(event.deltaY)
@@ -1282,7 +1315,7 @@ export default function StockReview() {
       )}
 
       {/* ── Data loading ── */}
-      {selectedStock && dataLoading && (
+      {selectedStock && dataLoading && chartData.length === 0 && (
         <div className="flex items-center justify-center py-20">
           <p className="text-lg text-slate-500 dark:text-slate-400">正在加载数据...</p>
         </div>
@@ -1505,6 +1538,34 @@ export default function StockReview() {
               onPointerCancel={finishChartSelection}
               onWheel={handleChartWheel}
             >
+              <div
+                data-chart-control="true"
+                className="absolute top-3 right-[72px] z-30 flex items-center gap-2 rounded-lg border border-slate-600/70 bg-slate-950/85 px-2.5 py-1.5 text-xs text-slate-300 shadow-lg backdrop-blur-sm"
+                onPointerDown={(event) => event.stopPropagation()}
+                onPointerMove={(event) => event.stopPropagation()}
+                onPointerUp={(event) => event.stopPropagation()}
+                onPointerCancel={(event) => event.stopPropagation()}
+                onWheel={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+              >
+                <label htmlFor="stock-review-adjustment" className="text-slate-400">
+                  复权
+                </label>
+                <select
+                  id="stock-review-adjustment"
+                  value={adjustmentMode}
+                  onChange={(event) => setAdjustmentMode(event.target.value as AdjustmentMode)}
+                  className="h-7 rounded-md border border-slate-700 bg-slate-900 px-2 text-xs text-slate-100 outline-none hover:border-slate-500 focus:border-indigo-400"
+                >
+                  {ADJUSTMENT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div
                 ref={(el) => {
                   mainChartContainerRef.current = el

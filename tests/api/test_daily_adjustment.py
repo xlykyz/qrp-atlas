@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+import duckdb
 
 from qrp_atlas.api.routes import daily as daily_route
 from qrp_atlas.api.server import app
@@ -37,6 +38,25 @@ def client_without_adj(sample_db_path_without_adj: Path, monkeypatch) -> TestCli
     """指向没有 adj_factor_changes 表的临时 DuckDB 的 TestClient。"""
     monkeypatch.setattr(
         daily_route, "get_db", make_fake_get_db(sample_db_path_without_adj)
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def client_with_sparse_adj(sample_db_path: Path, monkeypatch) -> TestClient:
+    """adj_factor_changes 只保留变化点时，每个交易日应取最近有效因子。"""
+    con = duckdb.connect(str(sample_db_path))
+    try:
+        con.execute(
+            "DELETE FROM adj_factor_changes WHERE ticker = ? AND trade_date = ?",
+            [TICKER, "2024-01-02"],
+        )
+    finally:
+        con.close()
+
+    monkeypatch.setattr(
+        daily_route, "get_db", make_fake_get_db(sample_db_path)
     )
     with TestClient(app) as c:
         yield c
@@ -86,6 +106,19 @@ def test_qfq_mode_uses_latest_factor(client_with_adj: TestClient):
     assert [r["low"] for r in rows] == [2.25, 5.0, 11.0]
     # pre_close: 9.8*1/4=2.45, 10*2/4=5.0, 11*4/4=11.0
     assert [r["pre_close"] for r in rows] == [2.45, 5.0, 11.0]
+
+
+def test_sparse_adj_factor_changes_are_carried_forward(
+    client_with_sparse_adj: TestClient,
+):
+    rows = _fetch(client_with_sparse_adj, "qfq")
+    assert len(rows) == 3
+
+    # 2024-01-02 没有变更记录，应沿用 2024-01-01 的有效因子 1.0，
+    # 而不是只在命中变更日期时复权。
+    assert [r["adj_factor"] for r in rows] == [1.0, 1.0, 4.0]
+    assert [r["close"] for r in rows] == [2.5, 2.75, 12.0]
+    assert [r["open"] for r in rows] == [2.5, 2.75, 12.0]
 
 
 # ────────────────────────────────────────────────────────────
