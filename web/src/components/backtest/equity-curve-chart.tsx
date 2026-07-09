@@ -85,21 +85,22 @@ export function EquityCurveChart({ data, loading, error }: Props) {
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/50">
       <p className="mb-3 text-sm font-medium text-slate-700 dark:text-slate-200">净值曲线</p>
-      {error ? (
-        <div className="flex h-64 items-center justify-center text-sm text-red-600 dark:text-red-400">
-          {error}
-        </div>
-      ) : loading ? (
-        <div className="flex h-64 items-center justify-center text-sm text-slate-500 dark:text-slate-400">
-          加载净值数据...
-        </div>
-      ) : !data || data.length === 0 ? (
-        <div className="flex h-64 items-center justify-center text-sm text-slate-500 dark:text-slate-400">
-          暂无净值数据
-        </div>
-      ) : (
-        <div ref={containerRef} style={{ height: CHART_HEIGHT, width: '100%' }} />
-      )}
+      <div className="relative" style={{ height: CHART_HEIGHT }}>
+        <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
+        {error ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-slate-50 text-sm text-red-600 dark:bg-slate-900/50 dark:text-red-400">
+            {error}
+          </div>
+        ) : loading ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-slate-50 text-sm text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
+            加载净值数据...
+          </div>
+        ) : !data || data.length === 0 ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-slate-50 text-sm text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
+            暂无净值数据
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
