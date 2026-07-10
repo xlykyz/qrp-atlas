@@ -17,7 +17,7 @@ from .clean import clean_daily_basic
 from .load_duckdb import load_daily_basic
 
 
-def run_for_date(trade_date: date) -> None:
+def run_for_date(trade_date: date, *, init_db: bool = False) -> None:
     """对指定交易日执行完整 pipeline（fetch → clean → load）
 
     Args:
@@ -37,7 +37,7 @@ def run_for_date(trade_date: date) -> None:
     print(f"[DAILY_BASIC] cleaned={len(df_clean)} rows")
 
     # 3. load
-    rows_loaded = load_daily_basic(df_clean, trade_date_str)
+    rows_loaded = load_daily_basic(df_clean, trade_date_str, init=init_db)
     print(f"[DAILY_BASIC] rows_loaded={rows_loaded}")
 
 
@@ -75,11 +75,11 @@ def main() -> None:
         except ValueError:
             print(f"❌ 日期格式错误: {args.date}，请使用 YYYY-MM-DD")
             return
-        run_for_date(trade_date)
+        run_for_date(trade_date, init_db=True)
     else:
         trade_date = guess_latest_trade_date()
         print(f"[DAILY_BASIC] 自动检测最新交易日: {trade_date}")
-        run_for_date(trade_date)
+        run_for_date(trade_date, init_db=True)
 
 
 if __name__ == "__main__":

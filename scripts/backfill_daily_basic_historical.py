@@ -70,31 +70,64 @@ def main():
 
     success = 0
     fail = 0
-    boundary_hit = False
+    consecutive_empty = 0
 
     for i, d in enumerate(to_backfill):
         try:
-            run_for_date(d)
+            run_for_date(d, init_db=(i == 0))
             success += 1
             save_checkpoint(d)
-        except Exception as e:
+            consecutive_empty = 0
+        except ValueError as e:
+            # 可能是真实边界或瞬断，直接调用 API 二次确认
             msg = str(e).lower()
-            if "empty" in msg or "no data" in msg or "none" in msg:
-                print(f"[BOUNDARY] {d}: 接口返回空数据，达到时间边界")
-                boundary_hit = True
+            if "empty" in msg or "no data" in msg:
+                # 二次确认：直接调用 API 验证
+                from qrp_atlas.config import get_tushare_pro
+                try:
+                    pro = get_tushare_pro()
+                    verify = pro.daily_basic(trade_date=d.strftime("%Y%m%d"))
+                    if verify is not None and not verify.empty:
+                        print(f"[RETRY] {d}: 瞬断误判，重试 fetch...")
+                        run_for_date(d)
+                        success += 1
+                        save_checkpoint(d)
+                        consecutive_empty = 0
+                        continue
+                except Exception:
+                    pass
+                # 真·空数据
+                consecutive_empty += 1
+                print(f"[EMPTY] {d}: 无数据 (连续 {consecutive_empty} 天)")
                 save_checkpoint(d)
-                break
+                if consecutive_empty >= 5:
+                    print(f"[BOUNDARY] 连续 5 天空数据，达到时间边界，停止")
+                    break
+                continue
             else:
+                # 其他 ValueError，重试
                 print(f"[FAIL] {d}: {e}")
-                # 重试一次
                 try:
                     run_for_date(d)
                     success += 1
                     save_checkpoint(d)
+                    consecutive_empty = 0
                 except Exception as e2:
                     print(f"[FAIL] {d} 重试仍失败: {e2}")
                     fail += 1
                     save_checkpoint(d)
+        except Exception as e:
+            # 网络/SSL/超时 等异常
+            print(f"[FAIL] {d}: {e}")
+            try:
+                run_for_date(d)
+                success += 1
+                save_checkpoint(d)
+                consecutive_empty = 0
+            except Exception as e2:
+                print(f"[FAIL] {d} 重试仍失败: {e2}")
+                fail += 1
+                save_checkpoint(d)
 
         if (i + 1) % 50 == 0:
             print(f"[PROGRESS] {i+1}/{total} ({success} ok, {fail} fail, 当前: {d})")
@@ -102,9 +135,8 @@ def main():
     print(f"\n[DONE] 本次回补完成")
     print(f"  OK: {success}")
     print(f"  FAIL: {fail}")
-    print(f"  边界: {boundary_hit}")
 
-    if boundary_hit or fail > 0:
+    if fail > 0 or consecutive_empty > 0:
         print(f"  未完成，可再次运行脚本继续")
     else:
         clear_checkpoint()

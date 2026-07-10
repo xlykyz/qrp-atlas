@@ -13,7 +13,7 @@ from qrp_atlas.contracts import (
 )
 
 
-def load_daily_basic(df: pd.DataFrame, trade_date: str) -> int:
+def load_daily_basic(df: pd.DataFrame, trade_date: str, *, init: bool = False) -> int:
     """加载清洗后的 daily_basic 数据到 DuckDB
 
     行为:
@@ -41,7 +41,8 @@ def load_daily_basic(df: pd.DataFrame, trade_date: str) -> int:
 
     con = duckdb.connect(str(DB_PATH))
     try:
-        init_database(con)
+        if init:
+            init_database(con)
 
         con.execute("BEGIN")
         con.execute(
