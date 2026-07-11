@@ -68,6 +68,11 @@ from .fields import (
     CONSECUTIVE_DAYS, OPEN_COUNT,
     LAST_BLOCK_TIME, BLAST_COUNT, BLOCK_STATS,
     TOTAL_SHARES, BOARD_AMOUNT, PE_RATIO,
+    TURNOVER_RATE, TURNOVER_RATE_F, VOLUME_RATIO,
+    PE_TTM, PB, PS, PS_TTM,
+    DV_RATIO, DV_TTM,
+    FLOAT_SHARE, FREE_SHARE,
+    TOTAL_MV, CIRC_MV, LIMIT_STATUS,
 )
 
 
@@ -425,7 +430,34 @@ DT_POOL = TableSchema(
     primary_key=(TRADE_DATE, TICKER),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL)
+DAILY_BASIC = TableSchema(
+    name="daily_basic",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(CLOSE, "DOUBLE"),
+        ColumnSpec(TURNOVER_RATE, "DOUBLE"),
+        ColumnSpec(TURNOVER_RATE_F, "DOUBLE"),
+        ColumnSpec(VOLUME_RATIO, "DOUBLE"),
+        ColumnSpec(PE_RATIO, "DOUBLE"),
+        ColumnSpec(PE_TTM, "DOUBLE"),
+        ColumnSpec(PB, "DOUBLE"),
+        ColumnSpec(PS, "DOUBLE"),
+        ColumnSpec(PS_TTM, "DOUBLE"),
+        ColumnSpec(DV_RATIO, "DOUBLE"),
+        ColumnSpec(DV_TTM, "DOUBLE"),
+        ColumnSpec(TOTAL_SHARES, "DOUBLE"),
+        ColumnSpec(FLOAT_SHARE, "DOUBLE"),
+        ColumnSpec(FREE_SHARE, "DOUBLE"),
+        ColumnSpec(TOTAL_MV, "DOUBLE"),
+        ColumnSpec(CIRC_MV, "DOUBLE"),
+        ColumnSpec(LIMIT_STATUS, "INTEGER"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, TICKER),
+)
+
+ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL, DAILY_BASIC)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 

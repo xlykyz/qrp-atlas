@@ -98,6 +98,22 @@ IDENTIFIER_FIELDS = (TICKER, TRADE_ID)
 INDEX_CODE = "index_code"
 INDEX_NAME = "index_name"
 
+# ── 每日基本面指标字段（daily_basic） ──
+TURNOVER_RATE = "turnover_rate"
+TURNOVER_RATE_F = "turnover_rate_f"
+VOLUME_RATIO = "volume_ratio"
+PE_TTM = "pe_ttm"
+PB = "pb"
+PS = "ps"
+PS_TTM = "ps_ttm"
+DV_RATIO = "dv_ratio"
+DV_TTM = "dv_ttm"
+FLOAT_SHARE = "float_share"
+FREE_SHARE = "free_share"
+TOTAL_MV = "total_mv"
+CIRC_MV = "circ_mv"
+LIMIT_STATUS = "limit_status"
+
 # ── 涨跌停股池字段 ──
 FIRST_BLOCK_TIME = "first_block_time"
 LAST_BLOCK_TIME = "last_block_time"

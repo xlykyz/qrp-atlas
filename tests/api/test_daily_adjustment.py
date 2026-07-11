@@ -1,6 +1,6 @@
 """/api/daily 复权口径测试。
 
-通过临时 DuckDB + monkeypatch daily 模块内的 get_db + FastAPI TestClient 验证：
+通过临时 DuckDB + monkeypatch daily 模块内的 get_db + ASGITransport 客户端验证：
 - raw / qfq / hfq 三种口径的 OHLC 调整公式
 - volume/amount 在三种口径下保持一致
 - 缺少 adj_factor_changes 表时 qfq 不报错并退化为原值
@@ -12,10 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+import duckdb
 
 from qrp_atlas.api.routes import daily as daily_route
 from qrp_atlas.api.server import app
+from tests.api.asgi_client import ASGITestClient
 from tests.conftest import make_fake_get_db
 
 
@@ -23,26 +24,42 @@ TICKER = "000001.SZ"
 
 
 @pytest.fixture
-def client_with_adj(sample_db_path: Path, monkeypatch) -> TestClient:
-    """指向带 adj_factor_changes 表的临时 DuckDB 的 TestClient。"""
+def client_with_adj(sample_db_path: Path, monkeypatch) -> ASGITestClient:
+    """指向带 adj_factor_changes 表的临时 DuckDB 的 ASGI 客户端。"""
     monkeypatch.setattr(
         daily_route, "get_db", make_fake_get_db(sample_db_path)
     )
-    with TestClient(app) as c:
-        yield c
+    return ASGITestClient(app)
 
 
 @pytest.fixture
-def client_without_adj(sample_db_path_without_adj: Path, monkeypatch) -> TestClient:
-    """指向没有 adj_factor_changes 表的临时 DuckDB 的 TestClient。"""
+def client_without_adj(sample_db_path_without_adj: Path, monkeypatch) -> ASGITestClient:
+    """指向没有 adj_factor_changes 表的临时 DuckDB 的 ASGI 客户端。"""
     monkeypatch.setattr(
         daily_route, "get_db", make_fake_get_db(sample_db_path_without_adj)
     )
-    with TestClient(app) as c:
-        yield c
+    return ASGITestClient(app)
 
 
-def _fetch(client: TestClient, adjustment: str, *, ticker: str = TICKER) -> list[dict]:
+@pytest.fixture
+def client_with_sparse_adj(sample_db_path: Path, monkeypatch) -> ASGITestClient:
+    """adj_factor_changes 只保留变化点时，每个交易日应取最近有效因子。"""
+    con = duckdb.connect(str(sample_db_path))
+    try:
+        con.execute(
+            "DELETE FROM adj_factor_changes WHERE ticker = ? AND trade_date = ?",
+            [TICKER, "2024-01-02"],
+        )
+    finally:
+        con.close()
+
+    monkeypatch.setattr(
+        daily_route, "get_db", make_fake_get_db(sample_db_path)
+    )
+    return ASGITestClient(app)
+
+
+def _fetch(client: ASGITestClient, adjustment: str, *, ticker: str = TICKER) -> list[dict]:
     resp = client.get(
         "/api/daily", params={"ticker": ticker, "adjustment": adjustment}
     )
@@ -55,7 +72,7 @@ def _fetch(client: TestClient, adjustment: str, *, ticker: str = TICKER) -> list
 # ────────────────────────────────────────────────────────────
 # 1. raw 模式
 # ────────────────────────────────────────────────────────────
-def test_raw_mode_preserves_prices(client_with_adj: TestClient):
+def test_raw_mode_preserves_prices(client_with_adj: ASGITestClient):
     rows = _fetch(client_with_adj, "raw")
     assert len(rows) == 3
     assert [r["close"] for r in rows] == [10.0, 11.0, 12.0]
@@ -72,7 +89,7 @@ def test_raw_mode_preserves_prices(client_with_adj: TestClient):
 # ────────────────────────────────────────────────────────────
 # 2. qfq 模式：每行 price * row.adj_factor / latest_adj_factor(=4)
 # ────────────────────────────────────────────────────────────
-def test_qfq_mode_uses_latest_factor(client_with_adj: TestClient):
+def test_qfq_mode_uses_latest_factor(client_with_adj: ASGITestClient):
     rows = _fetch(client_with_adj, "qfq")
     assert len(rows) == 3
     # 公式：price * row.adj_factor / 4
@@ -88,10 +105,23 @@ def test_qfq_mode_uses_latest_factor(client_with_adj: TestClient):
     assert [r["pre_close"] for r in rows] == [2.45, 5.0, 11.0]
 
 
+def test_sparse_adj_factor_changes_are_carried_forward(
+    client_with_sparse_adj: ASGITestClient,
+):
+    rows = _fetch(client_with_sparse_adj, "qfq")
+    assert len(rows) == 3
+
+    # 2024-01-02 没有变更记录，应沿用 2024-01-01 的有效因子 1.0，
+    # 而不是只在命中变更日期时复权。
+    assert [r["adj_factor"] for r in rows] == [1.0, 1.0, 4.0]
+    assert [r["close"] for r in rows] == [2.5, 2.75, 12.0]
+    assert [r["open"] for r in rows] == [2.5, 2.75, 12.0]
+
+
 # ────────────────────────────────────────────────────────────
 # 3. hfq 模式：first_adj_factor = 1 作为分母
 # ────────────────────────────────────────────────────────────
-def test_hfq_mode_uses_first_factor(client_with_adj: TestClient):
+def test_hfq_mode_uses_first_factor(client_with_adj: ASGITestClient):
     rows = _fetch(client_with_adj, "hfq")
     assert len(rows) == 3
     # close: 10*1/1=10, 11*2/1=22, 12*4/1=48
@@ -109,7 +139,7 @@ def test_hfq_mode_uses_first_factor(client_with_adj: TestClient):
 # ────────────────────────────────────────────────────────────
 # 4. 成交量成交额不复权：raw/qfq/hfq 下应一致
 # ────────────────────────────────────────────────────────────
-def test_volume_amount_identical_across_adjustments(client_with_adj: TestClient):
+def test_volume_amount_identical_across_adjustments(client_with_adj: ASGITestClient):
     raw_rows = _fetch(client_with_adj, "raw")
     qfq_rows = _fetch(client_with_adj, "qfq")
     hfq_rows = _fetch(client_with_adj, "hfq")
@@ -126,7 +156,7 @@ def test_volume_amount_identical_across_adjustments(client_with_adj: TestClient)
 # 5. 无 adj_factor_changes 表：qfq 不报错，价格不调整
 # ────────────────────────────────────────────────────────────
 def test_qfq_without_adj_factor_table_degrades_to_raw(
-    client_without_adj: TestClient,
+    client_without_adj: ASGITestClient,
 ):
     rows = _fetch(client_without_adj, "qfq")
     assert len(rows) == 3
@@ -138,7 +168,7 @@ def test_qfq_without_adj_factor_table_degrades_to_raw(
 
 
 def test_hfq_without_adj_factor_table_degrades_to_raw(
-    client_without_adj: TestClient,
+    client_without_adj: ASGITestClient,
 ):
     rows = _fetch(client_without_adj, "hfq")
     assert len(rows) == 3
@@ -147,7 +177,7 @@ def test_hfq_without_adj_factor_table_degrades_to_raw(
 
 
 def test_raw_without_adj_factor_table_returns_none_adj_factor(
-    client_without_adj: TestClient,
+    client_without_adj: ASGITestClient,
 ):
     rows = _fetch(client_without_adj, "raw")
     assert len(rows) == 3
@@ -157,7 +187,7 @@ def test_raw_without_adj_factor_table_returns_none_adj_factor(
 # ────────────────────────────────────────────────────────────
 # 6. 非法 adjustment 触发 FastAPI 参数校验错误（HTTP 422）
 # ────────────────────────────────────────────────────────────
-def test_invalid_adjustment_returns_422(client_with_adj: TestClient):
+def test_invalid_adjustment_returns_422(client_with_adj: ASGITestClient):
     resp = client_with_adj.get(
         "/api/daily", params={"ticker": TICKER, "adjustment": "bad"}
     )

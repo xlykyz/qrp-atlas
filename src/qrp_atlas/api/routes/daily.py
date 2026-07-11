@@ -56,6 +56,27 @@ def _normalize_result_rows(result: list[dict]) -> None:
                 row[k] = v.isoformat()
 
 
+def _adj_factor_select(has_adj_factor: bool, daily_alias: str = "d") -> str:
+    """Return the effective adjustment factor select expression for a daily row.
+
+    adj_factor_changes stores change points, so each daily bar must use the most
+    recent factor at or before that bar's trade_date. Joining on exact trade_date
+    would only adjust change days and create single-day price spikes.
+    """
+    if not has_adj_factor:
+        return "NULL AS adj_factor"
+    return f"""
+        (
+            SELECT a.adj_factor
+            FROM adj_factor_changes a
+            WHERE a.ticker = {daily_alias}.ticker
+              AND a.trade_date <= {daily_alias}.trade_date
+            ORDER BY a.trade_date DESC
+            LIMIT 1
+        ) AS adj_factor
+    """
+
+
 def _apply_price_adjustment(result: list[dict], adjustment: str) -> None:
     """按复权模式就地调整 OHLC。
 
@@ -124,12 +145,7 @@ def query_daily(
             where_clauses.append("d.trade_date <= ?")
             params.append(end_date)
 
-        adj_select = "a.adj_factor AS adj_factor" if has_adj_factor else "NULL AS adj_factor"
-        adj_join = (
-            "LEFT JOIN adj_factor_changes a ON d.ticker = a.ticker AND d.trade_date = a.trade_date"
-            if has_adj_factor
-            else ""
-        )
+        adj_select = _adj_factor_select(has_adj_factor)
 
         # ── 单日查询：用窗口函数计算 5/10/20 日累计涨跌幅 ──
         if date and not start_date and not end_date:
@@ -163,7 +179,6 @@ def query_daily(
                     CASE WHEN d.close_20d_ago IS NOT NULL AND d.close_20d_ago != 0
                          THEN ROUND((d.close - d.close_20d_ago) / d.close_20d_ago * 100, 2) END AS pct_20d
                 FROM base d
-                {adj_join}
                 WHERE d.trade_date = ?
                 ORDER BY d.trade_date, d.ticker
                 LIMIT ? OFFSET ?
@@ -179,7 +194,6 @@ def query_daily(
             query = f"""
                 SELECT d.*, {adj_select}
                 FROM daily_market_snapshot d
-                {adj_join}
                 WHERE {where_sql}
                 ORDER BY d.trade_date, d.ticker
                 LIMIT ? OFFSET ?

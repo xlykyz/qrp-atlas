@@ -7,24 +7,23 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from qrp_atlas.api.server import app
+from tests.api.asgi_client import ASGITestClient
 
 
 SAMPLE_RUN = "sample_run_001"
 
 
 @pytest.fixture
-def client() -> TestClient:
-    with TestClient(app) as c:
-        yield c
+def client() -> ASGITestClient:
+    return ASGITestClient(app)
 
 
 # ────────────────────────────────────────────────────────────
 # 1. runs 列表
 # ────────────────────────────────────────────────────────────
-def test_list_runs_returns_sample(client: TestClient):
+def test_list_runs_returns_sample(client: ASGITestClient):
     resp = client.get("/api/backtest/runs")
     assert resp.status_code == 200
     data = resp.json()
@@ -34,7 +33,7 @@ def test_list_runs_returns_sample(client: TestClient):
     assert SAMPLE_RUN in run_ids
 
 
-def test_list_runs_meta_fields(client: TestClient):
+def test_list_runs_meta_fields(client: ASGITestClient):
     resp = client.get("/api/backtest/runs")
     sample = next(r for r in resp.json() if r["run_id"] == SAMPLE_RUN)
     for field in (
@@ -53,7 +52,7 @@ def test_list_runs_meta_fields(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 2. 单 run 元信息
 # ────────────────────────────────────────────────────────────
-def test_get_run_meta(client: TestClient):
+def test_get_run_meta(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}")
     assert resp.status_code == 200
     data = resp.json()
@@ -66,7 +65,7 @@ def test_get_run_meta(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 3. summary
 # ────────────────────────────────────────────────────────────
-def test_get_summary(client: TestClient):
+def test_get_summary(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}/summary")
     assert resp.status_code == 200
     data = resp.json()
@@ -96,7 +95,7 @@ def test_get_summary(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 4. equity
 # ────────────────────────────────────────────────────────────
-def test_get_equity(client: TestClient):
+def test_get_equity(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}/equity")
     assert resp.status_code == 200
     data = resp.json()
@@ -113,7 +112,7 @@ def test_get_equity(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 5. trades
 # ────────────────────────────────────────────────────────────
-def test_get_trades(client: TestClient):
+def test_get_trades(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}/trades")
     assert resp.status_code == 200
     data = resp.json()
@@ -145,7 +144,7 @@ def test_get_trades(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 6. skipped
 # ────────────────────────────────────────────────────────────
-def test_get_skipped(client: TestClient):
+def test_get_skipped(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}/skipped")
     assert resp.status_code == 200
     data = resp.json()
@@ -160,7 +159,7 @@ def test_get_skipped(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 7. config
 # ────────────────────────────────────────────────────────────
-def test_get_config(client: TestClient):
+def test_get_config(client: ASGITestClient):
     resp = client.get(f"/api/backtest/runs/{SAMPLE_RUN}/config")
     assert resp.status_code == 200
     data = resp.json()
@@ -175,17 +174,17 @@ def test_get_config(client: TestClient):
 # ────────────────────────────────────────────────────────────
 # 8. 不存在 run_id 返回 404
 # ────────────────────────────────────────────────────────────
-def test_run_not_found_returns_404(client: TestClient):
+def test_run_not_found_returns_404(client: ASGITestClient):
     resp = client.get("/api/backtest/runs/nonexistent_run_999")
     assert resp.status_code == 404
 
 
-def test_summary_not_found_returns_404(client: TestClient):
+def test_summary_not_found_returns_404(client: ASGITestClient):
     resp = client.get("/api/backtest/runs/nonexistent_run_999/summary")
     assert resp.status_code == 404
 
 
-def test_invalid_run_id_returns_422(client: TestClient):
+def test_invalid_run_id_returns_422(client: ASGITestClient):
     """run_id 含路径分隔符应被白名单拒绝。"""
     resp = client.get("/api/backtest/runs/..%2F..%2Fetc")
     # FastAPI 路径参数不会解码 %2F，但即使能传进来也会被 _validate_run_id 拒绝
