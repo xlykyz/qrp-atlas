@@ -4,8 +4,8 @@ db/
 
 # 项目管理文件（本地管理，不同步）
 PROJECT_MEMORY.md
-CLAUDE.md
-AGENTS.md
+/CLAUDE.md
+/AGENTS.md
 
 # Python 缓存和虚拟环境
 __pycache__/
@@ -74,14 +74,13 @@ dist/
 *.tsbuildinfo
 
 # 前端 Agent 配置（本地管理，不同步）
-web/AGENTS.md
-web/CLAUDE.md
 web/.agent/
 web/.codex/
 web/.claude/
 
 # Claude Code 工作目录
 .claude/
+.codex/
 
 # Agent 状态（本地管理，不同步）
 .agent/

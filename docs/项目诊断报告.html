@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>qrp-atlas 项目诊断报告</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e5e5e5;
+    --text: #1a1a1a;
+    --text-secondary: #666;
+    --text-muted: #999;
+    --red: #dc2626;
+    --green: #16a34a;
+    --amber: #d97706;
+    --blue: #2563eb;
+    --teal: #0d9488;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+  .container { max-width: 860px; margin: 0 auto; padding: 48px 32px; }
+  h1 { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+  .subtitle { color: var(--text-secondary); font-size: 14px; margin-bottom: 40px; }
+  h2 {
+    font-size: 20px; font-weight: 600; margin-top: 48px; margin-bottom: 16px;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 16px; font-weight: 600; margin-top: 32px; margin-bottom: 12px; }
+  p { margin-bottom: 12px; }
+  .section { margin-bottom: 32px; }
+
+  /* Score card */
+  .score-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .score-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 16px;
+    text-align: center;
+  }
+  .score-card .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .score-card .value { font-size: 28px; font-weight: 600; }
+  .score-card .unit { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+  .score-good .value { color: var(--green); }
+  .score-warn .value { color: var(--amber); }
+  .score-bad .value { color: var(--red); }
+
+  /* Verdict box */
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--teal);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 24px 0;
+  }
+  .verdict h3 { margin-top: 0; color: var(--teal); }
+  .verdict p:last-child { margin-bottom: 0; }
+
+  /* Finding table */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { font-weight: 600; color: var(--text-secondary); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+  /* Badge */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .badge-good { background: #dcfce7; color: #166534; }
+  .badge-warn { background: #fef3c7; color: #92400e; }
+  .badge-bad { background: #fee2e2; color: #991b1b; }
+  .badge-info { background: #dbeafe; color: #1e40af; }
+
+  /* Code block */
+  pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 16px 20px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 12px 0;
+  }
+  code { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
+  pre code { color: inherit; }
+
+  /* Phase cards */
+  .phase {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+  }
+  .phase-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .phase-num {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; color: white;
+    flex-shrink: 0;
+  }
+  .phase-1 .phase-num { background: var(--red); }
+  .phase-2 .phase-num { background: var(--amber); }
+  .phase-3 .phase-num { background: var(--blue); }
+  .phase-4 .phase-num { background: var(--teal); }
+  .phase-title { font-size: 16px; font-weight: 600; }
+  .phase-time { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+  .phase ul { margin-left: 20px; margin-bottom: 8px; }
+  .phase li { margin-bottom: 6px; font-size: 14px; }
+  .phase .impact { font-size: 13px; color: var(--text-secondary); margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+
+  /* Metric bar */
+  .metric-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .metric-label { width: 120px; font-size: 13px; color: var(--text-secondary); flex-shrink: 0; }
+  .metric-bar { flex: 1; height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; }
+  .metric-fill { height: 100%; border-radius: 4px; }
+  .metric-value { width: 60px; font-size: 13px; font-weight: 600; text-align: right; flex-shrink: 0; }
+
+  /* Callout */
+  .callout {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .callout-title { font-weight: 600; margin-bottom: 4px; }
+
+  /* Footer */
+  .footer { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>qrp-atlas 项目诊断报告</h1>
+<p class="subtitle">生成时间：2026-07-09 &nbsp;|&nbsp; 诊断范围：后端 Python (74 文件) + 前端 React (5 页面) + 测试 + 依赖 + 文档</p>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 总评 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>一、总评</h2>
+
+<div class="verdict">
+  <h3>结论：有救，而且底子比预期好</h3>
+  <p>这个项目的<strong>架构决策质量远高于代码实现质量</strong>。数据契约层 (contracts/) 的设计、pipeline 的分源独立、回测引擎的解耦，这些是在很多商业项目里都看不到的正面模式。真正拖低项目体验的是三类"成长痛"：前端组件膨胀、工具函数迁移未完成、后端依赖清理滞后——全部是 1-2 周内可修复的表层债务，不涉及架构推翻。</p>
+  <p>不建议重写。建议按四阶段渐进式重构，每个阶段完成后项目都可正常上线。</p>
+</div>
+
+<div class="score-grid">
+  <div class="score-card score-good">
+    <div class="label">架构设计</div>
+    <div class="value">8.5</div>
+    <div class="unit">/ 10</div>
+  </div>
+  <div class="score-card score-warn">
+    <div class="label">代码质量</div>
+    <div class="value">6.0</div>
+    <div class="unit">/ 10</div>
+  </div>
+  <div class="score-card score-bad">
+    <div class="label">测试覆盖</div>
+    <div class="value">3.0</div>
+    <div class="unit">/ 10</div>
+  </div>
+  <div class="score-card score-warn">
+    <div class="label">前端体验</div>
+    <div class="value">5.0</div>
+    <div class="unit">/ 10</div>
+  </div>
+  <div class="score-card score-warn">
+    <div class="label">工程规范</div>
+    <div class="value">5.5</div>
+    <div class="unit">/ 10</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 项目概况 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>二、项目概况</h2>
+
+<table>
+  <tr><th>维度</th><th>数据</th></tr>
+  <tr><td>定位</td><td>个人 A 股交易复盘与市场数据分析系统</td></tr>
+  <tr><td>后端</td><td>Python 3.13+ / FastAPI / DuckDB / pandas</td></tr>
+  <tr><td>前端</td><td>React + Vite + Tailwind CSS + lightweight-charts</td></tr>
+  <tr><td>后端源文件</td><td>74 个 .py（含 pipeline / contracts / api / backtest / config）</td></tr>
+  <tr><td>前端页面</td><td>5 个 .tsx，共 4,310 行</td></tr>
+  <tr><td>测试文件</td><td>7 个（contracts 1 + api 2 + backtest 2 + conftest 2），覆盖 74 个源文件中的关键路径</td></tr>
+  <tr><td>临时脚本</td><td>29 个 .py（scripts/ 目录）</td></tr>
+  <tr><td>数据表</td><td>12 张（daily_market_snapshot / market_phase / trade_execution / stock_info / trading_calendar / adj_factor_changes / cninfo_research_visits / research_report_stock / research_report_industry / index_daily / zt_pool / dt_pool）</td></tr>
+  <tr><td>数据管线</td><td>4 条正式管线（daily_update / cninfo / research_report / research_industry）</td></tr>
+  <tr><td>API 路由</td><td>11 个 router（daily / stock / trades / phase / tables / dev / index / zt_pool / adj_factor / research / backtest）</td></tr>
+  <tr><td>文档</td><td>README.md + AGENTS.md + docs/ 下 8 个文件（含回测引擎设计文档）</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 逐层诊断 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>三、逐层诊断</h2>
+
+<!-- ── 3.1 contracts/ ── -->
+
+<h3>3.1 contracts/ 数据契约层 <span class="badge badge-good">资产</span></h3>
+
+<p>这是整个项目最亮眼的模块。使用 <code>frozen dataclass</code> 定义 <code>ColumnSpec</code> 和 <code>TableSchema</code>，12 张表的列规格、主键、DuckDB 建表 SQL 全部集中在一个文件里，是真正的 SSOT（Single Source of Truth）。</p>
+
+<table>
+  <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+  <tr><td>字段常量化</td><td><span class="badge badge-good">GOOD</span></td><td>fields.py 统一定义，避免魔法字符串</td></tr>
+  <tr><td>表结构声明式</td><td><span class="badge badge-good">GOOD</span></td><td>frozen dataclass，不可变，可哈希</td></tr>
+  <tr><td>建表 SQL 自动生成</td><td><span class="badge badge-good">GOOD</span></td><td>duckdb_create_sql() 方法，支持单列/多列主键</td></tr>
+  <tr><td>入库前校验</td><td><span class="badge badge-good">GOOD</span></td><td>validate.py 做 schema 对齐 + 类型转换</td></tr>
+  <tr><td>外部字段映射</td><td><span class="badge badge-good">GOOD</span></td><td>mappings.py 集中管理多数据源字段映射</td></tr>
+  <tr><td>A 股规则封装</td><td><span class="badge badge-good">GOOD</span></td><td>conventions.py 封装 ticker 规范化、板块识别等</td></tr>
+</table>
+
+<div class="callout">
+  <div class="callout-title">诊断意见</div>
+  contracts/ 层设计成熟，是项目的核心资产。唯一建议：schema.py 目前 463 行，12 张表全在一个文件里，后续表数增长时可考虑按业务域拆分（如 market / research / trade）。
+</div>
+
+<!-- ── 3.2 pipeline/ ── -->
+
+<h3>3.2 pipeline/ 数据管线 <span class="badge badge-good">资产</span></h3>
+
+<p>4 条正式管线各自独立，每条都遵循 fetch → clean → load 三段式，结构清晰。daily_update 管线还支持 enrich 阶段和从 raw 重跑的模式。</p>
+
+<table>
+  <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+  <tr><td>管线隔离</td><td><span class="badge badge-good">GOOD</span></td><td>每条管线独立目录，互不依赖</td></tr>
+  <tr><td>fetch → clean → load 分段</td><td><span class="badge badge-good">GOOD</span></td><td>职责清晰，可单独重跑某一段</td></tr>
+  <tr><td>raw 数据保存</td><td><span class="badge badge-good">GOOD</span></td><td>save_raw_snapshot 保留原始数据，可回溯</td></tr>
+  <tr><td>canonical 数据保存</td><td><span class="badge badge-good">GOOD</span></td><td>清洗后数据落 CSV，可审计</td></tr>
+  <tr><td>批量重跑支持</td><td><span class="badge badge-good">GOOD</span></td><td>reprocess_from_raw 支持批量模式 + 共享连接</td></tr>
+  <tr><td>错误处理</td><td><span class="badge badge-warn">DEBT</span></td><td>fetch 失败缺少重试机制，网络抖动会中断整条管线</td></tr>
+  <tr><td>日志规范</td><td><span class="badge badge-warn">DEBT</span></td><td>全部用 print()，无 logging 模块，无结构化日志</td></tr>
+</table>
+
+<!-- ── 3.3 API ── -->
+
+<h3>3.3 API 后端 <span class="badge badge-warn">混合</span></h3>
+
+<p>FastAPI server 本身结构清晰：lifespan 管理 DB 路径、CORS 配置完整、路由注册集中、健康检查端点实用。但路由层的实现质量参差不齐。</p>
+
+<h4>3.3.1 server.py — 服务入口</h4>
+
+<table>
+  <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+  <tr><td>lifespan 生命周期</td><td><span class="badge badge-good">GOOD</span></td><td>启动时初始化 DB 路径到 app.state</td></tr>
+  <tr><td>CORS 配置</td><td><span class="badge badge-warn">DEBT</span></td><td>allow_origins=["*"] + allow_credentials=True，生产环境有安全风险</td></tr>
+  <tr><td>健康检查</td><td><span class="badge badge-good">GOOD</span></td><td>/api/health 返回表列表，可快速验证 DB 连通性</td></tr>
+  <tr><td>stats() SQL 注入</td><td><span class="badge badge-bad">BAD</span></td><td>f-string 拼接表名和列名，虽然来源是 SHOW TABLES 非用户输入，但模式不安全</td></tr>
+</table>
+
+<pre><code># server.py:89-103 — stats() 中的 SQL 拼接
+count = con.execute(f'SELECT COUNT(*) FROM "{tname}"').fetchone()[0]
+# ...
+row = con.execute(
+    f"SELECT MIN({date_col}), MAX({date_col}) FROM {tname}"
+).fetchone()</code></pre>
+
+<h4>3.3.2 路由层 — Pydantic model 覆盖不均</h4>
+
+<table>
+  <tr><th>路由</th><th>Pydantic Model</th><th>说明</th></tr>
+  <tr><td><code>trades.py</code></td><td><span class="badge badge-good">有</span></td><td>TradeRead / TradeWrite / TradePatch 三模型分离，POST/PATCH 有请求体验证</td></tr>
+  <tr><td><code>daily.py</code></td><td><span class="badge badge-warn">部分</span></td><td>有 DailyRow response model 但未声明为 response_model，只是定义了类</td></tr>
+  <tr><td><code>stock.py</code></td><td><span class="badge badge-bad">无</span></td><td>直接返回 dict list，无类型约束，OpenAPI 文档无 schema</td></tr>
+  <tr><td><code>server.py stats()</code></td><td><span class="badge badge-bad">无</span></td><td>返回裸 dict，无 model</td></tr>
+</table>
+
+<h4>3.3.3 查询参数安全</h4>
+
+<p>路由层的查询参数普遍使用了参数化查询（<code>?</code> 占位符 + params 列表），这是正确的做法。但 <code>daily.py</code> 的单日查询分支使用了较复杂的窗口函数 SQL，拼接逻辑较多，虽然参数本身是安全的，但 SQL 字符串可读性差，后续维护成本高。</p>
+
+<h4>3.3.4 DuckDB 连接管理</h4>
+
+<p>所有路由都使用 <code>try/finally + con.close()</code> 模式，确保连接释放。但每个请求都新建一个 DuckDB 连接，在高并发场景下会有性能问题。DuckDB 的推荐用法是共享一个只读连接（读操作不需要每次新建连接）。</p>
+
+<!-- ── 3.4 backtest/ ── -->
+
+<h3>3.4 backtest/ 回测引擎 <span class="badge badge-warn">半成品</span></h3>
+
+<p>引擎的架构设计是干净的：engine 编排、broker 撮合、metrics 统计、validators 校验，各自职责明确。但有一个关键功能缺失。</p>
+
+<table>
+  <tr><th>检查项</th><th>状态</th><th>说明</th></tr>
+  <tr><td>引擎无状态</td><td><span class="badge badge-good">GOOD</span></td><td>BacktestEngine 可重复调用 run()</td></tr>
+  <tr><td>撮合逻辑完整</td><td><span class="badge badge-good">GOOD</span></td><td>支持 signal_close / next_open / next_close 入场，hold_n_bars 出场，含成本计算</td></tr>
+  <tr><td>MAE/MFE 计算</td><td><span class="badge badge-good">GOOD</span></td><td>正确使用 high/low 窗口计算最大不利/有利偏移</td></tr>
+  <tr><td>Skipped 原因分类</td><td><span class="badge badge-good">GOOD</span></td><td>7 种跳过原因常量化，便于诊断信号失败原因</td></tr>
+  <tr><td>metrics 汇总</td><td><span class="badge badge-good">GOOD</span></td><td>胜率/盈亏比/MAE/MFE 均值等指标齐全</td></tr>
+  <tr><td><strong>equity_curve</strong></td><td><span class="badge badge-bad">BAD</span></td><td><strong>始终返回空数组 []，净值曲线功能未实现</strong></td></tr>
+  <tr><td>只支持 long</td><td><span class="badge badge-warn">DEBT</span></td><td>v0.1 限制，可接受但需文档标注</td></tr>
+</table>
+
+<pre><code># engine.py:71-77 — equity_curve 始终为空
+return BacktestResult(
+    config=config,
+    summary=summarize_trades(trades, skipped),
+    trades=trades,
+    skipped=skipped,
+    equity_curve=[],  # ← 永远是空数组
+)</code></pre>
+
+<div class="callout">
+  <div class="callout-title">诊断意见</div>
+  equity_curve 是回测引擎的核心交付物之一（净值曲线），目前完全缺失。前端 backtest-analysis.tsx 如果依赖此字段渲染图表，会显示空白。这是回测功能的<strong>最高优先级补全项</strong>。
+</div>
+
+<!-- ── 3.5 前端 ── -->
+
+<h3>3.5 web/ 前端 <span class="badge badge-bad">主要痛点</span></h3>
+
+<p>前端是项目体验问题的集中区域。虽然技术选型合理（React + Vite + Tailwind + lightweight-charts），但页面组件严重膨胀，工具函数重复定义，缺乏分层。</p>
+
+<h4>3.5.1 页面行数</h4>
+
+<table>
+  <tr><th>页面</th><th>行数</th><th>评价</th></tr>
+  <tr><td><code>stock-review.tsx</code></td><td><strong>2,140</strong></td><td><span class="badge badge-bad">严重超标</span> 单文件包含 K 线图、交易表单、阶段标记、研报列表、拼音搜索等全部逻辑</td></tr>
+  <tr><td><code>raw-preview.tsx</code></td><td>814</td><td><span class="badge badge-warn">超标</span> 数据预览页面，含表格渲染 + 分页 + 筛选</td></tr>
+  <tr><td><code>overview.tsx</code></td><td>596</td><td><span class="badge badge-warn">超标</span> 概览页面，含 KPI + 板块过滤 + 排序 + 分页</td></tr>
+  <tr><td><code>review-logs.tsx</code></td><td>509</td><td><span class="badge badge-warn">超标</span> 复盘日志页面</td></tr>
+  <tr><td><code>backtest-analysis.tsx</code></td><td>251</td><td><span class="badge badge-good">合理</span> 回测分析页面</td></tr>
+</table>
+
+<h4>3.5.2 工具函数重复定义</h4>
+
+<p><code>shared/lib/format.ts</code> 中已经正确定义了 <code>formatPct</code>、<code>pctColor</code>、<code>formatAmount</code>、<code>formatVolume</code> 等函数，backtest 组件也正确 import 了。但 overview.tsx 和 stock-review.tsx 各自<strong>重新定义了完全相同的函数</strong>：</p>
+
+<pre><code>// shared/lib/format.ts（已有，正确实现）
+export function formatPct(value: NullableNumber, decimals = 2): string { ... }
+export function pctColor(value: NullableNumber): string { ... }
+export function formatAmount(value: NullableNumber, decimals = 2): string { ... }
+
+// overview.tsx:19-36（重复定义，未使用 shared/lib）
+function formatPct(v: number | null | undefined): string { ... }
+function pctColor(v: number | null | undefined): string { ... }
+function formatAmount(v: number | null | undefined): string { ... }
+
+// stock-review.tsx:60-81（又重复定义了一遍）
+function formatPct(v: number | null | undefined): string { ... }
+function formatVolume(v: number | null | undefined): string { ... }
+function pctColor(v: number | null | undefined): string { ... }
+function formatAmount(v: number | null | undefined): string { ... }</code></pre>
+
+<p>这不是设计问题，是迁移没做完。修掉只需删掉重复定义、加一行 import，预计 30 分钟。</p>
+
+<h4>3.5.3 页面组件问题</h4>
+
+<table>
+  <tr><th>问题</th><th>影响</th><th>涉及文件</th></tr>
+  <tr><td>单文件混合数据获取 + 业务逻辑 + UI 渲染</td><td>修改任何一个部分都要在 600-2000 行里定位</td><td>所有页面</td></tr>
+  <tr><td>无自定义 Hook</td><td>数据获取逻辑内联在 useEffect 中，无法复用</td><td>overview / stock-review / review-logs</td></tr>
+  <tr><td>无 ErrorBoundary</td><td>单个组件崩溃会白屏整个应用</td><td>App 层</td></tr>
+  <tr><td>useOutletContext 传 title/controls</td><td>布局通信通过 outlet context hack，非标准方案</td><td>所有页面</td></tr>
+  <tr><td>无 loading skeleton</td><td>数据加载时只有纯文字"正在加载"，体验粗糙</td><td>所有页面</td></tr>
+  <tr><td>无虚拟滚动</td><td>5000+ 行表格全量渲染 DOM，卡顿</td><td>overview / raw-preview</td></tr>
+  <tr><td>前端零测试</td><td>无单元测试、无集成测试</td><td>—</td></tr>
+</table>
+
+<!-- ── 3.6 依赖 ── -->
+
+<h3>3.6 依赖管理 <span class="badge badge-bad">需修</span></h3>
+
+<table>
+  <tr><th>问题</th><th>详情</th></tr>
+  <tr><td>版本未锁定</td><td>pyproject.toml 中 12 个依赖全部无版本约束（<code>"pandas"</code> 而非 <code>"pandas>=2.2,<3.0"</code>），任何一次 <code>pip install</code> 都可能拉到不兼容版本</td></tr>
+  <tr><td>Streamlit 残留</td><td><code>"streamlit"</code> 仍在依赖列表中，但项目已完全迁移到 FastAPI + React，Streamlit 代码已被替代</td></tr>
+  <tr><td>Plotly 残留</td><td><code>"plotly"</code> 同上，前端图表已使用 lightweight-charts</td></tr>
+  <tr><td>无 lock 文件</td><td>无 requirements.txt / poetry.lock / pdm.lock，无法复现环境</td></tr>
+  <tr><td>开发依赖混入运行依赖</td><td>fastapi 在 dependencies 和 optional-dependencies.test 中重复出现</td></tr>
+</table>
+
+<!-- ── 3.7 测试 ── -->
+
+<h3>3.7 测试覆盖 <span class="badge badge-bad">严重不足</span></h3>
+
+<div class="metric-row">
+  <div class="metric-label">后端文件覆盖</div>
+  <div class="metric-bar"><div class="metric-fill" style="width: 9.5%; background: var(--red);"></div></div>
+  <div class="metric-value">7/74</div>
+</div>
+<div class="metric-row">
+  <div class="metric-label">前端测试</div>
+  <div class="metric-bar"><div class="metric-fill" style="width: 0%; background: var(--red);"></div></div>
+  <div class="metric-value">0</div>
+</div>
+
+<table>
+  <tr><th>测试文件</th><th>覆盖范围</th><th>评价</th></tr>
+  <tr><td>test_schema_contracts.py</td><td>contracts schema 定义</td><td><span class="badge badge-good">GOOD</span></td></tr>
+  <tr><td>test_daily_adjustment.py</td><td>daily 路由复权计算</td><td><span class="badge badge-good">GOOD</span></td></tr>
+  <tr><td>test_backtest_routes.py</td><td>backtest API 路由</td><td><span class="badge badge-good">GOOD</span></td></tr>
+  <tr><td>test_units.py</td><td>backtest broker 撮合</td><td><span class="badge badge-good">GOOD</span></td></tr>
+  <tr><td>test_engine_scenarios.py</td><td>backtest engine 场景</td><td><span class="badge badge-good">GOOD</span></td></tr>
+  <tr><td colspan="2"><strong>缺失：pipeline 测试</strong></td><td><span class="badge badge-bad">BAD</span> 4 条管线 0 测试</td></tr>
+  <tr><td colspan="2"><strong>缺失：contracts.validate 测试</strong></td><td><span class="badge badge-bad">BAD</span> 入库校验无测试</td></tr>
+  <tr><td colspan="2"><strong>缺失：API 大部分路由测试</strong></td><td><span class="badge badge-warn">DEBT</span> 11 个路由仅 2 个有测试</td></tr>
+</table>
+
+<!-- ── 3.8 scripts/ ── -->
+
+<h3>3.8 scripts/ 临时脚本 <span class="badge badge-warn">需管控</span></h3>
+
+<p><code>scripts/</code> 目录下有 29 个 Python 文件。README 中已明确"scripts/ 保持临时性"，但 29 个文件说明临时脚本在持续累积。建议定期审查，将其中有复用价值的逻辑提炼到正式 pipeline 中，其余归档或删除。</p>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 问题清单 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>四、问题清单（按严重度排序）</h2>
+
+<h3>P0 — 功能缺失</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>位置</th><th>影响</th></tr>
+  <tr><td>1</td><td>equity_curve 始终返回空数组</td><td>backtest/engine.py:76</td><td>回测净值曲线无法展示，引擎核心交付物缺失</td></tr>
+</table>
+
+<h3>P1 — 安全 / 体验</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>位置</th><th>影响</th></tr>
+  <tr><td>2</td><td>stats() 用 f-string 拼接 SQL 表名/列名</td><td>api/server.py:89-103</td><td>SQL 注入风险（当前来源非用户输入，但模式不安全）</td></tr>
+  <tr><td>3</td><td>CORS allow_origins=["*"] + allow_credentials=True</td><td>api/server.py:41-46</td><td>生产环境安全风险</td></tr>
+  <tr><td>4</td><td>stock-review.tsx 2,140 行单文件</td><td>web/src/pages/stock-review.tsx</td><td>维护困难，任何修改都有高回归风险</td></tr>
+  <tr><td>5</td><td>前端无 ErrorBoundary</td><td>web/src/App.tsx 层</td><td>单组件崩溃导致全应用白屏</td></tr>
+</table>
+
+<h3>P2 — 技术债</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>位置</th><th>影响</th></tr>
+  <tr><td>6</td><td>formatPct/pctColor/formatAmount 在 3 个页面重复定义</td><td>overview.tsx / stock-review.tsx / shared/lib/format.ts</td><td>DRY 违反，改一处要改三处</td></tr>
+  <tr><td>7</td><td>streamlit / plotly 仍在依赖中</td><td>pyproject.toml:19-20</td><td>安装不必要的包，误导新开发者</td></tr>
+  <tr><td>8</td><td>依赖全部未锁版本</td><td>pyproject.toml:13-23</td><td>环境不可复现，可能引入不兼容版本</td></tr>
+  <tr><td>9</td><td>API 路由 Pydantic model 覆盖不均</td><td>stock.py / server.py 等</td><td>OpenAPI 文档不完整，前端无法自动生成类型</td></tr>
+  <tr><td>10</td><td>pipeline 0 测试</td><td>tests/</td><td>数据入库正确性无保障</td></tr>
+  <tr><td>11</td><td>pipeline 全部用 print() 输出日志</td><td>pipeline/**/*.py</td><td>无结构化日志，无法接入监控系统</td></tr>
+  <tr><td>12</td><td>每个 API 请求新建 DuckDB 连接</td><td>api/routes/*.py</td><td>高并发时性能下降</td></tr>
+  <tr><td>13</td><td>scripts/ 累积 29 个文件</td><td>scripts/</td><td>临时脚本膨胀，边界模糊</td></tr>
+</table>
+
+<h3>P3 — 改进建议</h3>
+<table>
+  <tr><th>#</th><th>建议</th><th>说明</th></tr>
+  <tr><td>14</td><td>前端加 loading skeleton</td><td>替换纯文字"正在加载..."，提升感知速度</td></tr>
+  <tr><td>15</td><td>大表格加虚拟滚动</td><td>5000+ 行全量渲染 DOM 导致卡顿</td></tr>
+  <tr><td>16</td><td>API 类型自动同步到前端</td><td>FastAPI OpenAPI schema → TypeScript types</td></tr>
+  <tr><td>17</td><td>pipeline 加定时调度</td><td>日更数据手动运行，可接入 cron / APScheduler</td></tr>
+  <tr><td>18</td><td>schema.py 按业务域拆分</td><td>463 行 12 表，后续增长可按 market/research/trade 拆</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 重构方案 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>五、重构方案</h2>
+
+<p>核心原则：<strong>不推翻重来，每个阶段完成后项目可正常上线</strong>。</p>
+
+<!-- Phase 1 -->
+<div class="phase phase-1">
+  <div class="phase-header">
+    <div class="phase-num">1</div>
+    <div class="phase-title">止血 — 消除重复与残留</div>
+    <div class="phase-time">1-2 天</div>
+  </div>
+  <ul>
+    <li><strong>删除重复工具函数</strong>：overview.tsx 和 stock-review.tsx 删掉本地 formatPct/pctColor/formatAmount/formatVolume，改用 <code>import { formatPct, pctColor, ... } from '@/shared/lib/format'</code></li>
+    <li><strong>清理依赖</strong>：pyproject.toml 删除 streamlit、plotly；fastapi 从 optional-dependencies.test 中去重</li>
+    <li><strong>SQL 注入修复</strong>：server.py stats() 用白名单（TABLE_BY_NAME 的 keys）替代 f-string 拼接</li>
+    <li><strong>CORS 收紧</strong>：allow_origins 从 ["*"] 改为具体前端地址（或至少去掉 allow_credentials=True）</li>
+  </ul>
+  <div class="impact">影响：零风险，纯清理，项目立刻变干净。lint 和 build 不受影响。</div>
+</div>
+
+<!-- Phase 2 -->
+<div class="phase phase-2">
+  <div class="phase-header">
+    <div class="phase-num">2</div>
+    <div class="phase-title">拆分 — 前端组件解耦 + API 类型化</div>
+    <div class="phase-time">3-5 天</div>
+  </div>
+  <ul>
+    <li><strong>stock-review.tsx 拆分</strong>（2,140 行 → 5-6 个文件）：
+      <ul>
+        <li><code>hooks/useStockData.ts</code> — 数据获取 + 状态管理</li>
+        <li><code>components/StockChart.tsx</code> — K 线图渲染</li>
+        <li><code>components/TradeForm.tsx</code> — 交易记录表单</li>
+        <li><code>components/PhaseMarker.tsx</code> — 阶段标记</li>
+        <li><code>components/ResearchPanel.tsx</code> — 研报列表</li>
+        <li><code>pages/stock-review.tsx</code> — 页面组装（<150 行）</li>
+      </ul>
+    </li>
+    <li><strong>overview.tsx 拆分</strong>（596 行 → 3 个文件）：
+      <ul>
+        <li><code>hooks/useDailyData.ts</code> — 日期锚定 + 数据获取</li>
+        <li><code>components/KpiCards.tsx</code> — KPI 卡片</li>
+        <li><code>components/StockTable.tsx</code> — 表格 + 排序 + 分页</li>
+      </ul>
+    </li>
+    <li><strong>API Pydantic model 补全</strong>：stock.py 等路由加 response_model，OpenAPI schema 自动完整</li>
+    <li><strong>前端类型同步</strong>：用 openapi-typescript 从 /docs/schema.json 生成前端 TS 类型</li>
+  </ul>
+  <div class="impact">影响：体验改善最大的一步。代码可维护性从"改一行要找半天"变成"各司其职"。</div>
+</div>
+
+<!-- Phase 3 -->
+<div class="phase phase-3">
+  <div class="phase-header">
+    <div class="phase-num">3</div>
+    <div class="phase-title">加固 — 测试 + 容错 + 核心功能补全</div>
+    <div class="phase-time">1-2 周</div>
+  </div>
+  <ul>
+    <li><strong>补 equity_curve</strong>：backtest engine 按交易时间序列计算累计净值，返回 <code>List[dict]</code> 而非 <code>[]</code></li>
+    <li><strong>pipeline 测试</strong>：给 daily_update 的 clean + load 补单元测试，用固定 CSV 输入验证输出</li>
+    <li><strong>contracts.validate 测试</strong>：覆盖正常/异常 DataFrame 输入，确保入库前校验生效</li>
+    <li><strong>前端 ErrorBoundary</strong>：App 层包裹 ErrorBoundary，单页崩溃时显示降级 UI 而非白屏</li>
+    <li><strong>数据请求层统一</strong>：封装 useApi hook，统一 loading / error / retry 状态管理</li>
+    <li><strong>依赖锁版本</strong>：pip freeze 生成 requirements.lock 或迁移到 uv/pdm</li>
+  </ul>
+  <div class="impact">影响：项目从"能跑"变成"可信赖"。回测引擎完整可用，数据入库有测试保障。</div>
+</div>
+
+<!-- Phase 4 -->
+<div class="phase phase-4">
+  <div class="phase-header">
+    <div class="phase-num">4</div>
+    <div class="phase-title">进化 — 自动化 + 性能 + 体验</div>
+    <div class="phase-time">持续</div>
+  </div>
+  <ul>
+    <li><strong>pipeline 定时调度</strong>：接入 APScheduler 或 cron，日更数据自动入库</li>
+    <li><strong>虚拟滚动</strong>：overview 和 raw-preview 大表格接入 @tanstack/react-virtual</li>
+    <li><strong>loading skeleton</strong>：替换纯文字加载提示</li>
+    <li><strong>DuckDB 连接池</strong>：API 层共享只读连接，减少连接开销</li>
+    <li><strong>scripts/ 定期清理</strong>：有复用价值的提炼到 pipeline，其余归档</li>
+    <li><strong>CI/CD</strong>：lint + build + test 自动化</li>
+  </ul>
+  <div class="impact">影响：从个人项目进化为可持续维护的系统。</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════ -->
+<!-- 总结 -->
+<!-- ═══════════════════════════════════════════════ -->
+
+<h2>六、总结</h2>
+
+<div class="verdict">
+  <h3>一句话诊断</h3>
+  <p>架构设计 8.5 分，代码实现 6 分——<strong>骨架是优秀的，肉需要长</strong>。</p>
+  <p>这个项目不需要推翻重来。contracts 数据契约层、pipeline 分源独立、backtest 引擎解耦，这三个架构决策比大部分个人项目都好。真正的问题是前端组件膨胀（stock-review.tsx 2,140 行）、工具函数迁移未完成（3 个页面重复定义 shared/lib 里已有的函数）、后端依赖清理滞后（streamlit/plotly 残留）、测试严重不足（7/74 文件覆盖）、回测引擎核心功能缺失（equity_curve 永远为空）。</p>
+  <p>按 Phase 1→2→3→4 走，1-2 天止血，1 周拆分，2 周加固，持续进化。每个阶段完成后项目都可正常上线，不存在"重构到一半没法用"的中间态。</p>
+</div>
+
+<div class="footer">
+  诊断工具：源码静态分析 + 依赖审查 + 测试覆盖统计 + 架构模式评估<br>
+  诊断范围：src/qrp_atlas/** (74 .py) + web/src/** (5 .tsx) + tests/** (7 .py) + scripts/** (29 .py) + pyproject.toml + README.md + AGENTS.md + docs/**
+</div>
+
+</div>
+</body>
+</html>
