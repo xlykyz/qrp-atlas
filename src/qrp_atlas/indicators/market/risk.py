@@ -87,11 +87,11 @@ def calculate_market_risk(df: pd.DataFrame) -> dict:
     pct = df[PCT_CHANGE]
     limit_down_count = int(df[IS_LIMIT_DOWN].fillna(False).astype(bool).sum())
     down_gt_5pct_count = int((pct <= _DOWN_5_PCT).sum())
-    down_gt_10pct_count = int((pct <= _DOWN_10_PCT).sum())
+    down_gt_10pct_count = int((pct < _DOWN_10_PCT).sum())
 
     boards = df[TICKER].map(get_board)
     is_cyb_kcb = boards.isin((BOARD_CYB, BOARD_KCB))
-    cyb_kcb_down_gt_10pct_count = int((is_cyb_kcb & (pct <= _DOWN_10_PCT)).sum())
+    cyb_kcb_down_gt_10pct_count = int((is_cyb_kcb & (pct < _DOWN_10_PCT)).sum())
 
     risk_level, description = _classify_risk(
         limit_down_count, down_gt_10pct_count, cyb_kcb_down_gt_10pct_count

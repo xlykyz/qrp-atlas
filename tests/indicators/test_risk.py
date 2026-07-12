@@ -19,6 +19,22 @@ def test_basic_risk(daily_market_df: pd.DataFrame) -> None:
     assert "低风险" in result["description"]
 
 
+def test_down_gt_10pct_excludes_exactly_negative_10pct() -> None:
+    df = pd.DataFrame(
+        [
+            {"ticker": "000001.SZ", "pct_change": -10.0},
+            {"ticker": "300001.SZ", "pct_change": -10.0},
+            {"ticker": "688001.SH", "pct_change": -10.0},
+            {"ticker": "300002.SZ", "pct_change": -10.01},
+        ]
+    )
+
+    result = calculate_market_risk(df)
+
+    assert result["down_gt_10pct_count"] == 1
+    assert result["cyb_kcb_down_gt_10pct_count"] == 1
+
+
 def test_empty_risk() -> None:
     result = calculate_market_risk(pd.DataFrame())
     assert result["limit_down_count"] == 0
@@ -27,7 +43,13 @@ def test_empty_risk() -> None:
 
 def test_extreme_risk_level() -> None:
     rows = [
-        {"ticker": f"00000{i}.SZ", "pct_change": -10.0, "close": 9.0, "pre_close": 10.0, "is_st": False}
+        {
+            "ticker": f"00000{i}.SZ",
+            "pct_change": -10.01,
+            "close": 9.0,
+            "pre_close": 10.0,
+            "is_st": False,
+        }
         for i in range(120)
     ]
     result = calculate_market_risk(pd.DataFrame(rows))
@@ -37,12 +59,25 @@ def test_extreme_risk_level() -> None:
 
 def test_cyb_kcb_isolation(daily_market_df: pd.DataFrame) -> None:
     df = pd.concat(
-        [daily_market_df, pd.DataFrame([{"ticker": "000005.SZ", "pct_change": -10.0, "close": 9.0, "pre_close": 10.0, "is_st": False}])],
+        [
+            daily_market_df,
+            pd.DataFrame(
+                [
+                    {
+                        "ticker": "000005.SZ",
+                        "pct_change": -10.0,
+                        "close": 9.0,
+                        "pre_close": 10.0,
+                        "is_st": False,
+                    }
+                ]
+            ),
+        ],
         ignore_index=True,
     )
     result = calculate_market_risk(df)
     assert result["cyb_kcb_down_gt_10pct_count"] == 2
-    assert result["down_gt_10pct_count"] == 3
+    assert result["down_gt_10pct_count"] == 2
 
 
 def test_missing_required_column_raises() -> None:

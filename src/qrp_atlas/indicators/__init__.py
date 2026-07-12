@@ -25,7 +25,10 @@ from qrp_atlas.indicators.registry import get_indicator, list_indicators
 # 新增：市场复合指标计算
 from qrp_atlas.indicators.market import calculate_market_breadth, calculate_market_risk
 from qrp_atlas.indicators.stock import calculate_stock_trend
-from qrp_atlas.indicators.system_b import detect_system_b_basic_state
+from qrp_atlas.indicators.system_b import (
+    detect_system_b_basic_state,
+    detect_system_b_basic_state_from_prices,
+)
 from qrp_atlas.indicators.service import calculate_daily_market_snapshot
 
 __all__ = [
@@ -41,5 +44,6 @@ __all__ = [
     "calculate_market_risk",
     "calculate_stock_trend",
     "detect_system_b_basic_state",
+    "detect_system_b_basic_state_from_prices",
     "calculate_daily_market_snapshot",
 ]
