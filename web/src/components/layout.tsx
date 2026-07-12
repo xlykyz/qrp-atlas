@@ -6,6 +6,7 @@ const navItems = [
   { to: '/stock', label: '个股复盘' },
   { to: '/logs', label: '复盘日志' },
   { to: '/raw', label: '🛠️ 数据库预览' },
+  { to: '/backtest/workflow', label: '策略回测' },
   { to: '/backtest', label: '回测分析' },
 ]
 
@@ -31,16 +32,13 @@ export default function Layout() {
   const [pageTitle, setPageTitle] = useState('')
   const [headerControls, setHeaderControls] = useState<ReactNode | null>(null)
 
-  // initial apply
   useEffect(() => {
     applyTheme(isDark)
   }, [isDark])
 
-  // listen for system preference changes
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const handler = (e: MediaQueryListEvent) => {
-      // only change if no explicit user preference stored
       const stored = localStorage.getItem('theme')
       if (!stored) {
         setIsDark(e.matches)
@@ -61,20 +59,17 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen">
-      {/* Left sidebar */}
       <aside className="flex w-64 flex-col bg-slate-900 dark:bg-slate-950 text-white">
-        {/* Brand */}
         <div className="flex items-center gap-2 px-6 py-5">
           <span className="text-lg font-bold tracking-tight">QRP Atlas</span>
         </div>
 
-        {/* Navigation */}
         <nav className="flex-1 space-y-1 px-3">
           {navItems.map(item => (
             <NavLink
               key={item.to}
               to={item.to}
-              end={item.to === '/'}
+              end={item.to === '/' || item.to === '/backtest'}
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                   isActive
@@ -89,10 +84,8 @@ export default function Layout() {
         </nav>
       </aside>
 
-      {/* Right content area */}
       <main className="flex flex-1 flex-col min-w-0 overflow-hidden bg-white text-slate-900 dark:bg-slate-950 dark:text-white">
         <div className="flex-1 overflow-auto">
-          {/* Top bar with title, controls and theme toggle */}
           <div className="flex items-center gap-4 px-6 py-3 border-b border-slate-200 dark:border-slate-800">
             <h1 className="text-xl font-bold text-slate-900 dark:text-white flex-1">
               {pageTitle}
