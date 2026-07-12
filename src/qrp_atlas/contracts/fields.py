@@ -201,3 +201,16 @@ INDUSTRY_NAME = "industry_name"
 EM_INDUSTRY_CODE = "em_industry_code"
 NOTICE_CONTENT = "notice_content"
 ATTACH_URL = "attach_url"
+
+# ── 互动问答字段（全景网 / 互动易） ──
+INTERACTION_PID = "pid"
+COMPANY_CODE = "company_code"
+COMPANY_SHORTNAME = "company_shortname"
+QUESTION_CONTENT = "question_content"
+REPLY_CONTENT = "reply_content"
+QUESTION_TIME = "question_time"
+REPLY_TIME = "reply_time"
+REPLY_DATE = "reply_date"
+NICKNAME = "nickname"
+KEYWORDS = "keywords"
+

@@ -51,6 +51,9 @@ from .fields import (
     SECU_CODE, SEC_NAME, NOTICE_DATE, RECEIVE_DATE,
     RECEIVE_WAY, RECEIVE_PLACE, RECEPTIONIST, CONTENT,
     ADJUNCT_URL,
+    INTERACTION_PID, COMPANY_CODE, COMPANY_SHORTNAME,
+    QUESTION_CONTENT, REPLY_CONTENT, QUESTION_TIME, REPLY_TIME,
+    NICKNAME, SOURCE,
 )
 
 
@@ -188,6 +191,18 @@ EASTMONEY_RESEARCH_VISITS: Dict[str, str] = {
     "URL": ADJUNCT_URL,
 }
 
+
+P5W_INTERACTION_QA: Dict[str, str] = {
+    "pid": INTERACTION_PID,
+    "companyCode": COMPANY_CODE,
+    "companyShortname": COMPANY_SHORTNAME,
+    "content": QUESTION_CONTENT,
+    "replyContent": REPLY_CONTENT,
+    "questionerTimeStr": QUESTION_TIME,
+    "replyerTimeStr": REPLY_TIME,
+    "nickname": NICKNAME,
+}
+
 SOURCE_MAPPINGS = {
     "akshare_daily_bar": AKSHARE_DAILY_BAR,
     "akshare_realtime": AKSHARE_REALTIME,
@@ -196,6 +211,7 @@ SOURCE_MAPPINGS = {
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,
+    "p5w_interaction_qa": P5W_INTERACTION_QA,
 }
 
 
