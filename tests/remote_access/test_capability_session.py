@@ -15,7 +15,7 @@ sys.path.insert(0, str(REMOTE_ACCESS_DIR))
 
 from app import create_app  # noqa: E402
 from config import GatewaySettings  # noqa: E402
-from session import CapabilitySession  # noqa: E402
+from session import CapabilitySession, clear_session  # noqa: E402
 
 VALID_SESSION_ID = "valid-test-session-id-0123456789ab"
 WRONG_SESSION_ID = "wrong-test-session-id-9876543210cd"
@@ -80,8 +80,9 @@ def new_session(future_ts) -> CapabilitySession:
 
 
 @pytest.fixture
-def client(sample_db_path):
+def client(sample_db_path, tmp_path):
     """No capability session active — /share/ should return 404."""
+    clear_session()
     app = create_app(GatewaySettings(database_path=sample_db_path, token="t" * 48))
     return ASGITestClient(app)
 
