@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useOutletContext } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useOutletContext, useSearchParams } from 'react-router-dom';
 import { BacktestRunSelector } from '@/components/backtest/backtest-run-selector';
 import { BacktestSummaryCards } from '@/components/backtest/backtest-summary-cards';
 import { ConfigSnapshot } from '@/components/backtest/config-snapshot';
@@ -16,6 +16,16 @@ import {
   getBacktestSummary,
   getBacktestTrades,
 } from '@/api/backtest';
+import {
+  getResultConfig,
+  getResultEquity,
+  getResultSkipped,
+  getResultSummary,
+  getResultTrades,
+  listResultRuns,
+} from '@/api/backtest-result';
+import { buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import type {
   BacktestConfigSnapshot,
   BacktestRun,
@@ -37,17 +47,23 @@ function initialState<T>(): ResultState<T> {
   return { data: null, loading: false, error: null };
 }
 
+type DataSource = 'http' | 'mock';
+
 export default function BacktestAnalysis() {
   const { setPageTitle, setHeaderControls } = useOutletContext<{
     setPageTitle: (t: string) => void;
     setHeaderControls: (c: React.ReactNode | null) => void;
   }>();
+  const [searchParams] = useSearchParams();
+  const queryRunId = searchParams.get('runId');
+  const querySource = (searchParams.get('source') === 'mock' ? 'mock' : 'http') as DataSource;
 
+  const [source, setSource] = useState<DataSource>(querySource);
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [runsLoading, setRunsLoading] = useState(true);
   const [runsError, setRunsError] = useState<string | null>(null);
 
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(queryRunId);
   const [activeTab, setActiveTab] = useState<Tab>('trades');
 
   const [summary, setSummary] = useState<ResultState<BacktestSummary>>(initialState());
@@ -56,7 +72,6 @@ export default function BacktestAnalysis() {
   const [skipped, setSkipped] = useState<ResultState<SkippedTrade[]>>(initialState());
   const [config, setConfig] = useState<ResultState<BacktestConfigSnapshot>>(initialState());
 
-  // ── Page title ──
   useEffect(() => {
     setPageTitle('回测分析');
     return () => {
@@ -65,13 +80,20 @@ export default function BacktestAnalysis() {
     };
   }, [setPageTitle, setHeaderControls]);
 
-  // ── Load runs ──
+  // Sync source/run from URL when navigating from workflow
+  useEffect(() => {
+    if (querySource) setSource(querySource);
+    if (queryRunId) setSelectedRunId(queryRunId);
+  }, [queryRunId, querySource]);
+
   useEffect(() => {
     let cancelled = false;
     setRunsLoading(true);
     setRunsError(null);
 
-    getBacktestRuns()
+    const loader = source === 'mock' ? listResultRuns : getBacktestRuns;
+
+    loader()
       .then((list) => {
         if (cancelled) return;
         setRuns(list);
@@ -86,37 +108,77 @@ export default function BacktestAnalysis() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [source]);
 
-  // ── Auto-select when only one run or first run ──
   useEffect(() => {
     if (selectedRunId) return;
     if (runs.length === 0) return;
     setSelectedRunId(runs[0].run_id);
   }, [runs, selectedRunId]);
 
-  // ── Header controls: run selector ──
+  const sourceLabel = useMemo(
+    () => (source === 'mock' ? 'Mock fixtures' : 'HTTP API'),
+    [source],
+  );
+
   useEffect(() => {
     setHeaderControls(
-      runsLoading ? (
-        <span className="text-sm text-slate-400">加载 runs...</span>
-      ) : (
-        <BacktestRunSelector
-          runs={runs}
-          selectedRunId={selectedRunId}
-          onSelect={setSelectedRunId}
-        />
-      ),
+      <div className="flex flex-wrap items-center gap-2">
+        <Link
+          to="/backtest/workflow"
+          className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
+        >
+          策略回测工作流
+        </Link>
+        <select
+          className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs dark:border-slate-700 dark:bg-slate-900"
+          value={source}
+          onChange={(e) => {
+            setSource(e.target.value as DataSource);
+            setSelectedRunId(null);
+          }}
+          title="结果数据源"
+        >
+          <option value="http">HTTP API</option>
+          <option value="mock">Mock fixtures</option>
+        </select>
+        <span className="hidden text-[11px] text-slate-400 sm:inline">{sourceLabel}</span>
+        {runsLoading ? (
+          <span className="text-sm text-slate-400">加载 runs...</span>
+        ) : (
+          <BacktestRunSelector
+            runs={runs}
+            selectedRunId={selectedRunId}
+            onSelect={setSelectedRunId}
+          />
+        )}
+      </div>,
     );
     return () => {
       setHeaderControls(null);
     };
-  }, [runs, runsLoading, selectedRunId, setHeaderControls]);
+  }, [runs, runsLoading, selectedRunId, setHeaderControls, source, sourceLabel]);
 
-  // ── Load all detail data when run changes ──
   useEffect(() => {
     if (!selectedRunId) return;
     let cancelled = false;
+
+    const api =
+      source === 'mock'
+        ? {
+            summary: () => getResultSummary(selectedRunId),
+            equity: () => getResultEquity(selectedRunId),
+            trades: () => getResultTrades(selectedRunId),
+            skipped: () => getResultSkipped(selectedRunId),
+            config: () => getResultConfig(selectedRunId),
+          }
+        : {
+            summary: () => getBacktestSummary(selectedRunId),
+            equity: () => getBacktestEquity(selectedRunId),
+            trades: () => getBacktestTrades(selectedRunId),
+            skipped: () => getBacktestSkipped(selectedRunId),
+            config: () => getBacktestConfig(selectedRunId),
+          };
 
     const fetchOne = async <T,>(
       fetcher: () => Promise<T>,
@@ -138,19 +200,18 @@ export default function BacktestAnalysis() {
     };
 
     Promise.all([
-      fetchOne(() => getBacktestSummary(selectedRunId), setSummary),
-      fetchOne(() => getBacktestEquity(selectedRunId), setEquity),
-      fetchOne(() => getBacktestTrades(selectedRunId), setTrades),
-      fetchOne(() => getBacktestSkipped(selectedRunId), setSkipped),
-      fetchOne(() => getBacktestConfig(selectedRunId), setConfig),
+      fetchOne(api.summary, setSummary),
+      fetchOne(api.equity, setEquity),
+      fetchOne(api.trades, setTrades),
+      fetchOne(api.skipped, setSkipped),
+      fetchOne(api.config, setConfig),
     ]);
 
     return () => {
       cancelled = true;
     };
-  }, [selectedRunId]);
+  }, [selectedRunId, source]);
 
-  // ── Tabs config ──
   const tabs: { key: Tab; label: string }[] = [
     { key: 'trades', label: '交易明细' },
     { key: 'risk', label: '风险分布' },
@@ -163,6 +224,12 @@ export default function BacktestAnalysis() {
       {runsError && (
         <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-600 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
           加载 runs 列表失败：{runsError}
+          {source === 'http' ? (
+            <span className="mt-1 block text-xs">
+              可切换右上角数据源为 Mock fixtures，或确认后端
+              /api/backtest 可用。
+            </span>
+          ) : null}
         </div>
       )}
 

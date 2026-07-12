@@ -5,6 +5,7 @@ import StockReview from '@/pages/stock-review'
 import ReviewLogs from '@/pages/review-logs'
 import RawPreview from '@/pages/raw-preview'
 import BacktestAnalysis from '@/pages/backtest-analysis'
+import BacktestWorkflowPage from '@/pages/backtest-workflow'
 
 function App() {
   return (
@@ -16,6 +17,7 @@ function App() {
           <Route path="/logs" element={<ReviewLogs />} />
           <Route path="/raw" element={<RawPreview />} />
           <Route path="/backtest" element={<BacktestAnalysis />} />
+          <Route path="/backtest/workflow" element={<BacktestWorkflowPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
