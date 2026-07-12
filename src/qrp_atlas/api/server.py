@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from qrp_atlas.api.db import get_db, get_db_path
 from qrp_atlas.api.routes import (
     adj_factor,
+    auth,
     backtest,
     daily,
     dev,
@@ -48,6 +49,7 @@ app.add_middleware(
 
 # ── 注册路由 ──────────────────────────────────
 
+app.include_router(auth.router)
 app.include_router(daily.router)
 app.include_router(phase.router)
 app.include_router(stock.router)

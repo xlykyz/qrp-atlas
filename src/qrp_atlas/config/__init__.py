@@ -1,4 +1,5 @@
 # qrp_atlas.config
+from .auth import AuthMode, AuthSettings, DEFAULT_LOCAL_USER_ID
 from .paths import (
     BACKTEST_RUNS_DIR,
     CANONICAL_DIR,
@@ -28,6 +29,9 @@ __all__ = [
     "BACKTEST_RUNS_DIR",
     "ensure_dirs",
     "DB_READ_ONLY",
+    "AuthMode",
+    "AuthSettings",
+    "DEFAULT_LOCAL_USER_ID",
     "TUSHARE_TOKEN",
     "get_tushare_pro",
 ]
