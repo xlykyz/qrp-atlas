@@ -85,6 +85,8 @@ web/.claude/
 # Agent 状态（本地管理，不同步）
 .agent/
 
+# 临时远程只读访问工具的运行状态（token、PID、日志、Quick Tunnel 地址）
+.runtime/remote_access/
+
 # WorkBuddy 工作目录（本地记忆，不同步）
 .workbuddy/
-
