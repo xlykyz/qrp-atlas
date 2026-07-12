@@ -464,7 +464,7 @@ SUSPEND_D = TableSchema(
         ColumnSpec(TRADE_DATE, "DATE", nullable=False),
         ColumnSpec(TICKER, "VARCHAR", nullable=False),
         ColumnSpec(SUSPEND_TIMING, "VARCHAR"),
-        ColumnSpec(SUSPEND_TYPE, "VARCHAR"),
+        ColumnSpec(SUSPEND_TYPE, "VARCHAR", nullable=False),
         ColumnSpec(CREATED_AT, "TIMESTAMP"),
     ),
     primary_key=(TRADE_DATE, TICKER, SUSPEND_TYPE),
