@@ -63,7 +63,7 @@ contracts -> pipeline / indicators / backtest / api / frontend
 - 每次任务应尽量只修改与目标直接相关的文件。
 - `indicators`、`pipeline`、`api`、`web`、`docs`、`scripts` 不要混在同一个无关提交里。
 - 如果任务中途发现其它层的问题，优先报告；除非用户明确授权，否则不要顺手跨层修复。
-- 修复测试失败时，优先修复真实契约/实现问题，不要通过放宽测试掩盖 schema、主键、nullable 或依赖方向错误。
+- 修复测试失败时，优先修复真实契约或实现问题，不要通过放宽测试掩盖边界错误。
 
 ## 禁止事项
 
