@@ -1,14 +1,33 @@
-"""Central registry for trading-system indicator definitions.
+"""Central registry for trading-system indicator definitions."""
 
-This module intentionally starts as an empty dictionary. Indicator definitions
-can be added later without changing callers that use list_indicators() or
-get_indicator().
-"""
+from qrp_atlas.indicators.definitions import (
+    IndicatorDefinition,
+    IndicatorLayer,
+    IndicatorScope,
+    UpdateFrequency,
+)
+from qrp_atlas.indicators.stock.trend import (
+    CLOSE_ABOVE_MA5,
+    CLOSE_ABOVE_MA5_DAYS,
+    CLOSE_BELOW_MA5,
+    CLOSE_BELOW_MA5_DAYS,
+    MA5,
+)
+from qrp_atlas.indicators.system_b.detector import (
+    SYSTEM_B_EXIT_TRIGGERED,
+    SYSTEM_B_TREND_VALID,
+)
 
-from qrp_atlas.indicators.definitions import IndicatorDefinition, IndicatorLayer
 
-
-ALL_INDICATORS: tuple[IndicatorDefinition, ...] = ()
+ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
+    IndicatorDefinition(MA5, "MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Five-session moving average."),
+    IndicatorDefinition(CLOSE_ABOVE_MA5, "Close above MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Whether close is above MA5."),
+    IndicatorDefinition(CLOSE_BELOW_MA5, "Close below MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Whether close is below MA5."),
+    IndicatorDefinition(CLOSE_ABOVE_MA5_DAYS, "Consecutive closes above MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Consecutive sessions with close above MA5."),
+    IndicatorDefinition(CLOSE_BELOW_MA5_DAYS, "Consecutive closes below MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Consecutive sessions with close below MA5."),
+    IndicatorDefinition(SYSTEM_B_TREND_VALID, "System B trend valid", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close at or above MA5."),
+    IndicatorDefinition(SYSTEM_B_EXIT_TRIGGERED, "System B exit triggered", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close below MA5."),
+)
 
 
 INDICATOR_BY_CODE: dict[str, IndicatorDefinition] = {
@@ -24,10 +43,8 @@ def list_indicators(layer: IndicatorLayer | None = None) -> list[IndicatorDefini
     """Return registered indicator definitions, optionally filtered by layer."""
 
     indicators = list(ALL_INDICATORS)
-
     if layer is None:
         return indicators
-
     return [indicator for indicator in indicators if indicator.layer == layer]
 
 

@@ -1,12 +1,4 @@
-"""系统 B 基础状态检测。
-
-基于已经计算好的个股 ma5 趋势结果，判断每个 ticker 最近交易日是否满足
-系统 B 的基础趋势条件。只做状态检测，不做交易决策。
-
-规则：
-    - system_b_trend_valid:    最近连续 2 个交易日收盘价不低于 ma5
-    - system_b_exit_triggered: 最近连续 2 个交易日收盘价跌破 ma5
-"""
+"""System B basic state indicators derived from already-calculated stock trends."""
 
 from __future__ import annotations
 
@@ -42,59 +34,51 @@ _OUTPUT_COLUMNS = (
 )
 
 
-def detect_system_b_basic_state(trend_df: pd.DataFrame) -> pd.DataFrame:
-    """检测系统 B 基础状态。
+def calculate_system_b_basic_states(trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate System B basic states for every ticker/date row.
 
-    Args:
-        trend_df: 已计算个股趋势的多日多股行情，需含 ticker、trade_date、
-            close、ma5、close_above_ma5_days、close_below_ma5_days。
-
-    Returns:
-        每个 ticker 一行，包含：
-            - ticker
-            - trade_date: 该 ticker 最后一个交易日
-            - close: 最后收盘价
-            - ma5: 最后交易日 ma5（不足 5 日为 NaN）
-            - system_b_trend_valid: 最近 2 日是否均 close >= ma5
-            - system_b_exit_triggered: 最近 2 日是否均 close < ma5
+    This is an indicator-layer operation.  It intentionally exposes no trading
+    actions and can therefore be reused by strategies and non-strategy clients.
     """
+
     if trend_df is None or trend_df.empty:
         return pd.DataFrame(columns=_OUTPUT_COLUMNS)
-
     missing = [column for column in _REQUIRED_TREND_COLUMNS if column not in trend_df.columns]
     if missing:
-        raise ValueError(f"detect_system_b_basic_state 缺少必要趋势列: {missing}")
+        raise ValueError(f"calculate_system_b_basic_states 缺少必要趋势列: {missing}")
 
-    ordered = trend_df.sort_values([TICKER, TRADE_DATE]).reset_index(drop=True)
-    latest = ordered.groupby(TICKER, sort=False).tail(_CONSECUTIVE_DAYS).copy()
-    latest["_close_ge_ma5"] = (latest[CLOSE] >= latest[MA5]).fillna(False)
-    latest["_close_lt_ma5"] = (latest[CLOSE] < latest[MA5]).fillna(False)
+    result = trend_df.sort_values([TICKER, TRADE_DATE], kind="mergesort").reset_index(drop=True).copy()
+    close_ge_ma5 = (result[CLOSE] >= result[MA5]).fillna(False).astype(bool)
+    close_lt_ma5 = (result[CLOSE] < result[MA5]).fillna(False).astype(bool)
+    result[SYSTEM_B_TREND_VALID] = (
+        close_ge_ma5.groupby(result[TICKER], sort=False)
+        .transform(lambda series: series.rolling(_CONSECUTIVE_DAYS, min_periods=_CONSECUTIVE_DAYS).sum().eq(_CONSECUTIVE_DAYS))
+        .fillna(False).astype(bool)
+    )
+    result[SYSTEM_B_EXIT_TRIGGERED] = (
+        close_lt_ma5.groupby(result[TICKER], sort=False)
+        .transform(lambda series: series.rolling(_CONSECUTIVE_DAYS, min_periods=_CONSECUTIVE_DAYS).sum().eq(_CONSECUTIVE_DAYS))
+        .fillna(False).astype(bool)
+    )
+    return result.loc[:, _OUTPUT_COLUMNS]
 
-    latest_states = latest.groupby(TICKER, sort=False).agg(
-        _observation_count=(TRADE_DATE, "size"),
-        _all_close_ge_ma5=("_close_ge_ma5", "all"),
-        _all_close_lt_ma5=("_close_lt_ma5", "all"),
-    )
-    valid = (
-        (latest_states["_observation_count"] == _CONSECUTIVE_DAYS)
-        & latest_states["_all_close_ge_ma5"]
-    )
-    exit_triggered = (
-        (latest_states["_observation_count"] == _CONSECUTIVE_DAYS)
-        & latest_states["_all_close_lt_ma5"]
-    )
 
-    summary = ordered.groupby(TICKER, sort=False).tail(1).reset_index(drop=True)
-    summary = summary[[TICKER, TRADE_DATE, CLOSE, MA5]]
-    summary[SYSTEM_B_TREND_VALID] = summary[TICKER].map(valid).fillna(False).astype(bool)
-    summary[SYSTEM_B_EXIT_TRIGGERED] = (
-        summary[TICKER].map(exit_triggered).fillna(False).astype(bool)
-    )
+def calculate_system_b_basic_states_from_prices(price_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate daily System B states directly from raw price data."""
 
-    return summary
+    return calculate_system_b_basic_states(calculate_stock_trend(price_df))
+
+
+def detect_system_b_basic_state(trend_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the most recent System B state for each ticker (legacy public API)."""
+
+    states = calculate_system_b_basic_states(trend_df)
+    if states.empty:
+        return states
+    return states.groupby(TICKER, sort=False).tail(1).reset_index(drop=True)
 
 
 def detect_system_b_basic_state_from_prices(price_df: pd.DataFrame) -> pd.DataFrame:
-    """从原始行情计算趋势后，检测系统 B 基础状态。"""
-    trend_df = calculate_stock_trend(price_df)
-    return detect_system_b_basic_state(trend_df)
+    """Calculate trends from raw prices then return the latest state per ticker."""
+
+    return detect_system_b_basic_state(calculate_stock_trend(price_df))

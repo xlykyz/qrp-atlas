@@ -152,6 +152,90 @@ def _to_clean_str(value: Any) -> Optional[str]:
     return str(value)
 
 
+
+def simulate_open_position(
+    api: AssetPriceIndex,
+    *,
+    signal_date: str,
+    entry_pos: int,
+    exit_pos: int,
+    config: BacktestConfig,
+    signal_name: str | None = None,
+    meta: Dict[str, Any] | None = None,
+) -> Union[Trade, Skipped]:
+    """Turn known entry and exit bar positions into a trade using shared cost logic.
+
+    Strategy runtimes use this helper for dynamic exits; the fixed-holding engine
+    retains its existing public behaviour in simulate_signal.
+    """
+
+    def skip(reason: str, detail: str) -> Skipped:
+        return Skipped(
+            asset_id=api.asset_id,
+            signal_date=_ts_to_iso(signal_date),
+            reason=reason,
+            detail=detail,
+        )
+
+    if entry_pos < 0 or exit_pos < entry_pos or exit_pos >= len(api.df):
+        return skip(
+            REASON_NO_EXIT_BAR,
+            f"invalid execution bar range entry_pos={entry_pos}, exit_pos={exit_pos}",
+        )
+
+    entry_row = api.df.iloc[entry_pos]
+    exit_row = api.df.iloc[exit_pos]
+    entry_price = _safe_float(entry_row.get(config.entry.price_field))
+    exit_price = _safe_float(exit_row.get(config.exit.price_field))
+    if not _is_valid_price(entry_price) or not _is_valid_price(exit_price):
+        return skip(
+            REASON_INVALID_PRICE,
+            f"entry_price={entry_price!r}, exit_price={exit_price!r} "
+            f"(field={config.entry.price_field!r}/{config.exit.price_field!r})",
+        )
+
+    window = api.df.iloc[entry_pos : exit_pos + 1]
+    lows = pd.to_numeric(window["low"], errors="coerce").to_numpy(dtype=float)
+    highs = pd.to_numeric(window["high"], errors="coerce").to_numpy(dtype=float)
+    if not np.all(np.isfinite(lows)) or not np.all(np.isfinite(highs)):
+        return skip(
+            REASON_INVALID_PRICE,
+            f"non-finite high/low in window [entry_pos={entry_pos}, exit_pos={exit_pos}] "
+            f"for asset {api.asset_id!r}",
+        )
+    if np.any(lows <= 0) or np.any(highs <= 0):
+        return skip(
+            REASON_INVALID_PRICE,
+            f"non-positive high/low in window [entry_pos={entry_pos}, exit_pos={exit_pos}] "
+            f"for asset {api.asset_id!r}",
+        )
+
+    gross_return = exit_price / entry_price - 1.0
+    cost = config.cost
+    buy_cost = cost.commission_rate + cost.slippage_bps / 10000.0
+    sell_cost = cost.commission_rate + cost.stamp_tax_rate + cost.slippage_bps / 10000.0
+    asset_name = _to_clean_str(_get_value(entry_row, "asset_name", None))
+    asset_type = _to_clean_str(_get_value(entry_row, "asset_type", None))
+
+    return Trade(
+        asset_id=api.asset_id,
+        asset_name=asset_name,
+        asset_type=asset_type,
+        signal_date=_ts_to_iso(signal_date) or "",
+        signal_name=signal_name,
+        direction="long",
+        entry_date=_ts_to_iso(entry_row["trade_date"]) or "",
+        entry_price=float(entry_price),
+        exit_date=_ts_to_iso(exit_row["trade_date"]) or "",
+        exit_price=float(exit_price),
+        holding_bars=exit_pos - entry_pos,
+        gross_return=float(gross_return),
+        net_return=float(gross_return - buy_cost - sell_cost),
+        mae=float((lows / entry_price).min() - 1.0),
+        mfe=float((highs / entry_price).max() - 1.0),
+        meta=dict(meta or {}),
+    )
+
 def simulate_signal(
     signal: Union[pd.Series, Dict[str, Any]],
     price_index: Dict[str, AssetPriceIndex],
