@@ -1,88 +1,275 @@
 # `src/qrp_atlas` Agent Rules
 
-本文件适用于 `src/qrp_atlas` 及其所有子目录。仓库根目录的 `AGENTS.md` 仍然同时生效；如有冲突，以更具体的本文件为准。
+本文件适用于 `src/qrp_atlas/` 及其全部子目录。
 
-## Contracts 的适用边界
+QRP v1.0 的权威架构说明见 [`docs/核心架构v1.0/QRP_v1.0_核心架构文档.md`](../../docs/核心架构v1.0/QRP_v1.0_核心架构文档.md)。本文件用于约束代码实现；后续功能可以扩充，但不得破坏已经封版的模块职责和依赖方向。
 
-`src/qrp_atlas/contracts/` 是数据进入系统时的唯一事实来源（SSOT）。它定义数据字段、表结构、数据源映射、类型/日期/ticker 约定和校验规则。
+## 核心原则
 
-本项目按数据流向区分约束强度：
-
-- `pipeline/` 是外部数据进入系统的通道，必须强制遵守 contracts。任何数据进入数据库前，都必须完成字段映射、schema 对齐、类型标准化和必要校验。
-- `api/`、`backtest/`、`indicators/` 等模块是从数据库取数的数据流出/消费通道，优先参考和复用 contracts，但不要求所有内部变量、计算字段或 API 展示字段都直接使用 contracts 常量。
-- 下游模块可以为了接口语义、计算便利或展示需求使用自己的 DTO、响应字段和派生字段；但访问数据库时仍必须以实际数据库 schema 为准，不能误读、篡改或隐式假设存储字段。
-
-数据链路中的强约束边界是：
+QRP 的核心业务抽象由低到高为：
 
 ```text
-数据源 -> 清洗 -> 标准化 -> 入库 -> API 查询 -> 可视化/回测
-          [ contracts 强约束 ]       [ contracts 优先参考 ]
+contracts → indicators → strategies
 ```
 
-修改或新增 `pipeline/` 代码时，agent 必须先检查相关的 contracts 定义，再实现业务逻辑。修改其它模块时，应先检查 contracts 和数据库 schema，能复用时优先复用，但不因内部实现或对外展示需求而强行套用 contracts 的命名。
-
-## 依赖方向与模块边界
-
-依赖方向必须保持单向：
+各层定位：
 
 ```text
-contracts -> pipeline / indicators / backtest / api / frontend
+contracts   定义数据
+pipeline    生产和读取标准数据
+indicators  计算客观事实
+strategies  输出交易决策
+backtest    准备输入并模拟决策结果
+results     保存和读取运行结果
+api         编排并暴露应用能力
 ```
 
-- `indicators/` 可以 import `qrp_atlas.contracts`，用于复用字段常量、表结构和底层市场规则。
-- `contracts/` 绝对不能 import `qrp_atlas.indicators`，也不能依赖任何下游业务模块。
-- `indicators/` 是市场复合指标计算层，不是交易执行层；可以输出市场宽度、风险、趋势、系统状态等结构化结果，但不要直接写买入、卖出、下单逻辑。
-- `pipeline/` 负责数据入库；`indicators/` 负责基于已有数据计算复合指标；`api/` 和 `web/` 负责展示与交互。不要把这些职责互相混入。
+必须始终保持：
 
-## Pipeline 必须遵守的约束
+- 数据定义与数据生产分离；
+- 客观事实与交易决策分离；
+- 策略定义与策略运行分离；
+- 策略决策与成交模拟分离；
+- 核心业务逻辑与 API/前端分离；
+- 下层模块不得反向依赖上层模块。
 
-- pipeline 中的标准字段名必须从 `qrp_atlas.contracts` 导入，例如 `TICKER`、`TRADE_DATE`、`CLOSE`；禁止在 pipeline 中重复定义或散落硬编码标准字段名。
-- 表名、列清单、主键、可空性和 DuckDB 类型必须以 `contracts/schema.py` 为准。新增或修改持久化数据结构时，先同步更新 schema，再更新调用方。
-- 外部数据源字段必须通过 `contracts/mappings.py` 的映射处理；禁止在各 pipeline 中维护另一套隐式字段映射。
-- 日期、ticker、交易所、板块、涨跌停等通用规则必须使用 `contracts/conventions.py` 提供的常量和函数；不要复制一份本地实现。
-- DataFrame 进入数据库前，应使用 `validate_schema`、`align_to_schema`、`canonicalize` 或 `quick_validate` 等 contracts 校验/标准化函数。不要用静默丢列、随意改名或未经说明的类型转换掩盖契约不一致。
-- 如果 contracts 中没有所需字段、表、映射或约定，应先补充 contracts，并同步更新 `contracts/__init__.py` 的公开导出（如适用），再修改使用方。
-- 不要为了让 pipeline 通过而放宽、绕过或复制 contracts 校验；任何契约变更都必须明确说明影响范围，并补充或更新测试。
+## 允许的依赖方向
 
-## 下游模块的建议
-
-- API、回测和指标模块读取数据库时，建议优先使用 contracts 中的表名、字段名和约定，以减少拼写错误和语义漂移。
-- 下游模块可以在边界处转换为自己的响应模型、领域模型或派生指标；这种转换应保持显式，不要把派生字段回写成标准存储字段而不更新 contracts。
-- 如果下游代码发现数据库字段与 contracts 不一致，应优先报告或修复上游 pipeline/schema 问题；只有在明确的兼容场景下才增加适配逻辑，并注明兼容原因。
-
-## 修改流程
-
-1. 修改 pipeline 时，阅读任务相关的 `contracts/fields.py`、`schema.py`、`mappings.py`、`conventions.py`、`validate.py`。
-2. 判断变更是“使用既有契约”还是“修改/扩展契约”。涉及数据流入或持久化结构时，后者先改 contracts，再改生产者和消费者。
-3. 在 pipeline 入库边界执行字段、schema 和类型校验；对额外列、缺失列和类型转换采用显式策略。
-4. 修改下游模块时，确认其查询使用的数据库字段与 schema 一致；对 API/回测/指标内部模型允许使用显式适配。
-5. 运行与变更范围匹配的测试、lint 或类型检查，并在交付说明中记录未运行的检查。
-
-## 变更范围控制
-
-- 每次任务应尽量只修改与目标直接相关的文件。
-- `indicators`、`pipeline`、`api`、`web`、`docs`、`scripts` 不要混在同一个无关提交里。
-- 如果任务中途发现其它层的问题，优先报告；除非用户明确授权，否则不要顺手跨层修复。
-- 修复测试失败时，优先修复真实契约或实现问题，不要通过放宽测试掩盖边界错误。
-
-## 禁止事项
-
-- 禁止在 pipeline 中创建与 contracts 重复的字段常量、表 schema、数据源映射或通用市场规则。
-- 禁止 pipeline 直接依赖外部来源的原始列名作为入库接口。
-- 禁止在没有迁移/兼容说明的情况下修改既有字段名、表名、主键或字段语义。
-- 禁止下游模块把自己的展示字段、派生字段或内部模型反向当成数据库标准字段。
-- 禁止 `contracts/` import `qrp_atlas.indicators` 或其它下游业务模块。
-- 禁止把数据库、原始行情数据或生成数据的改动伪装成普通代码改动；如任务确实需要触碰这些内容，必须先说明原因并遵守仓库根目录规则。
-
-## 常用导入示例
-
-```python
-from qrp_atlas.contracts import (
-    CLOSE,
-    TICKER,
-    TRADE_DATE,
-    DAILY_MARKET_SNAPSHOT,
-    align_to_schema,
-    quick_validate,
-)
+```text
+pipeline → contracts
+indicators → contracts
+strategies → indicators / contracts
+backtest runtime → contracts / indicators / strategies / backtest engine
+backtest engine → backtest models
+results → backtest result models
+api → indicators / strategies / backtest / results
+frontend → api
 ```
+
+禁止的典型依赖：
+
+```text
+contracts → indicators / strategies / backtest / api
+indicators → strategies / backtest / api
+strategies → backtest / api / frontend
+backtest engine → 具体指标或具体策略
+api → frontend
+frontend → DuckDB 或 Python 策略对象
+```
+
+依赖方向描述的是模块职责，不要求为了形式统一而制造无意义的 import。
+
+## `contracts/`｜基础契约层
+
+`contracts/` 是持久化数据结构和标准数据语言的唯一事实来源（SSOT），负责：
+
+- 标准字段名；
+- DuckDB 表结构；
+- 类型、主键和可空性；
+- 外部数据源字段映射；
+- ticker、日期、交易所、板块和涨跌停等通用约定；
+- DataFrame 的 schema 对齐、类型标准化与校验；
+- 对外公开的基础常量和契约对象。
+
+约束：
+
+- 不查询数据库；
+- 不计算指标；
+- 不生成交易决策；
+- 不模拟成交；
+- 不依赖任何业务上层模块。
+
+新增或修改持久化字段、表名、主键、可空性、字段语义或数据源映射时，先更新 contracts，再更新生产者、消费者和测试。
+
+不得为兼容错误实现而复制、绕过或静默放宽 contracts。
+
+## `pipeline/`｜数据生产与访问层
+
+`pipeline/` 是外部数据进入系统的强契约边界，负责数据获取、清洗、映射、标准化、校验和入库。
+
+正式入库流程原则上为：
+
+```text
+外部字段映射
+→ schema 对齐
+→ 类型标准化
+→ 契约校验
+→ insert / upsert DuckDB
+```
+
+约束：
+
+- 标准字段名、表名、列清单和主键必须复用 `qrp_atlas.contracts`；
+- 外部原始列名必须通过 `contracts/mappings.py` 显式映射；
+- 通用市场规则必须复用 `contracts/conventions.py`；
+- DataFrame 入库前使用 `align_to_schema`、`canonicalize`、`validate_schema`、`quick_validate` 等契约能力；
+- 缺列、额外列、非法类型和兼容策略必须显式处理，不得静默吞掉；
+- pipeline 不计算策略指标，不生成交易动作，不承载回测逻辑。
+
+如果 contracts 尚未定义所需结构，应先补充 contracts 及其公开导出，再实现 pipeline。
+
+## `indicators/`｜复合指标计算层
+
+`indicators/` 基于标准基础字段计算可复用的客观指标和状态事实，例如 MA、趋势、市场宽度、风险状态和 System B 基础状态。
+
+指标回答：
+
+> 市场或标的已经发生了什么？
+
+约束：
+
+- 核心计算函数优先接收 DataFrame 或明确的结构化输入；
+- 不主动查询数据库，不负责数据加载；
+- 可以组合其他底层指标，但不得重复实现已有指标；
+- 输出应稳定、可测试，并明确字段语义；
+- 不输出 `ENTER`、`HOLD`、`EXIT`、`NO_ACTION` 等交易动作；
+- 不处理持仓、仓位、成交、成本或收益；
+- 不写数据库；
+- 不依赖 `strategies`、`backtest` 或 `api`。
+
+一个计算值只要是可复用的客观事实，就应优先进入 indicators，而不是散落在策略、回测或 API 中。
+
+## `strategies/`｜策略定义与决策层
+
+`strategies/` 定义具有明确输入、参数、算法、输出和稳定版本的交易规则单元。
+
+策略回答：
+
+> 面对这些基础数据和指标，应当做什么？
+
+策略可以：
+
+- 声明 `required_fields`；
+- 声明 `required_indicators`；
+- 定义参数及其类型、默认值和范围；
+- 输出标准化的 `ENTER / HOLD / EXIT / NO_ACTION` 决策；
+- 通过版本化注册表发布 Python 内置策略；
+- 通过受限声明式结构支持前端自定义策略。
+
+约束：
+
+- 策略只消费已经准备好的输入，不自行访问数据库；
+- 不主动调用 pipeline 加载数据；
+- 不重新计算或复制 indicators 中已有指标；
+- 不模拟成交，不计算手续费、滑点、收益、净值或回撤；
+- 不依赖 `backtest`、`api` 或前端；
+- 策略 code 与 version 必须稳定，行为变化应按兼容性决定是否升级版本；
+- Python 内置策略和声明式策略必须遵守统一定义、校验和决策输出模型；
+- 声明式策略只能使用受控数据结构和安全求值器，禁止 `eval`、`exec` 或任意代码执行。
+
+策略实现应保持确定性；相同输入、参数和版本应产生可复现的决策结果。
+
+## `backtest/`｜运行与交易模拟层
+
+`backtest/` 在职责上分为 runtime、通用 engine 和 results。
+
+### Backtest Runtime
+
+负责：
+
+- 读取策略定义；
+- 解析所需基础字段和指标；
+- 准备并校验策略输入；
+- 调用 indicators；
+- 运行 strategies；
+- 将标准决策交给执行引擎。
+
+runtime 可以依赖 contracts、indicators、strategies 和通用 backtest engine，但不得把具体策略知识写进 engine。
+
+### Backtest Engine
+
+负责：
+
+- 入场和退出 bar；
+- 成交价格；
+- 持仓与资金约束；
+- 手续费、印花税和滑点；
+- 交易记录；
+- MAE/MFE；
+- 收益、净值、回撤和绩效指标。
+
+通用 engine 禁止包含五日线、涨停、节点、题材、System A、System B 或任何具体策略概念。
+
+### Results
+
+负责结果加载、保存、查询和可复现信息，不承担策略算法或成交算法。
+
+结果应尽量保留策略版本、参数、数据区间、执行配置、成本配置和必要快照。
+
+## `api/`｜应用编排层
+
+API 负责将已有后端能力组织为稳定接口，可以协调多个模块，但不得成为业务算法的存放位置。
+
+约束：
+
+- 不在路由中实现可复用指标；
+- 不在路由中实现策略条件或状态机；
+- 不在路由中实现成交、成本和绩效算法；
+- 请求/响应 DTO 可以使用自己的展示字段，但数据库查询必须尊重真实 schema；
+- API 普通查询不要求机械套用 DataFrame contracts 校验流程；
+- 涉及新增持久化记录时，仍必须遵守相应数据契约；
+- 安全、只读、临时访问等网关能力不得削弱正式 API 的边界和权限模型。
+
+## `config/`｜配置层
+
+配置模块只负责路径、环境变量、外部客户端和运行参数的集中管理。
+
+- 不在业务模块中散落绝对路径、密钥或环境判断；
+- 不提交真实密钥、token、数据库或本地路径；
+- 测试应能够通过 fixture 或依赖注入覆盖配置。
+
+## 数据与副作用规则
+
+- 核心指标和策略计算优先保持纯函数，不隐式访问网络、数据库或全局状态；
+- 数据加载、网络请求和写库必须位于明确的边界层；
+- 不原地修改调用方传入的 DataFrame，除非接口文档明确约定；
+- 日期排序、分组键、缺失值、重复行和非有限价格必须显式处理；
+- 任何可能影响 point-in-time 正确性的实现都必须避免未来数据泄漏；
+- 数据库字段与 contracts 不一致时，优先修复上游契约或生产链路，不在下游静默适配错误结构。
+
+## 测试要求
+
+每项行为变更都应有与其风险匹配的测试。
+
+- contracts 变更：测试字段、schema、主键、可空性、映射和校验；
+- pipeline 变更：测试外部映射、标准化、非法输入和入库边界；
+- indicators 变更：测试单标的、多标的、排序、缺失值、边界窗口和输出语义；
+- strategies 变更：测试定义校验、参数校验、注册表、版本、决策与状态转换；
+- backtest 变更：测试成交时点、价格异常、成本、持仓、skipped、收益和回归场景；
+- API 变更：测试状态码、响应结构、错误边界和实际调用链。
+
+开发过程中可以先运行相关测试；交付前原则上运行：
+
+```bash
+python -m pytest
+```
+
+如果未运行完整测试，必须在交付说明中明确记录未运行项和原因。不得通过删除断言、放宽测试或跳过真实失败来制造绿灯。
+
+## 变更流程
+
+1. 先判断需求属于数据、事实、决策、执行、结果还是应用编排。
+2. 检查目标模块及其下层依赖，确认现有契约和公开接口。
+3. 在正确模块中实现最小完整变更，避免跨层复制逻辑。
+4. 涉及公共结构时，先修改最底层事实来源，再依次更新上层消费者。
+5. 补充测试并运行与变更范围匹配的检查。
+6. 交付说明记录修改文件、行为变化、兼容性、测试结果和已知限制。
+
+## 范围控制
+
+- 每次任务只修改与目标直接相关的模块；
+- 不借修复局部问题进行架构级重构；
+- 不把无关的 `pipeline`、`indicators`、`strategies`、`backtest`、`api`、`web`、`docs` 改动混入同一任务；
+- 发现其它层问题时优先报告，只有在它阻塞当前目标或用户已明确授权时才一并修复；
+- 不修改数据库文件、原始行情、生成结果或本地环境文件，除非任务明确要求；
+- 不把临时实验代码直接提升为核心模块实现。
+
+## 最终判断标准
+
+新代码必须能够清楚回答：
+
+```text
+它定义的是数据、生产数据、计算事实、作出决策、模拟交易，还是编排应用？
+```
+
+无法明确归属通常意味着职责混杂，应先重新划定边界再实现。
