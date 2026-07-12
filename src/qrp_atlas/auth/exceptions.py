@@ -15,3 +15,9 @@ class InvalidSessionError(AuthenticationError):
 
 class LoginNotSupportedError(AuthenticationError):
     pass
+
+
+class AuthBackendUnavailableError(RuntimeError):
+    """Raised when the database auth control plane is unavailable."""
+
+    pass

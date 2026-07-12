@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from qrp_atlas.auth.context import UserContext
 from qrp_atlas.auth.dependencies import CurrentUser, get_auth_service
 from qrp_atlas.auth.exceptions import (
+    AuthBackendUnavailableError,
     InvalidCredentialsError,
     InvalidSessionError,
     LoginNotSupportedError,
@@ -37,6 +38,11 @@ def login(
             detail="invalid username or password",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    except AuthBackendUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authentication backend unavailable",
+        ) from exc
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -54,3 +60,8 @@ def logout(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except InvalidSessionError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except AuthBackendUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authentication backend unavailable",
+        ) from exc

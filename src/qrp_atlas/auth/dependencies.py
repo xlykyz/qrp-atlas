@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from functools import lru_cache
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, status
 
 from qrp_atlas.auth.context import UserContext
-from qrp_atlas.auth.exceptions import AuthenticationError
+from qrp_atlas.auth.exceptions import (
+    AuthBackendUnavailableError,
+    AuthenticationError,
+)
 from qrp_atlas.auth.passwords import PasswordHasher
 from qrp_atlas.auth.providers.database import DatabaseAuthProvider
 from qrp_atlas.auth.providers.local import LocalAuthProvider
@@ -65,6 +68,11 @@ def get_current_user(
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    except AuthBackendUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="authentication backend unavailable",
+        ) from exc
 
 
 CurrentUser = Annotated[UserContext, Depends(get_current_user)]
@@ -86,10 +94,17 @@ def make_connection_factory(
     if not dsn:
         raise ValueError("PostgreSQL DSN is required for database auth mode")
 
-    def connect() -> AbstractContextManager[Any]:
+    @contextmanager
+    def connect() -> Iterator[Any]:
         import psycopg
         from psycopg.rows import dict_row
 
-        return psycopg.connect(dsn, row_factory=dict_row)
+        try:
+            with psycopg.connect(dsn, row_factory=dict_row) as connection:
+                yield connection
+        except psycopg.Error as exc:
+            raise AuthBackendUnavailableError(
+                "authentication backend unavailable"
+            ) from exc
 
     return connect

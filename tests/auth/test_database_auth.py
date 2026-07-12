@@ -105,3 +105,13 @@ def test_database_provider_rejects_revoked_session():
 
     with pytest.raises(InvalidSessionError):
         provider.resolve_user(issued.access_token)
+
+
+def test_database_provider_rejects_disabled_user():
+    provider, _ = make_provider()
+    provider._users._repository.user = provider._users._repository.user.model_copy(
+        update={"status": UserStatus.DISABLED}
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        provider.login(LoginCredentials(username="ryan", password="correct-password"))
