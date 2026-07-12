@@ -1,197 +1,170 @@
 # qrp-atlas
 
-qrp-atlas 是个人 A 股交易复盘与市场数据分析系统。
+qrp-atlas（QRP）是一个面向个人 A 股交易研究的量化平台：以标准数据契约为基础，由指标层生成市场事实、策略层输出交易决策，再通过回测系统完成数据准备、成交模拟与结果分析。
 
-项目目标不是做一个通用行情终端，而是围绕个人交易系统，沉淀稳定的本地数据底座、复盘页面和后续量化回测/分析能力。
+> 当前状态：**QRP v1.0 核心架构已封版，后端核心链路已经实现，正在扩充数据、指标、策略、组合回测与产品交互能力。**
+>
+> 架构封版不代表功能冻结。后续能力应在既定模块边界内扩展，不再进行架构级重构。
 
-当前核心能力：
+完整架构说明见 [`docs/核心架构v1.0/QRP_v1.0_核心架构文档.md`](docs/核心架构v1.0/QRP_v1.0_核心架构文档.md)。
 
-- 采集并清洗 A 股行情、涨跌停池、调研公告、个股研报、行业研报等数据
-- 将多源数据标准化后写入本地 DuckDB
-- 通过 FastAPI 对外提供查询接口
-- 通过 Web 前端查看数据、做复盘、辅助后续交易系统迭代
-
----
-
-## 架构边界
-
-当前项目按以下边界组织：
+## 核心工作流
 
 ```text
 外部数据源
     ↓
-pipeline/        数据采集、清洗、标准化、入库
+pipeline：采集、清洗、标准化
     ↓
-contracts/       pipeline 与 DuckDB 之间的强制数据契约层
+contracts：字段、schema、映射、约定与入库校验
     ↓
-DuckDB           本地标准事实库
+DuckDB：标准事实库
     ↓
-api/             查询数据库并组织响应
+backtest runtime：读取数据、准备指标、运行策略
+    ├── indicators：计算客观事实
+    ├── strategies：输出 ENTER / HOLD / EXIT / NO_ACTION
+    └── backtest engine：模拟成交、成本与绩效
     ↓
-web/             前端展示与交互
+results / API
+    ↓
+web：配置、复盘与分析
 ```
 
-### contracts/ 的定位
-
-`src/qrp_atlas/contracts/` 是本项目的数据契约层，主要约束 **pipeline → database** 的入库边界。
-
-它负责：
-
-- 标准字段名
-- 标准表结构
-- 字段属性与主键
-- 外部数据源字段映射
-- 入库前 schema 对齐
-- 入库前类型转换和校验
-- A 股底层市场规则，例如 ticker 标准化、交易所识别、涨跌停规则
-
-它不负责：
-
-- API 普通查询
-- API 值级更新
-- 前端展示逻辑
-- 交易策略规则
-- 回测撮合逻辑
-- 临时脚本
-
-一句话：
+核心业务抽象由低到高为：
 
 ```text
-contracts/ 管“数据结构与入库口径”
-pipeline/ 管“数据生产流程”
-DuckDB 管“标准事实存储”
-api/ 管“数据出库与值级操作”
-web/ 管“展示”
-strategy/backtest 管“交易逻辑”
-scripts/ 管“临时实验”
+contracts → indicators → strategies
 ```
 
----
+- `contracts` 定义“数据是什么”；
+- `indicators` 描述“市场或标的已经发生了什么”；
+- `strategies` 决定“面对这些事实应当做什么”；
+- `backtest` 负责“把策略运行起来并模拟交易结果”。
+
+## 当前能力
+
+| 模块 | 已实现能力 |
+| --- | --- |
+| `contracts/` | 标准字段、DuckDB 表结构、主键与可空性、数据源映射、ticker/日期/市场规则、DataFrame 对齐与校验。 |
+| `pipeline/` | 日线行情、估值与市值、复权因子、指数、涨跌停、停复牌、研报、机构调研等数据的正式入库链路。 |
+| `indicators/` | MA5、收盘价相对 MA5 状态、连续站上/跌破天数、System B 基础状态、市场宽度与市场风险指标。 |
+| `strategies/` | 统一策略模型、参数校验、版本化注册表、Python 内置策略、受限声明式策略，以及 `system_b_basic@1.0.0`。 |
+| `backtest/` | 通用信号回测、策略运行适配、固定持有与动态退出、手续费/印花税/滑点、MAE/MFE、交易与 skipped 汇总。 |
+| `backtest/results/` | 回测结果文件的加载、查询与响应模型。 |
+| `api/` | 行情、复盘、回测结果等后端接口，以及临时只读能力会话。 |
+| `web/` | React 复盘前端、个股复盘与回测分析页面。 |
+| `tests/` | contracts、pipeline、indicators、strategies、backtest、API 等模块的自动化测试。 |
+
+当前后端已经形成以下核心闭环：
+
+```text
+contracts
+→ indicators
+→ strategies
+→ backtest runtime
+→ backtest engine
+```
+
+策略定义与运行已经分离：策略只声明输入、参数和决策规则，不直接访问数据库；回测运行器负责读取数据、准备指标并将策略决策交给通用执行引擎。
+
+## 当前边界与缺口
+
+项目尚未完成完整产品闭环，当前重点不是再次调整架构，而是在现有架构内补齐能力密度：
+
+- 扩充参数化时间序列、横截面、因子、事件与残差指标；
+- 增加趋势、动量、均值回归、多因子、事件驱动等代表性内置策略；
+- 补充财务报表、历史行业归属、历史成分与标准事件时间轴；
+- 建立组合级现金、目标权重、调仓、资金曲线、回撤与风险归因；
+- 加入 T+1、涨跌停不可成交、停牌、整数手、最低佣金等 A 股现实约束；
+- 将策略目录、参数配置、回测任务创建与运行能力接入 API 和前端；
+- 增加样本内外、walk-forward、参数稳健性与结果可复现能力。
+
+现有回测结果查询与分析页面可以读取已有结果，但策略配置、任务创建、真实组合净值和完整运行闭环仍在建设中。
 
 ## 项目结构
 
 ```text
 qrp-atlas/
 ├── src/qrp_atlas/
-│   ├── api/                    # FastAPI 路由与数据查询接口
-│   ├── config/                 # 路径、环境变量、配置
-│   ├── contracts/              # 数据契约层：fields/schema/mappings/conventions/validate
-│   └── pipeline/               # 正式数据管线
-│       ├── daily_update/       # 日更行情管线
-│       ├── cninfo/             # 调研公告数据
-│       ├── research_report/    # 个股研报数据
-│       ├── research_industry/  # 行业研报数据
-│       └── duckdb_store.py     # DuckDB 存储辅助入口
-├── web/                        # React 前端项目
-├── data/                       # 本地数据目录，通常不提交 git
-├── deploy/                     # 部署相关配置
-└── scripts/                    # 临时脚本、一次性工具、实验代码
+│   ├── contracts/              # 标准字段、schema、映射、约定与校验
+│   ├── pipeline/               # 外部数据采集、清洗、标准化与入库
+│   ├── indicators/             # 可复用客观指标与市场状态
+│   ├── strategies/             # 策略定义、注册、校验与实现
+│   │   ├── builtin/            # Python 内置策略
+│   │   └── declarative/        # 受限声明式策略
+│   ├── backtest/               # 回测运行器、通用执行引擎与结果服务
+│   ├── api/                    # FastAPI 应用接口
+│   └── config/                 # 路径、环境与运行配置
+├── web/                        # React + Vite 前端
+├── tests/                      # 自动化测试
+├── docs/                       # 架构、设计、研究与开发文档
+├── deploy/                     # 部署与临时访问配置
+├── scripts/                    # 一次性工具和实验脚本
+└── data/                       # 本地数据目录，通常不提交 Git
 ```
 
-说明：
+`src/qrp_atlas/AGENTS.md` 规定核心包的开发边界；修改核心模块前应先阅读该文件。
 
-- `pipeline/` 是正式入库链路，应遵循 `contracts/`。
-- `api/` 主要从 DuckDB 取数，不要求强制通过 `contracts/` 包装。
-- `scripts/` 是临时脚本目录，不作为正式数据契约的一部分。
-- `web/` 是前端独立开发目录，但仍属于总仓库管理。
+## 关键架构规则
 
----
+### 数据入库必须经过 contracts
 
-## contracts/ 模块说明
-
-| 模块 | 职责 |
-|------|------|
-| `fields.py` | 标准字段名常量 |
-| `schema.py` | DuckDB 标准表结构、字段类型、主键、建表 SQL |
-| `mappings.py` | 外部数据源字段到内部标准字段的映射 |
-| `conventions.py` | A 股底层市场规则与数据解释规则 |
-| `validate.py` | 入库前 DataFrame schema 对齐、类型转换、字段校验 |
-| `__init__.py` | contracts 的统一公开导入入口 |
-
-正式 pipeline 写入 DuckDB 前，原则上应走：
+正式 pipeline 写入数据库前，原则上执行：
 
 ```text
-apply_mapping
-→ align_to_schema
-→ quick_validate
-→ insert/upsert DuckDB
+外部字段映射
+→ schema 对齐
+→ 类型标准化
+→ 契约校验
+→ insert / upsert DuckDB
 ```
 
----
+标准字段、表结构、主键、映射和通用市场规则不得在 pipeline 内重复定义。
 
-## 数据管线
+### 事实、决策与执行分离
 
-当前正式管线包括：
+- 计算结果属于客观市场事实时，放入 `indicators/`；
+- 入场、持有、退出、排序和选股规则放入 `strategies/`；
+- 成交、仓位、资金、成本、收益和风险计算放入 `backtest/`；
+- HTTP 请求与响应编排放入 `api/`；
+- 前端不直接访问 DuckDB，也不直接执行 Python 策略。
 
-- `daily_update`：日更行情快照
-- `cninfo`：调研公告/机构调研数据
-- `research_report`：个股研报数据
-- `research_industry`：行业研报数据
-- `zt_pool` / `dt_pool`：涨停池 / 跌停池数据存储入口
+### 保持单向依赖
 
-入库原则：
+允许的主要依赖方向：
 
-1. 外部字段映射集中在 `contracts.mappings`
-2. 表结构集中在 `contracts.schema`
-3. 字段名集中在 `contracts.fields`
-4. A 股底层规则集中在 `contracts.conventions`
-5. 写库前通过 `contracts.validate` 对齐并校验
+```text
+pipeline → contracts
+indicators → contracts
+strategies → indicators / contracts
+backtest runtime → contracts / indicators / strategies / engine
+api → indicators / strategies / backtest / results
+web → api
+```
 
----
+底层模块不得反向依赖上层模块，通用回测引擎不得内置任何具体策略知识。
 
-## API 与前端
+## 本地开发
 
-API 层主要职责是读取 DuckDB 并为前端组织响应。
+项目要求 Python 3.13 或更高版本。
 
-API 普通查询不需要强制走 `contracts.validate`，因为数据库已经是经过 pipeline/contracts 约束后的标准事实源。
-
-API 只有在以下情况才轻量引用 contracts：
-
-- 需要统一 ticker / index_code 等查询参数格式
-- 需要复用 A 股底层市场规则
-- 需要避免高频字段名漂移
-- 新增整行结构化记录时需要参考 schema
-
-前端位于 `web/`，用于数据展示、复盘页面和后续分析功能开发。
-
----
-
-## 技术栈
-
-| 层 | 技术 |
-|----|------|
-| 数据存储 | DuckDB |
-| 数据处理 | Python 3.13+, pandas |
-| 数据源 | akshare、tushare 及其他正式 pipeline 数据源 |
-| 后端 API | FastAPI |
-| 前端 | React + Vite |
-| 本地配置 | `.env` |
-
----
-
-## 常用命令
-
-### Python 环境
+### 创建环境
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+source .venv/bin/activate          # Linux / macOS
+# .venv\Scripts\Activate.ps1       # Windows PowerShell
+pip install -e ".[test]"
 ```
 
-如果系统没有 `python` 命令，可使用项目虚拟环境中的解释器：
+### 运行测试
 
 ```bash
-.venv/bin/python -m compileall src
+python -m pytest
 ```
 
-### 编译检查
+每次新增模块或修改公共契约后，应运行完整测试，检查跨模块回归；开发过程中也可以先运行与变更范围匹配的测试目录。
 
-```bash
-python -m compileall src
-```
-
-### 手动运行日更管线
+### 运行日更管线
 
 ```bash
 python -m qrp_atlas.pipeline.daily_update.run
@@ -207,85 +180,25 @@ npm run dev
 npm run build
 ```
 
----
-
 ## 数据目录
 
-`data/` 通常用于本地运行数据，不建议提交 git。
-
-常见内容：
+`data/` 用于本地运行数据，通常不提交 Git：
 
 ```text
 data/
-├── db/          # DuckDB 数据库文件
-├── raw/         # 原始数据备份
-└── canonical/   # 清洗后的规范化数据备份
+├── db/              # DuckDB 数据库
+├── raw/             # 原始数据备份
+├── canonical/       # 标准化数据备份
+└── backtest_runs/   # 回测结果文件（如启用）
 ```
 
----
+数据库结构应与 `src/qrp_atlas/contracts/` 保持一致。数据库文件、原始行情和生成结果不得作为普通代码提交。
 
-## 开发原则
+## 文档入口
 
-### 1. pipeline 入库必须尊重 contracts
-
-正式 pipeline 不应绕过 contracts 直接写入 DuckDB。
-
-新增正式数据源时，应先补齐：
-
-```text
-fields.py
-schema.py
-mappings.py
-conventions.py（如涉及 A 股底层规则）
-validate.py（如需要新的通用校验能力）
-```
-
-### 2. 不要把策略逻辑放进 contracts
-
-以下内容不属于 contracts：
-
-- 买入规则
-- 卖出规则
-- 仓位规则
-- 节点 M / W
-- 主线退潮判断
-- 回测撮合逻辑
-- 复盘页面展示偏好
-
-这些应放在未来的 strategy / backtest / domain 层。
-
-### 3. API 不做过度 contracts 化
-
-API 纯查询以 DuckDB 现有 schema 为事实来源。
-
-不要为了形式上的 SSOT，把 API 普通查询全部改成 schema 驱动，也不要把值级更新改造成 DataFrame validate 流程。
-
-### 4. scripts/ 保持临时性
-
-`scripts/` 允许存在临时字段映射、临时 SQL、一次性修复逻辑。
-
-除非明确要求，不要为了 contracts 重构 `scripts/`。
-
----
-
-## 当前阶段
-
-当前阶段的重点是：
-
-```text
-建立稳定的数据入库契约
-沉淀可复用的本地市场数据库
-支撑复盘页面和未来回测/分析能力
-```
-
-后续可在此基础上继续建设：
-
-- 通用回测底座
-- 交易复盘自动化
-- 节点/市场状态分析
-- 专属交易系统统计与验证
-
----
+- [QRP v1.0 核心架构文档](docs/核心架构v1.0/QRP_v1.0_核心架构文档.md)
+- [核心包说明](src/qrp_atlas/README.md)
+- [核心包 Agent 规则](src/qrp_atlas/AGENTS.md)
 
 ## 许可证
 
