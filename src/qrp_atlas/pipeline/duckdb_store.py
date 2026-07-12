@@ -307,6 +307,32 @@ def save_daily_basic(df: pd.DataFrame, replace: bool = False) -> None:
         con.close()
 
 
+def save_suspend_d(df: pd.DataFrame, replace: bool = False) -> None:
+    """保存每日停复牌数据
+
+    Args:
+        df: 包含 suspend_d 数据的 DataFrame
+        replace: 是否替换已有日期的数据
+    """
+    from qrp_atlas.contracts import SUSPEND_D, TRADE_DATE
+
+    df = align_to_schema(df, SUSPEND_D.name, fill_missing_optional=True, drop_extra=True)
+    df = quick_validate(df, SUSPEND_D.name, allow_extra=False)
+
+    con = get_connection()
+    try:
+        if replace:
+            dates = df[TRADE_DATE].unique().tolist()
+            for d in dates:
+                con.execute(f"DELETE FROM {SUSPEND_D.name} WHERE {TRADE_DATE} = ?", [d])
+        insert_cols = [col for col in SUSPEND_D.column_names() if col != CREATED_AT]
+        cols = ", ".join(insert_cols)
+        con.register("tmp_df", df)
+        con.execute(f"INSERT INTO {SUSPEND_D.name} ({cols}) SELECT {cols} FROM tmp_df")
+    finally:
+        con.close()
+
+
 def get_table_info(table_name: str) -> pd.DataFrame:
     """获取表结构信息"""
     con = get_connection(read_only=True)

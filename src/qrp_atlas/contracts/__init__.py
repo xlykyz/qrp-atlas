@@ -161,6 +161,9 @@ from .fields import (
     TOTAL_SHARES,
     BOARD_AMOUNT,
     PE_RATIO,
+    # ── 停复牌字段 ──
+    SUSPEND_TIMING,
+    SUSPEND_TYPE,
 )
 
 from .schema import (
@@ -179,6 +182,7 @@ from .schema import (
     ZT_POOL,
     DT_POOL,
     DAILY_BASIC,
+    SUSPEND_D,
     ALL_TABLES,
     TABLE_BY_NAME,
     get_table,
@@ -471,4 +475,7 @@ __all__ = [
     "TOTAL_MV",
     "CIRC_MV",
     "LIMIT_STATUS",
+    "SUSPEND_D",
+    "SUSPEND_TIMING",
+    "SUSPEND_TYPE",
 ]

@@ -114,6 +114,10 @@ TOTAL_MV = "total_mv"
 CIRC_MV = "circ_mv"
 LIMIT_STATUS = "limit_status"
 
+# ── 停复牌字段 ──
+SUSPEND_TIMING = "suspend_timing"
+SUSPEND_TYPE = "suspend_type"
+
 # ── 涨跌停股池字段 ──
 FIRST_BLOCK_TIME = "first_block_time"
 LAST_BLOCK_TIME = "last_block_time"
