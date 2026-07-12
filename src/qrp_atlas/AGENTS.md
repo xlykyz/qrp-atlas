@@ -21,6 +21,19 @@
 
 修改或新增 `pipeline/` 代码时，agent 必须先检查相关的 contracts 定义，再实现业务逻辑。修改其它模块时，应先检查 contracts 和数据库 schema，能复用时优先复用，但不因内部实现或对外展示需求而强行套用 contracts 的命名。
 
+## 依赖方向与模块边界
+
+依赖方向必须保持单向：
+
+```text
+contracts -> pipeline / indicators / backtest / api / frontend
+```
+
+- `indicators/` 可以 import `qrp_atlas.contracts`，用于复用字段常量、表结构和底层市场规则。
+- `contracts/` 绝对不能 import `qrp_atlas.indicators`，也不能依赖任何下游业务模块。
+- `indicators/` 是市场复合指标计算层，不是交易执行层；可以输出市场宽度、风险、趋势、系统状态等结构化结果，但不要直接写买入、卖出、下单逻辑。
+- `pipeline/` 负责数据入库；`indicators/` 负责基于已有数据计算复合指标；`api/` 和 `web/` 负责展示与交互。不要把这些职责互相混入。
+
 ## Pipeline 必须遵守的约束
 
 - pipeline 中的标准字段名必须从 `qrp_atlas.contracts` 导入，例如 `TICKER`、`TRADE_DATE`、`CLOSE`；禁止在 pipeline 中重复定义或散落硬编码标准字段名。
@@ -45,12 +58,20 @@
 4. 修改下游模块时，确认其查询使用的数据库字段与 schema 一致；对 API/回测/指标内部模型允许使用显式适配。
 5. 运行与变更范围匹配的测试、lint 或类型检查，并在交付说明中记录未运行的检查。
 
+## 变更范围控制
+
+- 每次任务应尽量只修改与目标直接相关的文件。
+- `indicators`、`pipeline`、`api`、`web`、`docs`、`scripts` 不要混在同一个无关提交里。
+- 如果任务中途发现其它层的问题，优先报告；除非用户明确授权，否则不要顺手跨层修复。
+- 修复测试失败时，优先修复真实契约/实现问题，不要通过放宽测试掩盖 schema、主键、nullable 或依赖方向错误。
+
 ## 禁止事项
 
 - 禁止在 pipeline 中创建与 contracts 重复的字段常量、表 schema、数据源映射或通用市场规则。
 - 禁止 pipeline 直接依赖外部来源的原始列名作为入库接口。
 - 禁止在没有迁移/兼容说明的情况下修改既有字段名、表名、主键或字段语义。
 - 禁止下游模块把自己的展示字段、派生字段或内部模型反向当成数据库标准字段。
+- 禁止 `contracts/` import `qrp_atlas.indicators` 或其它下游业务模块。
 - 禁止把数据库、原始行情数据或生成数据的改动伪装成普通代码改动；如任务确实需要触碰这些内容，必须先说明原因并遵守仓库根目录规则。
 
 ## 常用导入示例
