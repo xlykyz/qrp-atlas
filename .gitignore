@@ -21,6 +21,7 @@ ENV/
 *.egg-info/
 *.pyc
 .pytest_cache/
+.pytest-tmp/
 
 # 测试覆盖率产物
 .coverage
