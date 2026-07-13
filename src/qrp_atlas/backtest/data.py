@@ -26,6 +26,8 @@ PRICE_OPTIONAL_DB_COLUMNS: tuple[str, ...] = (
     "is_st",
     "is_limit_up",
     "is_limit_down",
+    "is_suspended",
+    "suspend_type",
 )
 
 
@@ -133,6 +135,7 @@ def _build_where(
     column_name: str,
     start_date: Any,
     end_date: Any,
+    date_column: str = "trade_date",
 ) -> Tuple[str, list]:
     """构造 WHERE 子句片段和参数。"""
     clauses: list[str] = []
@@ -144,10 +147,10 @@ def _build_where(
             clauses.append(f"{column_name} IN ({placeholders})")
             params.extend(str(v) for v in values)
     if start_date is not None:
-        clauses.append("trade_date >= ?")
+        clauses.append(f"{date_column} >= ?")
         params.append(_normalize_date(start_date))
     if end_date is not None:
-        clauses.append("trade_date <= ?")
+        clauses.append(f"{date_column} <= ?")
         params.append(_normalize_date(end_date))
     where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     return where_sql, params
@@ -165,6 +168,7 @@ def load_stock_prices(
     """从 daily_market_snapshot 读取股票行情，标准化成 PriceFrame。
 
     映射: ticker→asset_id, name→asset_name, "stock"→asset_type。
+    通过 trade_date+ticker 左联聚合后的 suspend_d，补充 is_suspended / suspend_type。
 
     Args:
         con: 可选的 DuckDB 连接。不传则按 db_path 或项目默认连接。
@@ -179,19 +183,34 @@ def load_stock_prices(
     """
     own_con, should_close = _resolve_con(con, db_path)
     try:
-        sql = (
-            "SELECT trade_date, ticker, name, open, high, low, close, "
-            "volume, amount, turnover, market_cap, float_cap, "
-            "is_st, is_limit_up, is_limit_down "
-            "FROM daily_market_snapshot"
-        )
+        # Aggregate suspend_d first so one market row never fans out.
+        # Multiple suspend_type values collapse to a stable sorted CSV.
         where_sql, params = _build_where(
             column_values=tickers,
-            column_name="ticker",
+            column_name="d.ticker",
             start_date=start_date,
             end_date=end_date,
+            date_column="d.trade_date",
         )
-        sql = sql + where_sql + " ORDER BY ticker, trade_date"
+        sql = (
+            "WITH suspend_agg AS ("
+            "  SELECT trade_date, ticker, "
+            "         TRUE AS is_suspended, "
+            "         string_agg(DISTINCT suspend_type, ',' ORDER BY suspend_type) "
+            "           AS suspend_type "
+            "  FROM suspend_d "
+            "  GROUP BY trade_date, ticker"
+            ") "
+            "SELECT d.trade_date, d.ticker, d.name, d.open, d.high, d.low, d.close, "
+            "d.volume, d.amount, d.turnover, d.market_cap, d.float_cap, "
+            "d.is_st, d.is_limit_up, d.is_limit_down, "
+            "COALESCE(s.is_suspended, FALSE) AS is_suspended, "
+            "s.suspend_type "
+            "FROM daily_market_snapshot d "
+            "LEFT JOIN suspend_agg s "
+            "  ON d.trade_date = s.trade_date AND d.ticker = s.ticker"
+        )
+        sql = sql + where_sql + " ORDER BY d.ticker, d.trade_date"
         if limit is not None:
             sql = sql + f" LIMIT {int(limit)}"
         df = own_con.execute(sql, params).df()
