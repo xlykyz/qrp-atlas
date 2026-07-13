@@ -17,7 +17,7 @@
 | 0 | 架构与产品蓝图封版 | docs | 已完成 |
 | 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
 | 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
-| 3 | point-in-time 数据底座 | contracts / pipeline / data / backtest | 🟡 部分完成：03-A/03-B 已合入 main |
+| 3 | point-in-time 数据底座与查询服务 | contracts / pipeline / data / backtest | ✅ 已完成：03-A/03-B/03-C |
 | 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3 |
 | 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
 | 6 | 残差相对价值与稳健性验证 | indicators / strategies / backtest / results | 阶段 2-4 |
@@ -85,12 +85,12 @@
 
 ## 五、阶段 3：point-in-time 数据底座
 
-- 状态：🟡 部分完成（2026-07-14）
-- 已合入 main：
-  - 任务 03-A：`select_latest_available_records` 版本选择器（PR #7）
-  - 任务 03-B：财务/行业/指数 Tushare 数据底座、六表 contracts、小范围真实入库（PR #8）
-- 尚未完成：PIT 查询服务、结构化事件主表、全市场历史回填、任务 03 整体验收
-- 不得将任务 03 标记为整体完成
+- 状态：✅ 已完成（2026-07-14）
+- 已完成并进入 main：
+  - 任务 03-A：`select_latest_available_records`（PR #7）
+  - 任务 03-B：财务/行业/指数数据底座（PR #8）
+  - 任务 03-C：as_of 查询服务（财务/行业/指数）
+- 明确不在任务 03：结构化事件 / `corporate_event`（任务 05）；全市场历史回填仍按需手动执行
 
 
 ### 目标
