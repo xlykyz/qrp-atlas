@@ -58,7 +58,7 @@ QRP v1.0 完成的判定标准不是“模块目录齐全”，也不是“回�
 - `time_series_momentum`
 - `dual_sma_trend`
 - `donchian_breakout`
-- `rolling_zscore_mean_reversion_long`
+- `rolling_zscore_mean_reversion`
 
 #### 横截面类
 

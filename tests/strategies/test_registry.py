@@ -37,7 +37,18 @@ def test_definition_is_serializable_and_builtin_is_registered() -> None:
     payload = definition.to_dict()
     assert payload["code"] == "system_b_basic"
     assert payload["strategy_type"] == "builtin"
-    assert [item.code for item in list_strategies()] == ["system_b_basic"]
+    assert [item.code for item in list_strategies()] == [
+        "donchian_breakout",
+        "dual_sma_trend",
+        "rolling_zscore_mean_reversion",
+        "system_b_basic",
+        "time_series_momentum",
+    ]
+    dual_sma = get_strategy("dual_sma_trend").definition.to_dict()
+    assert dual_sma["parameter_schema"]["fast_window"]["default"] == 20
+    assert dual_sma["indicator_requests"][0]["parameters"] == {
+        "window": {"parameter": "fast_window"}
+    }
 
 
 def test_registry_rejects_duplicates_and_unknown_codes() -> None:

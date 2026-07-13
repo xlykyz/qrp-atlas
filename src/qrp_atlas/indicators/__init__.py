@@ -21,6 +21,20 @@ from qrp_atlas.indicators.definitions import (
     UpdateFrequency,
 )
 from qrp_atlas.indicators.registry import get_indicator, list_indicators
+from qrp_atlas.indicators.parameterized import (
+    IndicatorCalculationDefinition,
+    IndicatorConflictError,
+    IndicatorParameterBinding,
+    IndicatorParameterSpec,
+    IndicatorRequest,
+    IndicatorRequestError,
+    UnknownIndicatorError,
+    bind_indicator_request,
+    calculate_indicators,
+    get_calculation_definition,
+    indicator_output_fields,
+    resolve_indicator_requests,
+)
 
 # 新增：市场复合指标计算
 from qrp_atlas.indicators.market import calculate_market_breadth, calculate_market_risk
@@ -39,6 +53,18 @@ __all__ = [
     "UpdateFrequency",
     "get_indicator",
     "list_indicators",
+    "IndicatorConflictError",
+    "IndicatorCalculationDefinition",
+    "IndicatorParameterBinding",
+    "IndicatorParameterSpec",
+    "IndicatorRequest",
+    "IndicatorRequestError",
+    "UnknownIndicatorError",
+    "bind_indicator_request",
+    "calculate_indicators",
+    "get_calculation_definition",
+    "indicator_output_fields",
+    "resolve_indicator_requests",
     # 市场复合指标
     "calculate_market_breadth",
     "calculate_market_risk",
