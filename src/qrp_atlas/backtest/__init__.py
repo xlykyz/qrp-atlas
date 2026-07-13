@@ -11,6 +11,7 @@ from .models import (
     Skipped,
     Trade,
 )
+from .point_in_time import select_latest_available_records
 from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strategy_data, run_strategy_backtest
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "Trade",
     "prepare_strategy_data",
     "run_strategy_backtest",
+    "select_latest_available_records",
 ]
