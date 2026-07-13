@@ -10,6 +10,12 @@ import pandas as pd
 
 from qrp_atlas.contracts import TICKER, TRADE_DATE
 from qrp_atlas.contracts import fields as contract_fields
+from qrp_atlas.indicators import (
+    IndicatorParameterBinding,
+    IndicatorRequestError,
+    get_calculation_definition,
+    indicator_output_fields,
+)
 from qrp_atlas.indicators.registry import get_indicator
 
 from .models import ParameterSpec, StrategyDefinition, StrategyInput
@@ -48,6 +54,41 @@ def validate_definition(definition: StrategyDefinition) -> None:
             get_indicator(code)
         except KeyError as exc:
             raise StrategyValidationError(str(exc)) from exc
+
+    request_aliases: set[str] = set()
+    request_outputs: set[str] = set(definition.required_indicators)
+    for request in definition.indicator_requests:
+        try:
+            calculation = get_calculation_definition(request.code)
+        except IndicatorRequestError as exc:
+            raise StrategyValidationError(str(exc)) from exc
+        unknown = sorted(set(request.parameters) - set(calculation.parameter_schema))
+        if unknown:
+            raise StrategyValidationError(
+                f"indicator {request.code!r} has unknown parameters: {unknown}"
+            )
+        for value in request.parameters.values():
+            if isinstance(value, IndicatorParameterBinding) and value.parameter not in definition.parameter_schema:
+                raise StrategyValidationError(
+                    f"indicator {request.code!r} references unknown strategy parameter {value.parameter!r}"
+                )
+            if isinstance(value, IndicatorParameterBinding) and request.alias is None:
+                raise StrategyValidationError(
+                    f"indicator {request.code!r} with parameter bindings requires an explicit alias"
+                )
+        alias = request.alias
+        if alias is not None:
+            if alias in request_aliases:
+                raise StrategyValidationError(f"duplicate indicator alias: {alias}")
+            request_aliases.add(alias)
+    try:
+        output_columns = indicator_output_fields(definition.indicator_requests)
+    except IndicatorRequestError as exc:
+        raise StrategyValidationError(str(exc)) from exc
+    for output in output_columns:
+        if output in request_outputs:
+            raise StrategyValidationError(f"duplicate indicator output field: {output}")
+        request_outputs.add(output)
 
     for code, spec in definition.parameter_schema.items():
         if not code:
@@ -121,7 +162,10 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
     if not isinstance(df, pd.DataFrame):
         raise StrategyValidationError("prepared_data must be a pandas DataFrame")
 
-    required_columns = tuple(dict.fromkeys((*definition.required_fields, *definition.required_indicators)))
+    parameterized_outputs = indicator_output_fields(definition.indicator_requests)
+    required_columns = tuple(
+        dict.fromkeys((*definition.required_fields, *definition.required_indicators, *parameterized_outputs))
+    )
     missing = [column for column in required_columns if column not in df.columns]
     if missing:
         raise StrategyValidationError(f"prepared_data missing required columns: {missing}")
@@ -150,7 +194,8 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
         raise StrategyValidationError("prepared_data contains missing ticker values")
     result[TICKER] = result[TICKER].astype(str)
 
-    for column in required_columns:
+    strict_columns = tuple(dict.fromkeys((*definition.required_fields, *definition.required_indicators)))
+    for column in strict_columns:
         values = result[column]
         if values.isna().any():
             raise StrategyValidationError(f"prepared_data contains missing values for {column!r}")

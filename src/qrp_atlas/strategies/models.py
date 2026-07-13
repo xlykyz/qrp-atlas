@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 import pandas as pd
+from qrp_atlas.indicators import IndicatorRequest
 
 
 class StrategyType(str, Enum):
@@ -59,6 +60,7 @@ class StrategyDefinition:
     required_fields: tuple[str, ...]
     required_indicators: tuple[str, ...]
     parameter_schema: Mapping[str, ParameterSpec] = field(default_factory=dict)
+    indicator_requests: tuple[IndicatorRequest, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +71,7 @@ class StrategyDefinition:
             "strategy_type": self.strategy_type.value,
             "required_fields": list(self.required_fields),
             "required_indicators": list(self.required_indicators),
+            "indicator_requests": [request.to_dict() for request in self.indicator_requests],
             "parameter_schema": {
                 code: spec.to_dict()
                 for code, spec in sorted(self.parameter_schema.items())

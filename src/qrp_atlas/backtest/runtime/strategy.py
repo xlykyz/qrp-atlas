@@ -9,19 +9,12 @@ from typing import Any
 import pandas as pd
 
 from qrp_atlas.contracts import TICKER, TRADE_DATE
-from qrp_atlas.indicators.stock.trend import (
-    CLOSE_ABOVE_MA5,
-    CLOSE_ABOVE_MA5_DAYS,
-    CLOSE_BELOW_MA5,
-    CLOSE_BELOW_MA5_DAYS,
-    MA5,
-    calculate_stock_trend,
+from qrp_atlas.indicators import (
+    bind_indicator_request,
+    calculate_indicators,
+    indicator_output_fields,
 )
-from qrp_atlas.indicators.system_b.detector import (
-    SYSTEM_B_EXIT_TRIGGERED,
-    SYSTEM_B_TREND_VALID,
-    calculate_system_b_basic_states,
-)
+from qrp_atlas.indicators.parameterized import requests_for_legacy_indicators
 from qrp_atlas.strategies import (
     StrategyAction,
     StrategyDefinition,
@@ -29,6 +22,7 @@ from qrp_atlas.strategies import (
     StrategyRunResult,
     get_strategy,
 )
+from qrp_atlas.strategies.validation import resolve_parameters
 
 from ..broker import (
     REASON_INVALID_DIRECTION,
@@ -41,12 +35,6 @@ from ..metrics import summarize_trades
 from ..models import BacktestConfig, BacktestResult, Skipped, Trade
 from ..validators import validate_config, validate_price_df
 
-_TREND_INDICATORS = frozenset(
-    {MA5, CLOSE_ABOVE_MA5, CLOSE_BELOW_MA5, CLOSE_ABOVE_MA5_DAYS, CLOSE_BELOW_MA5_DAYS}
-)
-_SYSTEM_B_INDICATORS = frozenset({SYSTEM_B_TREND_VALID, SYSTEM_B_EXIT_TRIGGERED})
-
-
 @dataclass(frozen=True)
 class StrategyBacktestRun:
     """Optional detailed result containing both decisions and execution output."""
@@ -55,7 +43,11 @@ class StrategyBacktestRun:
     backtest_result: BacktestResult
 
 
-def prepare_strategy_data(price_df: pd.DataFrame, definition: StrategyDefinition) -> pd.DataFrame:
+def prepare_strategy_data(
+    price_df: pd.DataFrame,
+    definition: StrategyDefinition,
+    parameters: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
     """Prepare only declared raw fields plus registered indicator outputs.
 
     The adapter performs no database access.  Indicator dependency knowledge
@@ -75,20 +67,20 @@ def prepare_strategy_data(price_df: pd.DataFrame, definition: StrategyDefinition
     if missing_fields:
         raise ValueError(f"price_df missing declared strategy fields: {missing_fields}")
 
-    required_indicators = set(definition.required_indicators)
-    if required_indicators & (_TREND_INDICATORS | _SYSTEM_B_INDICATORS):
-        trend = calculate_stock_trend(prepared)
-        for column in _TREND_INDICATORS & required_indicators:
-            prepared[column] = trend[column].to_numpy()
-    if required_indicators & _SYSTEM_B_INDICATORS:
-        states = calculate_system_b_basic_states(trend)
-        for column in _SYSTEM_B_INDICATORS & required_indicators:
-            prepared[column] = states[column].to_numpy()
+    requests = [*requests_for_legacy_indicators(definition.required_indicators)]
+    requests.extend(
+        bind_indicator_request(request, parameters or {})
+        for request in definition.indicator_requests
+    )
+    if requests:
+        prepared = calculate_indicators(prepared, requests)
 
-    unresolved = [column for column in definition.required_indicators if column not in prepared.columns]
-    if unresolved:
-        raise ValueError(f"no indicator preparation path for: {unresolved}")
-    columns = list(dict.fromkeys((*definition.required_fields, *definition.required_indicators)))
+    parameterized_outputs = indicator_output_fields(definition.indicator_requests)
+    columns = list(
+        dict.fromkeys(
+            (*definition.required_fields, *definition.required_indicators, *parameterized_outputs)
+        )
+    )
     return prepared.loc[:, columns].copy()
 
 
@@ -110,11 +102,12 @@ class StrategyBacktestRuntime:
 
         validate_config(config)
         strategy = get_strategy(code, version)
-        prepared = prepare_strategy_data(price_df, strategy.definition)
+        resolved_parameters = resolve_parameters(strategy.definition, parameters or {})
+        prepared = prepare_strategy_data(price_df, strategy.definition, resolved_parameters)
         strategy_result = strategy.run(
             StrategyInput(
                 prepared_data=prepared,
-                parameters=parameters or {},
+                parameters=resolved_parameters,
                 initial_positions=initial_positions or {},
                 runtime_context=runtime_context or {},
             )

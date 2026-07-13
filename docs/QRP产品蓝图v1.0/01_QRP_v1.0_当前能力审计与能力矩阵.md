@@ -1,6 +1,7 @@
 # QRP v1.0 当前能力审计与能力矩阵
 
-> 审计基线：2026-07-12，策略模块提交 `4159c84 Add QRP strategy module v1` 之后的主分支代码。  
+> 初始审计基线：2026-07-12，策略模块提交 `4159c84 Add QRP strategy module v1` 之后的主分支代码。
+> 任务 01 状态更新：2026-07-13，参数化指标、四个经典单标的策略和通用 runtime 准备链路已实现。
 > 数据事实：用户已确认本地数据库与 `contracts` 严格一致。
 
 ## 一、审计结论
@@ -22,7 +23,7 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 
 当前最主要的产品缺口不是架构，而是能力密度：
 
-1. 缺参数化通用指标和横截面指标；
+1. 缺横截面指标、因子指标、事件指标和残差指标；
 2. 缺财务报表、历史行业归属和标准事件时间轴；
 3. 缺组合级资金、目标权重、调仓和资金曲线；
 4. 缺 A 股现实成交约束；
@@ -73,13 +74,17 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 - `system_b_exit_triggered`
 - 市场涨跌家数与涨跌停宽度；
 - 市场大跌家数和风险等级。
+- `IndicatorRequest`、策略参数绑定、稳定 alias 与显式输出字段；
+- 统一指标计算注册和参数 schema；
+- 参数化 SMA、区间收益、Donchian high/low、rolling mean/std/z-score；
+- 所有新增时间序列指标按 ticker 独立并按日期稳定排序；
+- Donchian 排除当前 bar，z-score 零标准差输出缺失值。
 
 当前限制：
 
-- 指标注册表主要是元数据清单；
-- 回测运行器仍硬编码 MA5/System B 的准备路径；
-- 不支持同一指标不同窗口和 alias；
-- 不支持通用时间序列、横截面、因子、事件和残差指标族。
+- 元数据目录与参数化计算注册是两个公开入口，尚未由 API 统一展示；
+- 不支持横截面、因子、事件和残差指标族；
+- 指标版本尚未进入结果快照。
 
 ### 2.3 strategies
 
@@ -90,6 +95,10 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 - 版本化注册表；
 - 参数类型与范围校验；
 - `system_b_basic@1.0.0`；
+- `time_series_momentum@1.0.0`；
+- `dual_sma_trend@1.0.0`；
+- `donchian_breakout@1.0.0`；
+- `rolling_zscore_mean_reversion@1.0.0`；
 - 声明式策略的 `field / indicator / parameter / literal`；
 - `eq / ne / gt / gte / lt / lte`；
 - `all / any / not`；
@@ -97,7 +106,6 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 
 当前限制：
 
-- 只有一个内置策略；
 - long-only、逐标的状态机；
 - `score/weight` 尚未连接组合构建；
 - 缺策略族、时间框架、适用资产等目录元数据；
@@ -111,6 +119,7 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 - `signal_close / next_open / next_close`；
 - 固定持有 N bar；
 - 动态策略运行器；
+- 参数化指标请求的通用准备、参数绑定和输出选择；
 - ENTER/HOLD/EXIT 到 Trade 的执行适配；
 - 手续费、印花税、滑点；
 - MAE/MFE；
@@ -124,6 +133,8 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 - 不支持 T+1、涨停买不到、跌停卖不出、停牌、100 股整数手、最低佣金等 A 股约束；
 - 不支持 short、多腿、借券、保证金；
 - 不支持 walk-forward、样本内外拆分和参数稳健性验证。
+
+runtime 已移除 MA5/System B 专用准备分支；旧 System B 声明通过 indicators 兼容请求进入统一计算入口。
 
 ### 2.5 results / API / frontend
 
@@ -150,9 +161,9 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 |---|---|---|---|---|---|---|---|
 | 日线 OHLCV 与复权 | 已有行情、复权因子 | MA5 已用 | System B 已用 | 可回测 | 可展示交易 | 🟡 | 必须完善复权口径与运行集成 |
 | 估值、市值、换手、涨跌停、停牌 | 已有 | 少量使用 | 尚未形成通用策略 | 撮合未使用现实约束 | 未展示 | 🟡 | 必须接入策略和 A 股撮合 |
-| 通用时间序列指标 | 基础字段已有 | 仅 MA5 | 缺经典策略 | 准备路径硬编码 | 无目录 | ⛔ | 第一阶段必须完成 |
-| 趋势/动量/突破 | 数据足够 | 缺参数化指标 | 仅 System B | 动态回测可用 | 只读结果 | 🟡 | v1.0 必须覆盖 |
-| long-only 均值回归 | 数据足够 | 缺 z-score 等 | 未实现 | 动态回测可用 | 只读结果 | 🟡 | v1.0 必须覆盖 |
+| 通用时间序列指标 | 基础字段已有 | 参数化 SMA/收益/通道/rolling 统计已完成 | 四个经典策略已用 | 通用动态准备已完成 | API 目录未接入 | ✅ | 第一阶段已完成 |
+| 趋势/动量/突破 | 数据足够 | 参数化指标已完成 | 动量/双均线/Donchian 已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的策略能力已完成 |
+| long-only 均值回归 | 数据足够 | rolling z-score 已完成 | z-score 均值回归已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的代表策略已完成 |
 | 横截面排序与调仓 | 市值和行情部分已有 | 缺 rank/标准化 | 未实现 | 缺组合与目标权重 | 缺组合结果 | ⛔ | v1.0 必须完成 |
 | 多因子 long-only | 缺财务报表和历史行业 | 缺因子与中性化 | 未实现 | 缺组合调仓 | 缺归因 | ⛔ | v1.0 必须完成代表实现 |
 | 事件驱动 | 研报/调研已有，标准事件缺失 | 缺事件特征 | 未实现 | 缺事件时点规则 | 缺事件分析 | ⛔ | v1.0 必须打通一条链路 |
@@ -172,8 +183,8 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 
 | 策略族 | 当前基础 | 缺口 | v1.0 代表策略 |
 |---|---|---|---|
-| 时间序列趋势/动量 | 日线行情、动态状态机 | 参数化指标、经典策略 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
-| 均值回归 | 动态退出可用 | rolling z-score、持仓期限 | `rolling_zscore_mean_reversion_long` |
+| 时间序列趋势/动量 | 参数化指标、三个经典策略和动态 runtime 已完成 | 组合资金和现实成交约束 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
+| 均值回归 | rolling z-score 和 long-only 状态机已完成 | 组合资金、稳健性验证 | `rolling_zscore_mean_reversion` |
 | QRP 专属系统 | System B 基础状态与策略 | 判断层、目标池和完整规则尚未系统化 | `system_b_basic` 保留为架构验证策略 |
 | 横截面动量 | 行情、市值字段 | 排名、股票池、目标权重、调仓 | `cross_sectional_momentum_long_only` |
 | 多因子 | daily_basic 部分估值因子 | 财务数据、历史行业、中性化、组合 | `multifactor_long_only` |
@@ -186,7 +197,6 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 
 ### P0：产品闭环阻塞项
 
-- 通用参数化指标；
 - 真实组合资金曲线；
 - 横截面排序、目标权重和调仓；
 - A 股成交约束；

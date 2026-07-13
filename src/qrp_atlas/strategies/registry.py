@@ -61,10 +61,20 @@ class StrategyRegistry:
 
 
 def _build_default_registry() -> StrategyRegistry:
+    from .builtin.classic import (
+        DonchianBreakoutStrategy,
+        DualSmaTrendStrategy,
+        RollingZscoreMeanReversionStrategy,
+        TimeSeriesMomentumStrategy,
+    )
     from .builtin.system_b_basic import SystemBBasicStrategy
 
     registry = StrategyRegistry()
     registry.register(SystemBBasicStrategy())
+    registry.register(TimeSeriesMomentumStrategy())
+    registry.register(DualSmaTrendStrategy())
+    registry.register(DonchianBreakoutStrategy())
+    registry.register(RollingZscoreMeanReversionStrategy())
     return registry
 
 
