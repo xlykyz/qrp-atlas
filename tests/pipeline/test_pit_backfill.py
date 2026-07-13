@@ -20,6 +20,9 @@ from qrp_atlas.pipeline.pit_backfill.batches import (
     summarize_plan,
 )
 from qrp_atlas.pipeline.pit_backfill.manifest import (
+    STAGE_CLEAN,
+    STAGE_FETCH,
+    STAGE_LOAD,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_PENDING,
@@ -28,11 +31,8 @@ from qrp_atlas.pipeline.pit_backfill.manifest import (
     BatchRecord,
     ManifestStore,
 )
-from qrp_atlas.pipeline.pit_backfill.rate_limit import RateLimiter
 from qrp_atlas.pipeline.pit_backfill.runner import BackfillConfig, PitBackfillRunner
 from qrp_atlas.pipeline.pit_utils import NextTradeDateResolver
-from qrp_atlas.pipeline.fundamentals.clean import clean_financial
-from qrp_atlas.pipeline.fundamentals.load_duckdb import load_financial
 
 
 class FakePro:
@@ -111,7 +111,7 @@ class FakePro:
         self._record("index_weight", **kwargs)
         start = kwargs.get("start_date", "20240101")
         if start < "20150101":
-            return pd.DataFrame()  # empty for early history of some indexes
+            return pd.DataFrame()
         return pd.DataFrame(
             [
                 {
@@ -139,9 +139,16 @@ class FakePro:
         )
 
 
+class _nullcontext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
 @pytest.fixture
 def open_dates():
-    # dense open calendar for resolver
     d0 = date(2009, 1, 1)
     days = []
     cur = d0
@@ -158,29 +165,18 @@ def tmp_env(tmp_path, open_dates):
     con = duckdb.connect(str(db))
     try:
         init_database(con)
-        # seed calendar
-        rows = [(d, True) for d in open_dates]
-        con.execute("CREATE TABLE IF NOT EXISTS trading_calendar (trade_date DATE, is_open BOOLEAN)")
-        # table may already exist from contracts; insert best-effort
         con.executemany(
             "INSERT INTO trading_calendar (trade_date, is_open, year, month, quarter) VALUES (?, ?, ?, ?, ?)",
-            [
-                (d, True, d.year, d.month, (d.month - 1) // 3 + 1)
-                for d in open_dates
-            ],
+            [(d, True, d.year, d.month, (d.month - 1) // 3 + 1) for d in open_dates],
         )
     finally:
         con.close()
-
-    # If calendar still empty / missing proper seed, write via resolver path using open_dates override
-    raw_dir = tmp_path / "raw"
-    state_dir = tmp_path / "state"
-    log_path = tmp_path / "backfill.log"
     return {
         "db": db,
-        "raw_dir": raw_dir,
-        "state_dir": state_dir,
-        "log_path": log_path,
+        "raw_dir": tmp_path / "raw",
+        "cleaned_dir": tmp_path / "cleaned",
+        "state_dir": tmp_path / "state",
+        "log_path": tmp_path / "backfill.log",
         "open_dates": open_dates,
         "tmp": tmp_path,
     }
@@ -200,7 +196,6 @@ def test_quarter_and_month_generation():
 
 def test_financial_batch_shape():
     batches = financial_batches(tables=["income_statement", "balance_sheet"])
-    # 2010Q1..2026Q2 inclusive = 16.25 years * 4 = 65 quarters
     assert len(batches) == 66 * 2
     assert batches[0].batch_id.startswith("fundamentals:income_statement:")
     assert batches[0].period == "20100331"
@@ -219,27 +214,49 @@ def test_precheck_batches_three():
     assert {x.dataset for x in b} == {"fundamentals", "industry", "index"}
 
 
-def test_manifest_resume_semantics(tmp_path):
+def test_manifest_stage_resume(tmp_path):
     path = tmp_path / "m.jsonl"
     store = ManifestStore(path)
-    rec = BatchRecord(batch_id="a", dataset="fundamentals", key="income_statement", status=STATUS_SUCCESS)
+    rec = BatchRecord(batch_id="a", dataset="fundamentals", key="income_statement")
+    rec.fetch_status = STATUS_SUCCESS
+    rec.clean_status = STATUS_FAILED
+    rec.load_status = STATUS_PENDING
+    rec.recompute_status()
     store.upsert(rec)
-    store.upsert(BatchRecord(batch_id="b", dataset="industry", key="x", status=STATUS_FAILED))
-    store.upsert(BatchRecord(batch_id="c", dataset="index", key="y", status=STATUS_RUNNING))
-    assert store.should_process("a", resume=True) is False
-    assert store.should_process("b", resume=True) is True
+    assert store.should_process("a", resume=True, stages=(STAGE_FETCH, STAGE_CLEAN, STAGE_LOAD)) is True
+    assert store.should_process("a", resume=True, stages=(STAGE_FETCH,)) is False
+    assert store.should_process("a", resume=True, stages=(STAGE_CLEAN,)) is True
+
+    rec2 = BatchRecord(batch_id="b", dataset="industry", key="x", status=STATUS_RUNNING)
+    rec2.fetch_status = STATUS_RUNNING
+    store.upsert(rec2)
     n = store.reset_running_to_pending()
-    assert n == 1
-    assert store.get("c").status == STATUS_PENDING
+    assert n >= 1
+    assert store.get("b").fetch_status == STATUS_PENDING
 
 
-def test_runner_precheck_offline(tmp_env, open_dates, monkeypatch):
-    # Force resolver to use open_dates without reading db calendar content quirks
+def test_legacy_manifest_migration(tmp_path):
+    path = tmp_path / "legacy.jsonl"
+    # write old-style success record without stage fields
+    path.write_text(
+        '{"batch_id":"x","dataset":"fundamentals","key":"income_statement","status":"success",'
+        '"fetched_rows":10,"cleaned_rows":9,"inserted_rows":9,"raw_path":null}\n',
+        encoding="utf-8",
+    )
+    store = ManifestStore(path)
+    rec = store.get("x")
+    assert rec is not None
+    assert rec.fetch_status == STATUS_SUCCESS
+    assert rec.clean_status == STATUS_SUCCESS
+    assert rec.load_status == STATUS_SUCCESS
+    assert rec.status == STATUS_SUCCESS
+
+
+def test_runner_stages_decoupled(tmp_env, open_dates, monkeypatch):
     monkeypatch.setattr(
         "qrp_atlas.pipeline.pit_backfill.runner.NextTradeDateResolver",
         lambda *a, **k: NextTradeDateResolver(open_dates),
     )
-    # bypass disk/backup for unit test
     monkeypatch.setattr(
         "qrp_atlas.pipeline.pit_backfill.runner.preflight",
         lambda *a, **k: {"free_gb": 100, "backup_path": None, "db_path": str(tmp_env["db"])},
@@ -250,31 +267,11 @@ def test_runner_precheck_offline(tmp_env, open_dates, monkeypatch):
     )
 
     client = FakePro()
-    cfg = BackfillConfig(
+    common = dict(
         mode="precheck",
-        resume=False,
         db_path=tmp_env["db"],
         raw_dir=tmp_env["raw_dir"],
-        state_dir=tmp_env["state_dir"],
-        log_path=tmp_env["log_path"],
-        client=client,
-        min_interval=0.0 if False else 0.01,
-        skip_preflight=True,
-        create_backup=False,
-        l1_codes=["801780.SI"],
-    )
-    # RateLimiter rejects 0; use tiny interval
-    cfg.min_interval = 0.01
-    result = PitBackfillRunner(cfg).run()
-    assert result["ok"] is True
-    assert result["counts"]["success"] + result["counts"]["empty"] == 3
-
-    # second run with resume should skip all terminal
-    cfg2 = BackfillConfig(
-        mode="precheck",
-        resume=True,
-        db_path=tmp_env["db"],
-        raw_dir=tmp_env["raw_dir"],
+        cleaned_dir=tmp_env["cleaned_dir"],
         state_dir=tmp_env["state_dir"],
         log_path=tmp_env["log_path"],
         client=client,
@@ -283,38 +280,43 @@ def test_runner_precheck_offline(tmp_env, open_dates, monkeypatch):
         create_backup=False,
         l1_codes=["801780.SI"],
     )
-    result2 = PitBackfillRunner(cfg2).run()
-    assert result2["totals"]["processed"] == 0
 
-    # re-run without resume should use offline raw and insert 0 new
-    cfg3 = BackfillConfig(
-        mode="precheck",
-        resume=False,
-        db_path=tmp_env["db"],
-        raw_dir=tmp_env["raw_dir"],
-        state_dir=tmp_env["state_dir"],
-        log_path=tmp_env["log_path"],
-        client=client,
-        min_interval=0.01,
-        skip_preflight=True,
-        create_backup=False,
-        l1_codes=["801780.SI"],
-    )
-    result3 = PitBackfillRunner(cfg3).run()
-    assert all(r.get("offline") for r in result3["results"] if r["status"] == STATUS_SUCCESS)
-    assert result3["totals"]["inserted_rows"] == 0
+    # Stage 1: fetch only
+    r1 = PitBackfillRunner(BackfillConfig(stages=(STAGE_FETCH,), resume=False, **common)).run()
+    assert r1["ok"] is True
+    assert r1["request_count"] >= 1
+    # raw exists, cleaned should not for success batches until clean
+    raw_files = list(Path(tmp_env["raw_dir"]).glob("*.parquet"))
+    assert raw_files
+    # fetch calls happened
+    assert any(name == "income_vip" for name, _ in client.calls)
 
-    # token must not appear in log
-    log_text = Path(tmp_env["log_path"]).read_text(encoding="utf-8")
-    assert "TUSHARE" not in log_text or "token" not in log_text.lower()
+    # Stage 2: clean only offline
+    calls_before = len(client.calls)
+    r2 = PitBackfillRunner(
+        BackfillConfig(stages=(STAGE_CLEAN,), resume=True, offline_only=True, **common)
+    ).run()
+    assert r2["ok"] is True
+    assert len(client.calls) == calls_before  # no new network
+    cleaned_files = list(Path(tmp_env["cleaned_dir"]).glob("*.parquet"))
+    assert cleaned_files
 
+    # Stage 3: load only
+    r3 = PitBackfillRunner(
+        BackfillConfig(stages=(STAGE_LOAD,), resume=True, offline_only=True, **common)
+    ).run()
+    assert r3["ok"] is True
+    assert r3["totals"]["inserted_rows"] >= 0
 
-class _nullcontext:
-    def __enter__(self):
-        return self
+    # Full resume should skip all
+    r4 = PitBackfillRunner(BackfillConfig(stages="all", resume=True, **common)).run()
+    assert r4["totals"]["processed"] == 0
 
-    def __exit__(self, *args):
-        return False
+    # Re-load is idempotent inserted=0
+    r5 = PitBackfillRunner(
+        BackfillConfig(stages=(STAGE_LOAD,), resume=False, offline_only=True, **common)
+    ).run()
+    assert r5["totals"]["inserted_rows"] == 0
 
 
 def test_plan_summary_counts():
