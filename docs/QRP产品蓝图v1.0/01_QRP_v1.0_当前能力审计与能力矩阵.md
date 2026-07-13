@@ -104,10 +104,11 @@ contracts → indicators → strategies → backtest runtime → backtest engine
 - `all / any / not`；
 - 禁止 `eval` 和任意代码执行。
 
-当前限制：
+当前限制与进展：
 
 - long-only、逐标的状态机；
-- `score/weight` 尚未连接组合构建；
+- `score` 已用于超过组合容量时的候选排序，`weight` 已用于显式目标权重；策略决策可通过 `strategy_decisions_to_target_weights()` 转为组合目标权重；
+- 当前缺口是横截面策略本身，而不是目标权重适配；
 - 缺策略族、时间框架、适用资产等目录元数据；
 - 声明式策略尚不支持横截面排序、调仓、事件窗和多腿关系。
 
@@ -164,8 +165,8 @@ runtime 已移除 MA5/System B 专用准备分支；旧 System B 声明通过 in
 | 通用时间序列指标 | 基础字段已有 | 参数化 SMA/收益/通道/rolling 统计已完成 | 四个经典策略已用 | 通用动态准备已完成 | API 目录未接入 | ✅ | 第一阶段已完成 |
 | 趋势/动量/突破 | 数据足够 | 参数化指标已完成 | 动量/双均线/Donchian 已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的策略能力已完成 |
 | long-only 均值回归 | 数据足够 | rolling z-score 已完成 | z-score 均值回归已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的代表策略已完成 |
-| 横截面排序与调仓 | 市值和行情部分已有 | 缺 rank/标准化 | 未实现 | 缺组合与目标权重 | 缺组合结果 | ⛔ | v1.0 必须完成 |
-| 多因子 long-only | 缺财务报表和历史行业 | 缺因子与中性化 | 未实现 | 缺组合调仓 | 缺归因 | ⛔ | v1.0 必须完成代表实现 |
+| 横截面排序与调仓 | 市值和行情部分已有 | 缺 rank/标准化 | 未实现 | 组合账户、目标权重和调仓底座已完成 | 组合结果可读，缺横截面研究输出 | ⛔ | 仍缺 rank、股票池、Top N、调仓周期和横截面策略 |
+| 多因子 long-only | 缺财务报表和历史行业 | 缺因子与中性化 | 未实现 | 组合调仓底座已完成，缺多因子研究链路 | 缺归因 | ⛔ | v1.0 必须完成代表实现 |
 | 事件驱动 | 研报/调研已有，标准事件缺失 | 缺事件特征 | 未实现 | 缺事件时点规则 | 缺事件分析 | ⛔ | v1.0 必须打通一条链路 |
 | 残差/相对价值研究 | 指数已有，行业历史/期货缺 | 缺 beta/残差/半衰期 | 未实现 | 缺多腿/short | 缺价差结果 | ⛔ | v1.0 至少完成研究级残差策略 |
 | 完整配对多腿交易 | 数据不足 | 缺 | 缺 | 缺 short、多腿、保证金 | 缺 | ⛔ | 增强项，不阻塞 v1.0 |
@@ -183,11 +184,11 @@ runtime 已移除 MA5/System B 专用准备分支；旧 System B 声明通过 in
 
 | 策略族 | 当前基础 | 缺口 | v1.0 代表策略 |
 |---|---|---|---|
-| 时间序列趋势/动量 | 参数化指标、三个经典策略和动态 runtime 已完成 | 组合资金和现实成交约束 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
-| 均值回归 | rolling z-score 和 long-only 状态机已完成 | 组合资金、稳健性验证 | `rolling_zscore_mean_reversion` |
+| 时间序列趋势/动量 | 参数化指标、三个经典策略和动态 runtime 已完成；组合资金与 A 股现实成交底座已完成 | 稳健性验证、benchmark、样本外验证、参数敏感性、产品化配置入口 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
+| 均值回归 | rolling z-score 和 long-only 状态机已完成；可接入组合账户与现实撮合 | 稳健性验证、benchmark、样本外验证、参数敏感性、产品化配置入口 | `rolling_zscore_mean_reversion` |
 | QRP 专属系统 | System B 基础状态与策略 | 判断层、目标池和完整规则尚未系统化 | `system_b_basic` 保留为架构验证策略 |
-| 横截面动量 | 行情、市值字段 | 排名、股票池、目标权重、调仓 | `cross_sectional_momentum_long_only` |
-| 多因子 | daily_basic 部分估值因子 | 财务数据、历史行业、中性化、组合 | `multifactor_long_only` |
+| 横截面动量 | 行情、市值字段；目标权重与组合调仓底座已完成 | 排名、股票池、Top N、调仓周期和横截面策略 | `cross_sectional_momentum_long_only` |
+| 多因子 | daily_basic 部分估值因子；组合账户底座已完成 | 财务数据、历史行业、中性化、多因子横截面策略 | `multifactor_long_only` |
 | 事件驱动 | 研报和调研数据 | 标准事件表、时间语义、事件指标 | `event_drift_basic` |
 | 相对价值 | 股票和指数日线 | rolling beta、残差、关系稳定性 | `market_residual_mean_reversion` |
 | 机器学习 | 暂无统一训练管线 | 时间切分、特征快照、模型版本 | v1.0 不要求内置复杂模型 |
@@ -197,9 +198,15 @@ runtime 已移除 MA5/System B 专用准备分支；旧 System B 声明通过 in
 
 ### P0：产品闭环阻塞项
 
+已关闭：
+
 - 真实组合资金曲线；
-- 横截面排序、目标权重和调仓；
 - A 股成交约束；
+- 目标权重适配与组合调仓底座。
+
+仍未完成：
+
+- 横截面排序、股票池、Top N 与横截面策略；
 - 财务/行业/事件的 point-in-time 数据；
 - 策略运行 API 与前端配置；
 - 结果快照与复现。
