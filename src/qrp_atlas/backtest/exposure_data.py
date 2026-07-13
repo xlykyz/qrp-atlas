@@ -24,10 +24,8 @@ import pandas as pd
 from qrp_atlas.contracts import (
     ASSET_ID,
     CIRC_MV,
-    CLASSIFICATION_SYSTEM,
     FLOAT_CAP,
     INDUSTRY_CODE,
-    INDUSTRY_LEVEL,
     MARKET_CAP,
     TICKER,
     TOTAL_MV,
@@ -53,6 +51,7 @@ _EXPOSURE_COLUMNS: tuple[str, ...] = (
     INDUSTRY_CODE,
     LOG_MARKET_CAP,
 )
+_MISSING_INDUSTRY_LABELS = frozenset({"", "nan", "none", "<na>", "nat", "null"})
 
 
 class ExposurePanelError(ValueError):
@@ -68,6 +67,35 @@ def _as_finite_series(series: pd.Series) -> pd.Series:
     return values.where(values.map(_finite))
 
 
+def _is_missing_industry(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if value is pd.NA or value is pd.NaT:
+            return True
+    except Exception:
+        pass
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        return value.strip().lower() in _MISSING_INDUSTRY_LABELS
+    text = str(value).strip().lower()
+    return text in _MISSING_INDUSTRY_LABELS
+
+
+def _normalize_industry_code(value: object) -> object:
+    """Map missing tokens to None; never stringify pd.NA as ``<NA>``."""
+    if _is_missing_industry(value):
+        return None
+    label = str(value).strip()
+    if not label or label.lower() in _MISSING_INDUSTRY_LABELS:
+        return None
+    return label
+
+
 def _resolve_id_column(df: pd.DataFrame, *, label: str) -> str:
     if ASSET_ID in df.columns:
         return ASSET_ID
@@ -78,21 +106,28 @@ def _resolve_id_column(df: pd.DataFrame, *, label: str) -> str:
     )
 
 
-def _reject_duplicate_keys(df: pd.DataFrame, *, label: str) -> None:
+def _reject_duplicate_keys(
+    df: pd.DataFrame,
+    *,
+    label: str,
+    subset: Sequence[str] | None = None,
+) -> None:
     if df is None or df.empty:
         return
-    if TRADE_DATE not in df.columns or ASSET_ID not in df.columns:
+    keys = list(subset) if subset is not None else [TRADE_DATE, ASSET_ID]
+    missing = [c for c in keys if c not in df.columns]
+    if missing:
         return
-    duplicated = df.duplicated(subset=[TRADE_DATE, ASSET_ID], keep=False)
+    duplicated = df.duplicated(subset=list(keys), keep=False)
     if bool(duplicated.any()):
         sample = (
-            df.loc[duplicated, [TRADE_DATE, ASSET_ID]]
+            df.loc[duplicated, list(keys)]
             .drop_duplicates()
             .head(5)
             .to_dict(orient="records")
         )
         raise ExposurePanelError(
-            f"{label} contains duplicate (trade_date, asset_id) keys: {sample}"
+            f"{label} contains duplicate keys {list(keys)}: {sample}"
         )
 
 
@@ -110,10 +145,8 @@ def _normalize_size_panel(
             f"size_field must be one of {list(_SIZE_FIELDS)}; got {size_field!r}"
         )
     if size_panel.empty:
-        out = size_panel.copy()
-        if ASSET_ID not in out.columns and TICKER in out.columns:
-            out[ASSET_ID] = out[TICKER].astype(str)
-        return out
+        # Empty panel is valid: all sizes become missing later.
+        return pd.DataFrame(columns=[TRADE_DATE, ASSET_ID, size_field])
     if TRADE_DATE not in size_panel.columns:
         raise ExposurePanelError("size_panel missing required column: 'trade_date'")
     if size_field not in size_panel.columns:
@@ -130,29 +163,27 @@ def _normalize_prepared_industry_panel(industry_panel: pd.DataFrame) -> pd.DataF
     if not isinstance(industry_panel, pd.DataFrame):
         raise ExposurePanelError("industry_panel must be a pandas DataFrame")
     if industry_panel.empty:
-        out = industry_panel.copy()
-        if ASSET_ID not in out.columns and TICKER in out.columns:
-            out[ASSET_ID] = out[TICKER].astype(str)
-        return out
+        # Empty industry panel is valid: every asset gets missing industry_code.
+        return pd.DataFrame(columns=[TRADE_DATE, ASSET_ID, INDUSTRY_CODE])
     if TRADE_DATE not in industry_panel.columns:
         raise ExposurePanelError("industry_panel missing required column: 'trade_date'")
     if INDUSTRY_CODE not in industry_panel.columns:
-        raise ExposurePanelError("industry_panel missing required column: 'industry_code'")
+        raise ExposurePanelError(
+            "industry_panel missing required column: 'industry_code'"
+        )
     id_col = _resolve_id_column(industry_panel, label="industry_panel")
     out = industry_panel.copy()
     out[TRADE_DATE] = [normalize_trade_date(v) for v in out[TRADE_DATE].tolist()]
     out[ASSET_ID] = [normalize_asset_id(v) for v in out[id_col].tolist()]
-    out[INDUSTRY_CODE] = out[INDUSTRY_CODE].map(
-        lambda v: None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
-    )
-    out.loc[out[INDUSTRY_CODE] == "", INDUSTRY_CODE] = None
+    out[INDUSTRY_CODE] = [
+        _normalize_industry_code(v) for v in out[INDUSTRY_CODE].tolist()
+    ]
     _reject_duplicate_keys(out, label="industry_panel")
-    return out
+    return out[[TRADE_DATE, ASSET_ID, INDUSTRY_CODE]]
 
 
 def _empty_exposure_frame() -> pd.DataFrame:
     out = empty_cross_section_frame(extra_columns=[INDUSTRY_CODE, LOG_MARKET_CAP])
-    # ensure stable dtype for optional columns
     out[INDUSTRY_CODE] = pd.Series(dtype=object)
     out[LOG_MARKET_CAP] = pd.Series(dtype="float64")
     return out[list(_EXPOSURE_COLUMNS)]
@@ -198,12 +229,15 @@ def _load_industry_for_date(
     if INDUSTRY_CODE not in out.columns:
         raise ExposurePanelError("industry query result missing industry_code")
     out[ASSET_ID] = [normalize_asset_id(v) for v in out[ASSET_ID].tolist()]
-    out[INDUSTRY_CODE] = out[INDUSTRY_CODE].map(
-        lambda v: None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+    out[INDUSTRY_CODE] = [
+        _normalize_industry_code(v) for v in out[INDUSTRY_CODE].tolist()
+    ]
+    # Explicit failure: same asset must not map to multiple industry rows.
+    _reject_duplicate_keys(
+        out,
+        label="industry query result",
+        subset=[ASSET_ID],
     )
-    out.loc[out[INDUSTRY_CODE] == "", INDUSTRY_CODE] = None
-    # One membership per asset at the requested level (query already conflict-checks).
-    out = out.drop_duplicates(subset=[ASSET_ID], keep="last")
     return out[[ASSET_ID, INDUSTRY_CODE]]
 
 
@@ -234,15 +268,10 @@ def prepare_cross_section_exposure_panel(
     trade_date from ``size_panel`` and is transformed to natural log; non-positive
     or non-finite values become NaN without forward fill.
 
-    Args:
-        universe: historical stock pool with trade_date / asset_id.
-        size_panel: same-day market-cap source (market_cap / float_cap / total_mv / circ_mv).
-        industry_panel: optional pre-aligned industry codes keyed by trade_date + asset_id.
-        industry_query: injectable replacement for ``query_industry_as_of``.
-        classification_system: default ``sw2021``.
-        industry_level: default ``1`` (primary industry).
-        size_field: market-cap field name in ``size_panel``.
-        db_path / con: DuckDB source for industry query when panel is omitted.
+    Empty ``industry_panel`` (including ``pd.DataFrame()``) is valid and yields
+    missing ``industry_code`` for the full universe rather than raising.
+    Injected industry queries that return duplicate asset rows for one as-of
+    date raise :class:`ExposurePanelError` instead of silently ``keep="last"``.
     """
     uni = ensure_cross_section_frame(universe, enforce_primary_key=True)
     if uni.empty:
@@ -250,7 +279,11 @@ def prepare_cross_section_exposure_panel(
 
     if not isinstance(classification_system, str) or not classification_system.strip():
         raise ExposurePanelError("classification_system must be a non-empty string")
-    if not isinstance(industry_level, int) or isinstance(industry_level, bool) or industry_level < 1:
+    if (
+        not isinstance(industry_level, int)
+        or isinstance(industry_level, bool)
+        or industry_level < 1
+    ):
         raise ExposurePanelError(
             f"industry_level must be a positive integer; got {industry_level!r}"
         )
@@ -265,12 +298,14 @@ def prepare_cross_section_exposure_panel(
         assets = day_uni[ASSET_ID].tolist()
         piece = day_uni[[TRADE_DATE, ASSET_ID]].copy()
 
-        # Industry for this target date only.
         if prepared_industry is not None:
-            day_ind = prepared_industry.loc[
-                prepared_industry[TRADE_DATE] == normalize_trade_date(trade_date),
-                [ASSET_ID, INDUSTRY_CODE],
-            ]
+            if prepared_industry.empty:
+                day_ind = pd.DataFrame(columns=[ASSET_ID, INDUSTRY_CODE])
+            else:
+                day_ind = prepared_industry.loc[
+                    prepared_industry[TRADE_DATE] == normalize_trade_date(trade_date),
+                    [ASSET_ID, INDUSTRY_CODE],
+                ]
         else:
             day_ind = _load_industry_for_date(
                 as_of_date=trade_date,
@@ -284,8 +319,10 @@ def prepare_cross_section_exposure_panel(
         piece = piece.merge(day_ind, on=ASSET_ID, how="left")
         if INDUSTRY_CODE not in piece.columns:
             piece[INDUSTRY_CODE] = None
+        piece[INDUSTRY_CODE] = [
+            _normalize_industry_code(v) for v in piece[INDUSTRY_CODE].tolist()
+        ]
 
-        # Same-day market cap only (no cross-date fill).
         if sizes.empty:
             piece[LOG_MARKET_CAP] = math.nan
         else:
@@ -307,7 +344,9 @@ def prepare_cross_section_exposure_panel(
         feature_columns=[INDUSTRY_CODE, LOG_MARKET_CAP],
         enforce_primary_key=True,
     )
-    # Keep industry_code as object with missing as None/NA, log_market_cap finite-or-NaN.
+    out[INDUSTRY_CODE] = [
+        _normalize_industry_code(v) for v in out[INDUSTRY_CODE].tolist()
+    ]
     out[LOG_MARKET_CAP] = _as_finite_series(out[LOG_MARKET_CAP])
     return sort_cross_section_frame(out)[list(_EXPOSURE_COLUMNS)]
 

@@ -413,3 +413,192 @@ def test_indicators_module_has_no_backtest_import() -> None:
     assert "from qrp_atlas.backtest" not in source
     assert "import qrp_atlas.backtest" not in source
     assert "db_path" not in source
+
+def test_factor_specific_sample_industry_all_missing_elsewhere() -> None:
+    # Industry B has all-NaN momentum; industry A still residualizes.
+    factors = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "momentum": 1.0, "roe": 0.10},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "momentum": 3.0, "roe": 0.30},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "momentum": math.nan, "roe": 0.20},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "momentum": math.nan, "roe": 0.40},
+        ]
+    )
+    industry = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "industry_code": "IND_B"},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "industry_code": "IND_B"},
+        ]
+    )
+    size = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "market_cap": 100.0},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "market_cap": 200.0},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "market_cap": 300.0},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "market_cap": 400.0},
+        ]
+    )
+    uni = build_historical_universe(
+        ["2024-01-02"], asset_ids=["A1", "A2", "B1", "B2"], source="explicit"
+    )
+    exp = prepare_cross_section_exposure_panel(uni, size_panel=size, industry_panel=industry)
+    out = neutralize_factor_frame(
+        factors,
+        exposure_panel=exp,
+        factor_columns=["momentum", "roe"],
+        categorical_exposures=["industry_code"],
+        numeric_exposures=(),
+    )
+    by = out.set_index("asset_id")
+    # momentum only has IND_A usable -> demean within A
+    assert by.loc["A1", "momentum_neutral"] == pytest.approx(-1.0)
+    assert by.loc["A2", "momentum_neutral"] == pytest.approx(1.0)
+    assert math.isnan(by.loc["B1", "momentum_neutral"])
+    assert math.isnan(by.loc["B2", "momentum_neutral"])
+    # roe uses both industries; residuals finite for all four
+    assert by["roe_neutral"].notna().all()
+    # industry means near zero for roe
+    roe = out.merge(industry, on=["asset_id"])
+    for _, group in roe.groupby("industry_code"):
+        assert group["roe_neutral"].mean() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_two_factors_independent_missing_patterns() -> None:
+    factors = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "f1": 1.0, "f2": math.nan},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "f1": 3.0, "f2": 30.0},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "f1": math.nan, "f2": 10.0},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "f1": math.nan, "f2": 50.0},
+        ]
+    )
+    industry = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "industry_code": "IND_B"},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "industry_code": "IND_B"},
+        ]
+    )
+    size = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "market_cap": 100.0},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "market_cap": 200.0},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "market_cap": 300.0},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "market_cap": 400.0},
+        ]
+    )
+    uni = build_historical_universe(
+        ["2024-01-02"], asset_ids=["A1", "A2", "B1", "B2"], source="explicit"
+    )
+    exp = prepare_cross_section_exposure_panel(uni, size_panel=size, industry_panel=industry)
+    out = neutralize_factor_frame(
+        factors,
+        exposure_panel=exp,
+        factor_columns=["f1", "f2"],
+        categorical_exposures=["industry_code"],
+        numeric_exposures=(),
+    )
+    by = out.set_index("asset_id")
+    assert by.loc["A1", "f1_neutral"] == pytest.approx(-1.0)
+    assert by.loc["A2", "f1_neutral"] == pytest.approx(1.0)
+    assert math.isnan(by.loc["B1", "f1_neutral"])
+    assert math.isnan(by.loc["A1", "f2_neutral"])
+    # f2 sample: A2 (IND_A) + B1/B2 (IND_B). Design uses those categories only.
+    assert math.isfinite(by.loc["A2", "f2_neutral"])
+    assert math.isfinite(by.loc["B1", "f2_neutral"])
+    assert math.isfinite(by.loc["B2", "f2_neutral"])
+
+
+def test_pd_na_industry_not_string_category() -> None:
+    factors = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "momentum": 1.0},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "momentum": 3.0},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "momentum": 2.0},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "momentum": 4.0},
+        ]
+    )
+    industry = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "industry_code": "IND_A"},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "industry_code": pd.NA},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "industry_code": "  "},
+        ]
+    )
+    size = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A1", "market_cap": 100.0},
+            {"trade_date": "2024-01-02", "asset_id": "A2", "market_cap": 200.0},
+            {"trade_date": "2024-01-02", "asset_id": "B1", "market_cap": 300.0},
+            {"trade_date": "2024-01-02", "asset_id": "B2", "market_cap": 400.0},
+        ]
+    )
+    uni = build_historical_universe(
+        ["2024-01-02"], asset_ids=["A1", "A2", "B1", "B2"], source="explicit"
+    )
+    exp = prepare_cross_section_exposure_panel(uni, size_panel=size, industry_panel=industry)
+    # No stringified NA category in exposure panel.
+    assert exp["industry_code"].tolist().count("<NA>") == 0
+    assert exp.loc[exp["asset_id"] == "B1", "industry_code"].isna().all() or (
+        exp.loc[exp["asset_id"] == "B1", "industry_code"].tolist() == [None]
+    )
+    out = neutralize_factor_frame(
+        factors,
+        exposure_panel=exp,
+        factor_columns=["momentum"],
+        categorical_exposures=["industry_code"],
+        numeric_exposures=(),
+    )
+    by = out.set_index("asset_id")
+    assert by.loc["A1", "momentum_neutral"] == pytest.approx(-1.0)
+    assert by.loc["A2", "momentum_neutral"] == pytest.approx(1.0)
+    assert math.isnan(by.loc["B1", "momentum_neutral"])
+    assert math.isnan(by.loc["B2", "momentum_neutral"])
+
+
+def test_output_name_conflicts_with_exposure_and_overlap() -> None:
+    with pytest.raises(NeutralizationError, match="collides|reserved"):
+        neutralize_factor_frame(
+            _factors(),
+            exposure_panel=_exposure(),
+            factor_columns=["momentum"],
+            categorical_exposures=["industry_code"],
+            numeric_exposures=(),
+            output_columns={"momentum": "industry_code"},
+        )
+    with pytest.raises(NeutralizationError, match="collides|reserved"):
+        neutralize_factor_frame(
+            _factors(),
+            exposure_panel=_exposure(),
+            factor_columns=["momentum"],
+            categorical_exposures=["industry_code"],
+            numeric_exposures=["log_market_cap"],
+            output_columns={"momentum": "log_market_cap"},
+        )
+    with pytest.raises(NeutralizationError, match="both categorical and numeric"):
+        neutralize_factor_frame(
+            _factors(),
+            exposure_panel=_exposure(),
+            factor_columns=["momentum"],
+            categorical_exposures=["log_market_cap"],
+            numeric_exposures=["log_market_cap"],
+        )
+
+
+def test_suffix_generates_default_output_names() -> None:
+    from qrp_atlas.indicators import neutralize_cross_section
+
+    out = neutralize_cross_section(
+        _factors(),
+        _exposure(),
+        factor_columns=["momentum"],
+        categorical_exposures=["industry_code"],
+        numeric_exposures=(),
+        suffix="resid",
+    )
+    assert "momentum_resid" in out.columns
+    assert "momentum_neutral" not in out.columns
