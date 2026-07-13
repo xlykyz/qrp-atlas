@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
@@ -35,12 +36,31 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+class _ManifestFileLock:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._fd = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = open(self.path, "a+", encoding="utf-8")
+        fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fd.close()
+            self._fd = None
+
+
 @dataclass
 class BatchRecord:
     batch_id: str
     dataset: str
     key: str
-    status: str = STATUS_PENDING  # aggregate batch status
+    status: str = STATUS_PENDING
     period: str | None = None
     start_date: str | None = None
     end_date: str | None = None
@@ -53,7 +73,6 @@ class BatchRecord:
     error: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
-    # Decoupled stage fields
     fetch_status: str = STATUS_PENDING
     clean_status: str = STATUS_PENDING
     load_status: str = STATUS_PENDING
@@ -91,47 +110,30 @@ class BatchRecord:
         )
 
     def migrate_legacy(self) -> None:
-        """Infer stage statuses from older single-status manifests."""
-        # If stage fields already populated beyond defaults, keep them.
-        stage_touched = any(
-            getattr(self, f"{s}_status") != STATUS_PENDING for s in ALL_STAGES
-        )
+        stage_touched = any(getattr(self, f"{s}_status") != STATUS_PENDING for s in ALL_STAGES)
         if stage_touched:
             self.recompute_status()
             return
 
         if self.status in TERMINAL_OK:
-            # Legacy completed batch: all stages done equivalently.
-            for s in ALL_STAGES:
-                setattr(self, f"{s}_status", self.status if s != STAGE_LOAD else (
-                    STATUS_EMPTY if self.status == STATUS_EMPTY else STATUS_SUCCESS
-                ))
             if self.status == STATUS_EMPTY:
                 self.fetch_status = STATUS_EMPTY
                 self.clean_status = STATUS_EMPTY
                 self.load_status = STATUS_EMPTY
             else:
-                # success with inserted=0 still means load succeeded (idempotent)
                 self.fetch_status = STATUS_SUCCESS if (self.fetched_rows or 0) > 0 else STATUS_EMPTY
-                self.clean_status = STATUS_SUCCESS if (self.cleaned_rows or 0) > 0 else (
-                    STATUS_EMPTY if self.fetch_status == STATUS_EMPTY else STATUS_SUCCESS
-                )
+                if (self.cleaned_rows or 0) > 0:
+                    self.clean_status = STATUS_SUCCESS
+                else:
+                    self.clean_status = STATUS_EMPTY if self.fetch_status == STATUS_EMPTY else STATUS_SUCCESS
                 self.load_status = STATUS_SUCCESS
-            if self.raw_path and self.fetch_status == STATUS_PENDING:
-                self.fetch_status = STATUS_SUCCESS if (self.fetched_rows or 0) > 0 else STATUS_EMPTY
-        elif self.status == STATUS_FAILED:
-            # Unknown which stage failed; leave stages pending so resume re-evaluates by artifacts.
-            pass
         elif self.status == STATUS_RUNNING:
-            # Interrupted mid-batch.
             self.status = STATUS_PENDING
 
-        # Artifact-based inference for partial progress.
         if self.raw_path and Path(self.raw_path).exists() and self.fetch_status == STATUS_PENDING:
             self.fetch_status = STATUS_SUCCESS if (self.fetched_rows or 0) > 0 else STATUS_EMPTY
         if self.cleaned_path and Path(self.cleaned_path).exists() and self.clean_status == STATUS_PENDING:
             self.clean_status = STATUS_SUCCESS if (self.cleaned_rows or 0) > 0 else STATUS_EMPTY
-
         self.recompute_status()
 
     def recompute_status(self) -> str:
@@ -141,11 +143,7 @@ class BatchRecord:
         elif any(s == STATUS_RUNNING for s in stages):
             self.status = STATUS_RUNNING
         elif all(s in TERMINAL_OK for s in stages):
-            # Aggregate empty only when fetch is empty (nothing to clean/load)
-            if self.fetch_status == STATUS_EMPTY:
-                self.status = STATUS_EMPTY
-            else:
-                self.status = STATUS_SUCCESS
+            self.status = STATUS_EMPTY if self.fetch_status == STATUS_EMPTY else STATUS_SUCCESS
         else:
             self.status = STATUS_PENDING
         return self.status
@@ -165,30 +163,78 @@ class BatchRecord:
         setattr(self, f"{stage}_error", error)
         if finished:
             setattr(self, f"{stage}_finished_at", utc_now_iso())
-        # Keep aggregate error as last non-empty stage error
         errs = [self.fetch_error, self.clean_error, self.load_error]
         self.error = next((e for e in reversed(errs) if e), None)
         self.recompute_status()
 
 
+def _stage_rank(status: str) -> int:
+    return {
+        STATUS_PENDING: 0,
+        STATUS_RUNNING: 1,
+        STATUS_FAILED: 2,
+        STATUS_EMPTY: 3,
+        STATUS_SUCCESS: 3,
+    }.get(status, 0)
+
+
+def _merge_records(existing: BatchRecord, incoming: BatchRecord) -> BatchRecord:
+    """Merge multi-process updates without clobbering terminal stage progress."""
+    out = BatchRecord.from_dict(existing.to_dict())
+    for f in ("period", "start_date", "end_date", "raw_path", "cleaned_path", "meta"):
+        iv = getattr(incoming, f)
+        if iv:
+            setattr(out, f, iv)
+    out.attempts = max(int(existing.attempts or 0), int(incoming.attempts or 0))
+    out.fetched_rows = max(int(existing.fetched_rows or 0), int(incoming.fetched_rows or 0))
+    out.cleaned_rows = max(int(existing.cleaned_rows or 0), int(incoming.cleaned_rows or 0))
+    out.inserted_rows = max(int(existing.inserted_rows or 0), int(incoming.inserted_rows or 0))
+
+    for stage in ALL_STAGES:
+        es = getattr(existing, f"{stage}_status")
+        ins = getattr(incoming, f"{stage}_status")
+        if es in TERMINAL_OK and ins not in TERMINAL_OK:
+            # keep terminal success/empty over pending/running/failed false-negatives only if not intentional fail after success? keep terminal
+            continue
+        if _stage_rank(ins) > _stage_rank(es) or (ins in TERMINAL_OK and es not in TERMINAL_OK):
+            setattr(out, f"{stage}_status", ins)
+            setattr(out, f"{stage}_error", getattr(incoming, f"{stage}_error"))
+            fin = getattr(incoming, f"{stage}_finished_at") or getattr(existing, f"{stage}_finished_at")
+            setattr(out, f"{stage}_finished_at", fin)
+        elif ins == es and ins in TERMINAL_OK:
+            fin = getattr(incoming, f"{stage}_finished_at") or getattr(existing, f"{stage}_finished_at")
+            setattr(out, f"{stage}_finished_at", fin)
+
+    if incoming.started_at and not out.started_at:
+        out.started_at = incoming.started_at
+    if incoming.finished_at:
+        out.finished_at = incoming.finished_at
+    out.error = incoming.error or existing.error
+    out.recompute_status()
+    return out
+
+
 class ManifestStore:
-    """Atomic JSONL manifest keyed by batch_id."""
+    """Atomic JSONL manifest keyed by batch_id with cross-process locking."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path = Path(str(self.path) + ".lock")
         self._records: dict[str, BatchRecord] = {}
-        if self.path.exists():
+        with _ManifestFileLock(self._lock_path):
             self._load()
 
     def _load(self) -> None:
+        self._records = {}
+        if not self.path.exists():
+            return
         with self.path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
-                data = json.loads(line)
-                rec = BatchRecord.from_dict(data)
+                rec = BatchRecord.from_dict(json.loads(line))
                 self._records[rec.batch_id] = rec
 
     def _flush(self) -> None:
@@ -213,63 +259,82 @@ class ManifestStore:
             raise
 
     def ensure_batches(self, batches: Iterable) -> None:
-        changed = False
-        for batch in batches:
-            if batch.batch_id not in self._records:
-                self._records[batch.batch_id] = BatchRecord.from_batch(batch)
-                changed = True
-        if changed:
-            self._flush()
-
-    def get(self, batch_id: str) -> BatchRecord | None:
-        return self._records.get(batch_id)
-
-    def upsert(self, record: BatchRecord) -> None:
-        record.recompute_status()
-        self._records[record.batch_id] = record
-        self._flush()
-
-    def update(self, batch_id: str, **fields: Any) -> BatchRecord:
-        rec = self._records[batch_id]
-        for k, v in fields.items():
-            if not hasattr(rec, k):
-                raise AttributeError(k)
-            setattr(rec, k, v)
-        rec.recompute_status()
-        self._flush()
-        return rec
-
-    def save(self, rec: BatchRecord) -> BatchRecord:
-        rec.recompute_status()
-        self._records[rec.batch_id] = rec
-        self._flush()
-        return rec
-
-    def reset_running_to_pending(self) -> int:
-        n = 0
-        for rec in self._records.values():
+        with _ManifestFileLock(self._lock_path):
+            self._load()
             changed = False
-            if rec.status == STATUS_RUNNING:
-                rec.status = STATUS_PENDING
-                changed = True
-            for stage in ALL_STAGES:
-                if rec.stage_status(stage) == STATUS_RUNNING:
-                    setattr(rec, f"{stage}_status", STATUS_PENDING)
-                    prev = getattr(rec, f"{stage}_error") or ""
-                    setattr(
-                        rec,
-                        f"{stage}_error",
-                        (prev + " | reset_running_on_resume").strip(" |"),
-                    )
+            for batch in batches:
+                if batch.batch_id not in self._records:
+                    self._records[batch.batch_id] = BatchRecord.from_batch(batch)
                     changed = True
             if changed:
-                note = rec.error or ""
-                rec.error = (note + " | reset_running_on_resume").strip(" |")
-                rec.recompute_status()
-                n += 1
-        if n:
+                self._flush()
+
+    def get(self, batch_id: str) -> BatchRecord | None:
+        # lightweight in-memory read; callers that need freshness should save/reload
+        return self._records.get(batch_id)
+
+    def reload(self) -> None:
+        with _ManifestFileLock(self._lock_path):
+            self._load()
+
+    def upsert(self, record: BatchRecord) -> None:
+        with _ManifestFileLock(self._lock_path):
+            self._load()
+            record.recompute_status()
+            self._records[record.batch_id] = record
             self._flush()
-        return n
+
+    def update(self, batch_id: str, **fields: Any) -> BatchRecord:
+        with _ManifestFileLock(self._lock_path):
+            self._load()
+            rec = self._records[batch_id]
+            for k, v in fields.items():
+                if not hasattr(rec, k):
+                    raise AttributeError(k)
+                setattr(rec, k, v)
+            rec.recompute_status()
+            self._records[batch_id] = rec
+            self._flush()
+            return rec
+
+    def save(self, rec: BatchRecord) -> BatchRecord:
+        with _ManifestFileLock(self._lock_path):
+            self._load()
+            existing = self._records.get(rec.batch_id)
+            if existing is not None:
+                rec = _merge_records(existing, rec)
+            rec.recompute_status()
+            self._records[rec.batch_id] = rec
+            self._flush()
+            return rec
+
+    def reset_running_to_pending(self) -> int:
+        with _ManifestFileLock(self._lock_path):
+            self._load()
+            n = 0
+            for rec in self._records.values():
+                changed = False
+                if rec.status == STATUS_RUNNING:
+                    rec.status = STATUS_PENDING
+                    changed = True
+                for stage in ALL_STAGES:
+                    if rec.stage_status(stage) == STATUS_RUNNING:
+                        setattr(rec, f"{stage}_status", STATUS_PENDING)
+                        prev = getattr(rec, f"{stage}_error") or ""
+                        setattr(
+                            rec,
+                            f"{stage}_error",
+                            (prev + " | reset_running_on_resume").strip(" |"),
+                        )
+                        changed = True
+                if changed:
+                    note = rec.error or ""
+                    rec.error = (note + " | reset_running_on_resume").strip(" |")
+                    rec.recompute_status()
+                    n += 1
+            if n:
+                self._flush()
+            return n
 
     def iter_records(self) -> Iterator[BatchRecord]:
         yield from self._records.values()
@@ -298,7 +363,6 @@ class ManifestStore:
             return True
         if not resume:
             return True
-        # Process if any requested stage is not terminal-ok.
         for stage in stages:
             if rec.stage_status(stage) not in TERMINAL_OK:
                 return True

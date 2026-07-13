@@ -1,0 +1,18 @@
+[Unit]
+Description=QRP PIT backfill 20260714 FETCH only (network)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/claire/projects/qrp-atlas
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/claire/projects/qrp-atlas/.env
+ExecStart=/home/claire/projects/qrp-atlas/.venv/bin/python -m qrp_atlas.pipeline.pit_backfill --mode full --resume --stages fetch --run-tag 20260714 --no-backup
+RemainAfterExit=yes
+StandardOutput=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.fetch.out
+StandardError=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.fetch.err
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=default.target

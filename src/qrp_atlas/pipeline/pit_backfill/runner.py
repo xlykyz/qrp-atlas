@@ -525,17 +525,34 @@ class PitBackfillRunner:
 
         # CLEAN
         if self._needs_stage(rec, STAGE_CLEAN):
-            # require fetch ok
+            # require fetch ok; if not ready skip (fetch may still be in another process)
             if rec.fetch_status not in TERMINAL_OK:
-                rec.set_stage(
-                    STAGE_CLEAN,
-                    STATUS_FAILED,
-                    error=f"fetch not ready: {rec.fetch_status}",
-                    finished=True,
-                )
-                self.manifest.save(rec)
-            else:
-                rec = self._run_clean(batch, rec)
+                raw_p = Path(rec.raw_path) if rec.raw_path else raw_file_path(self.raw_dir, batch.batch_id)
+                if raw_p.exists():
+                    try:
+                        n = len(load_parquet(raw_p))
+                        rec.fetched_rows = n
+                        rec.set_stage(STAGE_FETCH, STATUS_EMPTY if n == 0 else STATUS_SUCCESS, finished=True)
+                        self.manifest.save(rec)
+                    except Exception:
+                        self.logger.info(
+                            "batch=%s skip CLEAN; fetch not ready (%s)",
+                            batch.batch_id,
+                            rec.fetch_status,
+                        )
+                        rec.finished_at = utc_now_iso()
+                        self.manifest.save(rec)
+                        return self._result_from_rec(rec)
+                else:
+                    self.logger.info(
+                        "batch=%s skip CLEAN; fetch not ready (%s)",
+                        batch.batch_id,
+                        rec.fetch_status,
+                    )
+                    rec.finished_at = utc_now_iso()
+                    self.manifest.save(rec)
+                    return self._result_from_rec(rec)
+            rec = self._run_clean(batch, rec)
             if rec.clean_status == STATUS_FAILED:
                 rec.finished_at = utc_now_iso()
                 self.manifest.save(rec)
@@ -546,15 +563,32 @@ class PitBackfillRunner:
         # LOAD
         if self._needs_stage(rec, STAGE_LOAD):
             if rec.clean_status not in TERMINAL_OK:
-                rec.set_stage(
-                    STAGE_LOAD,
-                    STATUS_FAILED,
-                    error=f"clean not ready: {rec.clean_status}",
-                    finished=True,
-                )
-                self.manifest.save(rec)
-            else:
-                rec = self._run_load(batch, rec)
+                cleaned_p = Path(rec.cleaned_path) if rec.cleaned_path else cleaned_file_path(self.cleaned_dir, batch.batch_id)
+                if cleaned_p.exists():
+                    try:
+                        n = len(load_parquet(cleaned_p))
+                        rec.cleaned_rows = n
+                        rec.set_stage(STAGE_CLEAN, STATUS_EMPTY if n == 0 else STATUS_SUCCESS, finished=True)
+                        self.manifest.save(rec)
+                    except Exception:
+                        self.logger.info(
+                            "batch=%s skip LOAD; clean not ready (%s)",
+                            batch.batch_id,
+                            rec.clean_status,
+                        )
+                        rec.finished_at = utc_now_iso()
+                        self.manifest.save(rec)
+                        return self._result_from_rec(rec)
+                else:
+                    self.logger.info(
+                        "batch=%s skip LOAD; clean not ready (%s)",
+                        batch.batch_id,
+                        rec.clean_status,
+                    )
+                    rec.finished_at = utc_now_iso()
+                    self.manifest.save(rec)
+                    return self._result_from_rec(rec)
+            rec = self._run_load(batch, rec)
         elif STAGE_LOAD in self.stages:
             self.logger.info("batch=%s skip LOAD status=%s", batch.batch_id, rec.load_status)
 
