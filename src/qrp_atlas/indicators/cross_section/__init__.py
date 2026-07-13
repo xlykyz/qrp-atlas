@@ -2,8 +2,9 @@
 
 This package sits under ``qrp_atlas.indicators`` and provides reusable
 cross-sectional transforms, historical universe helpers, and formal raw-factor
-generation (task 04-B). It deliberately stops short of neutralization, Top-N
-selection, multifactor combination and strategy logic (tasks 04-C through 04-E).
+generation (task 04-B) and industry/size neutralization (task 04-C). It
+deliberately stops short of Top-N selection, multifactor combination and
+strategy logic (tasks 04-D through 04-E).
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ from qrp_atlas.indicators.cross_section.universe import (
     HistoricalUniverseSource,
     build_historical_universe,
     resolve_historical_universe,
+)
+from qrp_atlas.indicators.cross_section.neutralize import (
+    NeutralizationError,
+    neutralize_cross_section,
+    neutralize_factor_frame,
 )
 from qrp_atlas.indicators.cross_section.factors import (
     FACTOR_DEFINITIONS,
@@ -80,6 +86,9 @@ __all__ = [
     "generate_factor_frame",
     "get_factor_definition",
     "list_factors",
+    "NeutralizationError",
+    "neutralize_cross_section",
+    "neutralize_factor_frame",
     "normalize_asset_id",
     "normalize_feature_columns",
     "normalize_trade_date",
