@@ -11,6 +11,7 @@ from .models import (
     Skipped,
     Trade,
 )
+from .factor_data import prepare_financial_factor_panel
 from .point_in_time import select_latest_available_records
 from .pit_queries import (
     IndustryMembershipConflictError,
@@ -56,6 +57,7 @@ __all__ = [
     "StrategyPortfolioBacktestRun",
     "Trade",
     "IndustryMembershipConflictError",
+    "prepare_financial_factor_panel",
     "prepare_strategy_data",
     "query_financial_as_of",
     "query_index_components_as_of",
