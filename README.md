@@ -46,7 +46,7 @@ contracts → indicators → strategies
 | --- | --- |
 | `contracts/` | 标准字段、DuckDB 表结构、主键与可空性、数据源映射、ticker/日期/市场规则、DataFrame 对齐与校验。 |
 | `pipeline/` | 日线行情、估值与市值、复权因子、指数、涨跌停、停复牌、研报、机构调研等数据的正式入库链路。 |
-| `indicators/` | MA5、收盘价相对 MA5 状态、连续站上/跌破天数、System B 基础状态、市场宽度与市场风险指标。 |
+| `indicators/` | MA5、收盘价相对 MA5 状态、连续站上/跌破天数、System B 基础状态、市场宽度与市场风险、横截面算子与正式因子生成。 |
 | `strategies/` | 统一策略模型、参数校验、版本化注册表、Python 内置策略、受限声明式策略，以及 `system_b_basic@1.0.0`。 |
 | `backtest/` | 通用信号回测、策略运行适配、固定持有与动态退出、手续费/印花税/滑点、MAE/MFE、交易与 skipped 汇总。 |
 | `backtest/results/` | 回测结果文件的加载、查询与响应模型。 |
