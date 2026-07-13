@@ -22,6 +22,11 @@ from .models import (
     REASON_SUSPENDED,
     REASON_T_PLUS_ONE_BLOCKED,
 )
+from .strategy import (
+    StrategyPortfolioBacktestRun,
+    run_strategy_portfolio_backtest,
+    strategy_decisions_to_target_weights,
+)
 from .validators import validate_portfolio_config, validate_target_weights
 
 __all__ = [
@@ -45,6 +50,9 @@ __all__ = [
     "REASON_NO_PRICE_DATA",
     "REASON_SUSPENDED",
     "REASON_T_PLUS_ONE_BLOCKED",
+    "StrategyPortfolioBacktestRun",
+    "run_strategy_portfolio_backtest",
+    "strategy_decisions_to_target_weights",
     "validate_portfolio_config",
     "validate_target_weights",
 ]
