@@ -14,6 +14,8 @@ Rules shared by operators and the pipeline entry point:
 - empty inputs return empty frames with stable columns;
 - outputs have deterministic sort order (trade_date, asset_id);
 - trade_date is normalized to timezone-naive midnight timestamps;
+- timezone-aware inputs keep their local wall calendar day (no UTC shift);
+- multi-date inputs are de-duplicated after normalization, preserving first-seen order;
 - (trade_date, asset_id) is a unique non-null primary key.
 """
 
@@ -50,6 +52,12 @@ def normalize_trade_date(value: Any) -> pd.Timestamp:
 
     Accepts str / date / datetime / Timestamp (and other pandas-parseable
     scalars). Unparseable or empty values raise ``CrossSectionFrameError``.
+
+    ``trade_date`` is a trading-day label, not a UTC event timestamp. When the
+    input is timezone-aware, the timezone is stripped while preserving the local
+    wall-clock calendar date, then normalized to midnight. It is never converted
+    through UTC first (which would shift Asia/Shanghai midnight to the previous
+    day).
     """
     if value is None:
         raise CrossSectionFrameError("trade_date must be non-empty and parseable")
@@ -77,8 +85,9 @@ def normalize_trade_date(value: Any) -> pd.Timestamp:
             f"trade_date must be non-empty and parseable: {value!r}"
         )
 
+    # Keep the local trading-day label; do not convert via UTC.
     if ts.tz is not None:
-        ts = ts.tz_convert("UTC").tz_localize(None)
+        ts = ts.tz_localize(None)
     return ts.normalize()
 
 
@@ -90,19 +99,30 @@ def normalize_trade_dates(trade_dates: Sequence[Any] | Any) -> list[pd.Timestamp
     - a sequence of date-like values
     - an empty sequence
 
-    Strings are never iterated character-by-character.
+    Strings are never iterated character-by-character. After normalization,
+    duplicate calendar days are removed deterministically while preserving
+    first-seen order.
     """
     if trade_dates is None:
         return []
     if _is_scalar_date_like(trade_dates):
-        return [normalize_trade_date(trade_dates)]
-    if isinstance(trade_dates, pd.Series):
+        values = [trade_dates]
+    elif isinstance(trade_dates, pd.Series):
         values = trade_dates.tolist()
     elif isinstance(trade_dates, Sequence) and not isinstance(trade_dates, (str, bytes)):
         values = list(trade_dates)
     else:
-        return [normalize_trade_date(trade_dates)]
-    return [normalize_trade_date(value) for value in values]
+        values = [trade_dates]
+
+    ordered: list[pd.Timestamp] = []
+    seen: set[pd.Timestamp] = set()
+    for value in values:
+        day = normalize_trade_date(value)
+        if day in seen:
+            continue
+        seen.add(day)
+        ordered.append(day)
+    return ordered
 
 
 def normalize_trade_date_series(series: pd.Series) -> pd.Series:
