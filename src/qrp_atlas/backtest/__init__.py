@@ -12,6 +12,13 @@ from .models import (
     Trade,
 )
 from .point_in_time import select_latest_available_records
+from .pit_queries import (
+    IndustryMembershipConflictError,
+    query_financial_as_of,
+    query_index_components_as_of,
+    query_industry_as_of,
+    summarize_index_components,
+)
 from .portfolio import (
     PortfolioBacktestConfig,
     PortfolioBacktestEngine,
@@ -48,9 +55,14 @@ __all__ = [
     "StrategyBacktestRuntime",
     "StrategyPortfolioBacktestRun",
     "Trade",
+    "IndustryMembershipConflictError",
     "prepare_strategy_data",
+    "query_financial_as_of",
+    "query_index_components_as_of",
+    "query_industry_as_of",
     "run_strategy_backtest",
     "run_strategy_portfolio_backtest",
     "select_latest_available_records",
+    "summarize_index_components",
     "strategy_decisions_to_target_weights",
 ]
