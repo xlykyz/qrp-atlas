@@ -76,35 +76,35 @@ ticker + report_period
 
 结果保留各表实际存在的审计字段（不伪造缺失列）。
 
+空 `tickers=[]` 表示无匹配，返回空结果，不会查询全部股票。
+
 ## 4. 行业归属查询
 
 表：`industry_membership_history`
 
-区间语义（半开）：
+### 执行顺序（append-only 安全）
 
-```text
-effective_from <= as_of_date
-AND (effective_to IS NULL OR as_of_date < effective_to)
-AND available_trade_date <= as_of_date
-```
+1. SQL 仅过滤：
+   - `available_trade_date <= as_of_date`
+   - 调用方明确传入的 `asset_ids` / `classification_system` / `industry_level`
+   - **不**在版本选择前过滤 `effective_from` / `effective_to`
+2. 用 `select_latest_available_records` 解析同一成员身份的最新可用版本：
+   ```text
+   asset_id + classification_system + industry_level + industry_code
+   ```
+3. 再对选中版本应用半开区间：
+   ```text
+   effective_from <= as_of_date
+   AND (effective_to IS NULL OR as_of_date < effective_to)
+   ```
+4. 同层多码冲突检测：
+   ```text
+   asset_id + classification_system + industry_level
+   ```
+   同一 as_of 只能有一个有效行业；否则抛出 `IndustryMembershipConflictError`。
+5. 标准研究输出默认 `mask_future_effective_to=True`：若底层 `effective_to` 晚于 as_of，则置空，避免未来退出日期泄露。审计场景可传 `False`。
 
-版本解析先按：
-
-```text
-asset_id + classification_system + industry_level + industry_code
-```
-
-再要求：
-
-```text
-asset_id + classification_system + industry_level
-```
-
-在同一 as_of 只能有一个有效行业；否则抛出 `IndustryMembershipConflictError`。
-
-标准研究输出默认 `mask_future_effective_to=True`：  
-若底层 `effective_to` 晚于 as_of，则在输出中置空，避免未来退出日期泄露。  
-审计场景可传 `mask_future_effective_to=False`。
+空 `asset_ids` / `industry_level` 序列表示“无匹配”，返回空结果，不会退化成全表查询。
 
 `include_full_path=True` 时返回稳定的 `l1/l2/l3_code/name`。
 

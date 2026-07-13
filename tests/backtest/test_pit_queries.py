@@ -367,6 +367,38 @@ def pit_db(tmp_path: Path) -> Path:
                     "revision_id": "rev_ic_new",
                     "ingested_at": datetime(2021, 6, 1, 1, 0, 0),
                 },
+                # E append-only exit revision:
+                # old open version remains; later version fills effective_to.
+                {
+                    "asset_id": "E",
+                    "classification_system": "sw2021",
+                    "industry_level": 1,
+                    "industry_code": "801180.SI",
+                    "industry_name": "房地产",
+                    "effective_from": date(2015, 1, 5),
+                    "effective_to": None,
+                    "available_trade_date": date(2015, 1, 6),
+                    "source": "tushare",
+                    "source_record_id": "ie_open",
+                    "revision_id": "rev_ie_open",
+                    "ingested_at": datetime(2015, 1, 6, 1, 0, 0),
+                },
+                {
+                    "asset_id": "E",
+                    "classification_system": "sw2021",
+                    "industry_level": 1,
+                    "industry_code": "801180.SI",
+                    "industry_name": "房地产",
+                    "effective_from": date(2015, 1, 5),
+                    "effective_to": date(2020, 6, 1),
+                    # Available before exit so as-of queries can observe closed-rev selection
+                    # while membership is still valid under half-open semantics.
+                    "available_trade_date": date(2020, 5, 20),
+                    "source": "tushare",
+                    "source_record_id": "ie_closed",
+                    "revision_id": "rev_ie_closed",
+                    "ingested_at": datetime(2020, 5, 20, 1, 0, 0),
+                },
                 # D intentional overlap (two different codes same level active)
                 {
                     "asset_id": "D",
@@ -522,9 +554,12 @@ def test_financial_business_grouping_and_multi_ticker(pit_db: Path):
     # 000001 has two business groups (report_type 1 and 2)
     a = out[out["ticker"] == "000001.SZ"]
     assert set(a["report_type"]) == {"1", "2"}
-    assert list(out.sort_values(["ticker", "report_type"])["ticker"]) == sorted(out["ticker"].tolist()) or True
-    # stable sort by entity keys
-    assert out.iloc[0]["ticker"] <= out.iloc[-1]["ticker"]
+    # stable full ordering by business keys
+    ordered = out.sort_values(
+        ["ticker", "report_period", "report_type", "comp_type", "end_type"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    pd.testing.assert_frame_equal(out.reset_index(drop=True), ordered)
 
 
 def test_financial_indicator_without_report_type(pit_db: Path):
@@ -637,6 +672,74 @@ def test_industry_stable_sort(pit_db: Path):
     out = query_industry_as_of(as_of_date="2024-01-02", asset_ids=["A", "C"], db_path=pit_db)
     keys = list(zip(out["asset_id"], out["industry_level"], out["industry_code"]))
     assert keys == sorted(keys)
+
+
+
+def test_industry_append_only_exit_revision_not_reopen(pit_db: Path):
+    """Later exit revision must supersede older open version after it is available.
+
+    Historical open row remains stored, but as-of queries after the exit revision
+    becomes available must not fall back to the stale open version.
+    """
+    # Before exit revision is available: still the open version.
+    before_rev = query_industry_as_of(
+        as_of_date="2020-05-19",
+        asset_ids="E",
+        industry_level=1,
+        db_path=pit_db,
+        mask_future_effective_to=False,
+    )
+    assert len(before_rev) == 1
+    assert before_rev.iloc[0]["revision_id"] == "rev_ie_open"
+    assert pd.isna(before_rev.iloc[0]["effective_to"])
+
+    # After closed revision available and still before exit: select closed revision.
+    pre_exit = query_industry_as_of(
+        as_of_date="2020-05-29",
+        asset_ids="E",
+        industry_level=1,
+        db_path=pit_db,
+        mask_future_effective_to=False,
+    )
+    assert len(pre_exit) == 1
+    assert pre_exit.iloc[0]["revision_id"] == "rev_ie_closed"
+    assert str(pd.Timestamp(pre_exit.iloc[0]["effective_to"]).date()) == "2020-06-01"
+
+    # Research default masks future effective_to so exit does not leak.
+    pre_exit_masked = query_industry_as_of(
+        as_of_date="2020-05-29",
+        asset_ids="E",
+        industry_level=1,
+        db_path=pit_db,
+    )
+    assert len(pre_exit_masked) == 1
+    assert pre_exit_masked.iloc[0]["revision_id"] == "rev_ie_closed"
+    assert pd.isna(pre_exit_masked.iloc[0]["effective_to"])
+
+    # Exit day and thereafter are invalid under half-open semantics.
+    for d in ["2020-06-01", "2020-06-02", "2020-12-31", "2021-01-04", "2024-01-02"]:
+        out = query_industry_as_of(as_of_date=d, asset_ids="E", industry_level=1, db_path=pit_db)
+        assert out.empty
+
+
+def test_empty_sequence_filters_do_not_full_scan(pit_db: Path):
+    # empty sequences mean "no matches", never "all rows"
+    assert query_financial_as_of(
+        as_of_date="2024-03-18",
+        table="income_statement",
+        tickers=[],
+        db_path=pit_db,
+    ).empty
+    assert query_industry_as_of(
+        as_of_date="2024-01-02",
+        asset_ids=[],
+        db_path=pit_db,
+    ).empty
+    assert query_industry_as_of(
+        as_of_date="2024-01-02",
+        industry_level=[],
+        db_path=pit_db,
+    ).empty
 
 
 # ── Index ─────────────────────────────────────────────────────────────────

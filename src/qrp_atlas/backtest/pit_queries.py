@@ -49,12 +49,28 @@ class IndustryMembershipConflictError(ValueError):
 
 
 def _as_list(values: str | Sequence[str] | None) -> list[str] | None:
+    """Normalize optional string filters.
+
+    Returns:
+        None: filter omitted (caller may query broader set)
+        []: empty sequence provided; caller should return empty result and
+            must not expand into an unfiltered/full-table query
+        non-empty list: explicit filter values
+    """
     if values is None:
         return None
     if isinstance(values, str):
         return [values]
-    out = [str(v) for v in values]
-    return out
+    return [str(v) for v in values]
+
+
+def _as_int_list(values: int | Sequence[int] | None) -> list[int] | None:
+    """Normalize optional integer filters with the same empty-sequence semantics."""
+    if values is None:
+        return None
+    if isinstance(values, int) and not isinstance(values, bool):
+        return [values]
+    return [int(v) for v in values]
 
 
 def _require_as_of_date(as_of_date: Any) -> str:
@@ -123,6 +139,9 @@ def query_financial_as_of(
     clauses: list[str] = ["available_trade_date <= ?"]
     params: list[Any] = [as_of]
     ticker_list = _as_list(tickers)
+    if ticker_list is not None and len(ticker_list) == 0:
+        # Explicit empty filter: never treat as "all tickers".
+        return pd.DataFrame()
     if ticker_list:
         placeholders = ", ".join("?" * len(ticker_list))
         clauses.append(f"ticker IN ({placeholders})")
@@ -174,28 +193,34 @@ def query_industry_as_of(
 ) -> pd.DataFrame:
     """Query historical Shenwan industry membership as of a trading date.
 
-    Interval semantics are half-open:
+    Execution order (append-only safe):
 
-    ``effective_from <= as_of_date`` and
-    ``(effective_to IS NULL OR as_of_date < effective_to)``.
-
-    Availability also requires ``available_trade_date <= as_of_date``.
-
-    When ``mask_future_effective_to`` is True (default research output), any
-    ``effective_to`` strictly after ``as_of_date`` is set to NULL so future exits
-    do not leak into research inputs.
+    1. SQL filters only:
+       - ``available_trade_date <= as_of_date``
+       - optional caller filters: asset_ids / classification_system / industry_level
+       - **does not** pre-filter ``effective_from`` / ``effective_to``
+    2. Resolve the latest available version per membership identity with
+       ``select_latest_available_records``
+       (keys: asset_id + classification_system + industry_level + industry_code).
+    3. Apply half-open validity on the selected versions:
+       ``effective_from <= as_of_date`` and
+       ``(effective_to IS NULL OR as_of_date < effective_to)``.
+    4. Detect same-level multi-code conflicts.
+    5. Optionally mask future ``effective_to`` for research outputs.
     """
     as_of = _require_as_of_date(as_of_date)
     as_of_ts = pd.Timestamp(as_of)
 
-    clauses = [
-        "available_trade_date <= ?",
-        "effective_from <= ?",
-        "(effective_to IS NULL OR effective_to > ?)",
-    ]
-    params: list[Any] = [as_of, as_of, as_of]
-
     asset_list = _as_list(asset_ids)
+    if asset_list is not None and len(asset_list) == 0:
+        return pd.DataFrame()
+    level_list = _as_int_list(industry_level)
+    if level_list is not None and len(level_list) == 0:
+        return pd.DataFrame()
+
+    clauses = ["available_trade_date <= ?"]
+    params: list[Any] = [as_of]
+
     if asset_list:
         placeholders = ", ".join("?" * len(asset_list))
         clauses.append(f"asset_id IN ({placeholders})")
@@ -203,14 +228,10 @@ def query_industry_as_of(
     if classification_system is not None:
         clauses.append("classification_system = ?")
         params.append(str(classification_system))
-    if industry_level is not None:
-        if isinstance(industry_level, int):
-            levels = [industry_level]
-        else:
-            levels = [int(x) for x in industry_level]
-        placeholders = ", ".join("?" * len(levels))
+    if level_list:
+        placeholders = ", ".join("?" * len(level_list))
         clauses.append(f"industry_level IN ({placeholders})")
-        params.extend(levels)
+        params.extend(level_list)
 
     where_sql = " WHERE " + " AND ".join(clauses)
     raw = _read_table(
@@ -219,13 +240,12 @@ def query_industry_as_of(
         con=con,
         where_sql=where_sql,
         params=params,
-        order_by="asset_id, classification_system, industry_level, available_trade_date, revision_id",
+        order_by="asset_id, classification_system, industry_level, industry_code, available_trade_date, revision_id",
     )
     if raw.empty:
         return raw.reset_index(drop=True)
 
-    # Version identity includes industry_code so same-code revisions are resolved,
-    # while different codes at the same level remain visible for conflict detection.
+    # Step 2: version selection first (includes later exit revisions that supersede open rows).
     version_keys = ["asset_id", "classification_system", "industry_level", "industry_code"]
     selected = select_latest_available_records(
         raw,
@@ -239,6 +259,15 @@ def query_industry_as_of(
     if selected.empty:
         return selected
 
+    # Step 3: half-open interval on the chosen versions only.
+    eff_from = pd.to_datetime(selected["effective_from"], errors="coerce")
+    eff_to = pd.to_datetime(selected["effective_to"], errors="coerce")
+    valid_mask = eff_from.notna() & (eff_from <= as_of_ts) & (eff_to.isna() | (as_of_ts < eff_to))
+    selected = selected.loc[valid_mask].copy()
+    if selected.empty:
+        return selected.reset_index(drop=True)
+
+    # Step 4: conflict detection — one industry code per asset/system/level.
     membership_keys = ["asset_id", "classification_system", "industry_level"]
     conflict_counts = (
         selected.groupby(membership_keys, dropna=False).size().reset_index(name="n")
@@ -250,10 +279,11 @@ def query_industry_as_of(
             f"{conflicts[membership_keys].to_dict('records')}"
         )
 
-    out = selected.copy()
+    out = selected
+    # Step 5: research-safe future exit masking.
     if mask_future_effective_to and "effective_to" in out.columns:
-        eff_to = pd.to_datetime(out["effective_to"], errors="coerce")
-        out.loc[eff_to.notna() & (eff_to > as_of_ts), "effective_to"] = pd.NaT
+        eff_to2 = pd.to_datetime(out["effective_to"], errors="coerce")
+        out.loc[eff_to2.notna() & (eff_to2 > as_of_ts), "effective_to"] = pd.NaT
 
     out = out.sort_values(
         ["asset_id", "classification_system", "industry_level", "industry_code"],
@@ -267,7 +297,6 @@ def query_industry_as_of(
             values=["industry_code", "industry_name"],
             aggfunc="first",
         )
-        # Flatten multiindex columns.
         flat = pd.DataFrame(index=path.index)
         for level in (1, 2, 3):
             code_key = ("industry_code", level)
