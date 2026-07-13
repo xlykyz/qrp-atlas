@@ -10,6 +10,7 @@
     - market/    市场宽度与风险
     - stock/     个股趋势
     - system_b/  系统 B 基础状态检测
+    - cross_section/ 横截面基础算子与历史股票池
     - service    对外组合入口
 """
 
@@ -45,6 +46,25 @@ from qrp_atlas.indicators.system_b import (
 )
 from qrp_atlas.indicators.service import calculate_daily_market_snapshot
 
+# 横截面研究基础（任务 04-A）
+from qrp_atlas.indicators.cross_section import (
+    CrossSectionFrameError,
+    HistoricalUniverseRequest,
+    HistoricalUniverseSource,
+    REQUIRED_CROSS_SECTION_COLUMNS,
+    apply_cross_section_operators,
+    build_historical_universe,
+    cross_section_percentile_rank,
+    cross_section_rank,
+    cross_section_winsorize,
+    cross_section_zscore,
+    ensure_cross_section_frame,
+    normalize_feature_columns,
+    process_cross_section,
+    resolve_historical_universe,
+    sort_cross_section_frame,
+)
+
 __all__ = [
     # 元数据定义（保留）
     "IndicatorDefinition",
@@ -72,4 +92,20 @@ __all__ = [
     "detect_system_b_basic_state",
     "detect_system_b_basic_state_from_prices",
     "calculate_daily_market_snapshot",
+    # 横截面研究基础
+    "CrossSectionFrameError",
+    "HistoricalUniverseRequest",
+    "HistoricalUniverseSource",
+    "REQUIRED_CROSS_SECTION_COLUMNS",
+    "apply_cross_section_operators",
+    "build_historical_universe",
+    "cross_section_percentile_rank",
+    "cross_section_rank",
+    "cross_section_winsorize",
+    "cross_section_zscore",
+    "ensure_cross_section_frame",
+    "normalize_feature_columns",
+    "process_cross_section",
+    "resolve_historical_universe",
+    "sort_cross_section_frame",
 ]
