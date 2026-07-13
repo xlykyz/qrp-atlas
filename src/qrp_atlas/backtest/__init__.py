@@ -20,6 +20,9 @@ from .portfolio import (
     PortfolioOrder,
     PortfolioSnapshot,
     PositionSnapshot,
+    StrategyPortfolioBacktestRun,
+    run_strategy_portfolio_backtest,
+    strategy_decisions_to_target_weights,
 )
 from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strategy_data, run_strategy_backtest
 
@@ -42,7 +45,10 @@ __all__ = [
     "Skipped",
     "StrategyBacktestRun",
     "StrategyBacktestRuntime",
+    "StrategyPortfolioBacktestRun",
     "Trade",
     "prepare_strategy_data",
     "run_strategy_backtest",
+    "run_strategy_portfolio_backtest",
+    "strategy_decisions_to_target_weights",
 ]
