@@ -182,6 +182,12 @@ def run_strategy_portfolio_backtest(
 ) -> StrategyPortfolioBacktestRun:
     """Run a registered strategy and execute its target-weight portfolio."""
 
+    if any(bool(held) for held in (initial_positions or {}).values()):
+        raise ValueError(
+            "seeded holdings are not supported by PortfolioBacktestEngine; "
+            "provide a cash-only initial account"
+        )
+
     strategy = get_strategy(code, version)
     resolved_parameters = resolve_parameters(strategy.definition, parameters or {})
     prepared = prepare_strategy_data(price_df, strategy.definition, resolved_parameters)
@@ -189,7 +195,7 @@ def run_strategy_portfolio_backtest(
         StrategyInput(
             prepared_data=prepared,
             parameters=resolved_parameters,
-            initial_positions=initial_positions or {},
+            initial_positions={},
             runtime_context=runtime_context or {},
         )
     )
