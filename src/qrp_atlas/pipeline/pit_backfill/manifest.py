@@ -179,7 +179,12 @@ def _stage_rank(status: str) -> int:
 
 
 def _merge_records(existing: BatchRecord, incoming: BatchRecord) -> BatchRecord:
-    """Merge multi-process updates without clobbering terminal stage progress."""
+    """Merge multi-process updates without clobbering terminal stage progress.
+
+    Terminal success/empty must not be overwritten by pending/running/failed from
+    another worker. Explicit re-open to pending is allowed only when the incoming
+    record carries a reset/corrupt/gate reason (operator-driven retry).
+    """
     out = BatchRecord.from_dict(existing.to_dict())
     for f in ("period", "start_date", "end_date", "raw_path", "cleaned_path", "meta"):
         iv = getattr(incoming, f)
@@ -190,11 +195,28 @@ def _merge_records(existing: BatchRecord, incoming: BatchRecord) -> BatchRecord:
     out.cleaned_rows = max(int(existing.cleaned_rows or 0), int(incoming.cleaned_rows or 0))
     out.inserted_rows = max(int(existing.inserted_rows or 0), int(incoming.inserted_rows or 0))
 
+    def _allows_terminal_reopen(stage: str) -> bool:
+        err = (getattr(incoming, f"{stage}_error") or incoming.error or "").lower()
+        markers = (
+            "corrupt",
+            "raw missing",
+            "reset after",
+            "gate",
+            "re-fetch",
+            "refetch",
+            "reset_running",
+        )
+        return any(m in err for m in markers)
+
     for stage in ALL_STAGES:
         es = getattr(existing, f"{stage}_status")
         ins = getattr(incoming, f"{stage}_status")
         if es in TERMINAL_OK and ins not in TERMINAL_OK:
-            # keep terminal success/empty over pending/running/failed false-negatives only if not intentional fail after success? keep terminal
+            if ins == STATUS_PENDING and _allows_terminal_reopen(stage):
+                setattr(out, f"{stage}_status", ins)
+                setattr(out, f"{stage}_error", getattr(incoming, f"{stage}_error"))
+                setattr(out, f"{stage}_finished_at", None)
+            # otherwise keep terminal success/empty
             continue
         if _stage_rank(ins) > _stage_rank(es) or (ins in TERMINAL_OK and es not in TERMINAL_OK):
             setattr(out, f"{stage}_status", ins)
@@ -205,11 +227,14 @@ def _merge_records(existing: BatchRecord, incoming: BatchRecord) -> BatchRecord:
             fin = getattr(incoming, f"{stage}_finished_at") or getattr(existing, f"{stage}_finished_at")
             setattr(out, f"{stage}_finished_at", fin)
 
-    if incoming.started_at and not out.started_at:
-        out.started_at = incoming.started_at
+    if incoming.started_at and (not out.started_at or incoming.started_at > (out.started_at or "")):
+        # keep earliest started_at for stale detection stability
+        if not out.started_at:
+            out.started_at = incoming.started_at
     if incoming.finished_at:
         out.finished_at = incoming.finished_at
-    out.error = incoming.error or existing.error
+    # Prefer non-empty newer error when stage changed
+    out.error = incoming.error if incoming.error is not None else existing.error
     out.recompute_status()
     return out
 
@@ -308,26 +333,64 @@ class ManifestStore:
             self._flush()
             return rec
 
-    def reset_running_to_pending(self) -> int:
+    def reset_running_to_pending(
+        self,
+        *,
+        stages: Iterable[str] | None = None,
+        stale_seconds: float | None = 3600.0,
+        owner_stages_only: bool = True,
+    ) -> int:
+        """Reset running stage flags.
+
+        Only touches stages in `stages` (default ALL_STAGES). When stale_seconds
+        is set, only reset stages whose started/finished timestamps are older
+        than the threshold or missing (treat as stale). This prevents a
+        clean/load worker from clobbering an active fetch.
+        """
+        wanted = tuple(stages) if stages is not None else ALL_STAGES
+        wanted = tuple(s for s in wanted if s in ALL_STAGES)
+        now = datetime.now(timezone.utc)
+
+        def _is_stale(rec: BatchRecord, stage: str) -> bool:
+            if stale_seconds is None:
+                return True
+            # Running stages should not yet have finished_at; use batch started_at.
+            # Stage finished_at present with status running is inconsistent -> treat as stale.
+            ts = rec.started_at
+            stage_finished = getattr(rec, f"{stage}_finished_at")
+            if stage_finished and rec.stage_status(stage) == STATUS_RUNNING:
+                return True
+            if not ts:
+                return True
+            try:
+                text_ts = str(ts).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(text_ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return (now - dt).total_seconds() >= float(stale_seconds)
+            except Exception:
+                return True
+
         with _ManifestFileLock(self._lock_path):
             self._load()
             n = 0
             for rec in self._records.values():
                 changed = False
-                if rec.status == STATUS_RUNNING:
-                    rec.status = STATUS_PENDING
+                for stage in wanted:
+                    if rec.stage_status(stage) != STATUS_RUNNING:
+                        continue
+                    if not _is_stale(rec, stage):
+                        continue
+                    setattr(rec, f"{stage}_status", STATUS_PENDING)
+                    prev = getattr(rec, f"{stage}_error") or ""
+                    setattr(
+                        rec,
+                        f"{stage}_error",
+                        (prev + " | reset_running_on_resume").strip(" |"),
+                    )
                     changed = True
-                for stage in ALL_STAGES:
-                    if rec.stage_status(stage) == STATUS_RUNNING:
-                        setattr(rec, f"{stage}_status", STATUS_PENDING)
-                        prev = getattr(rec, f"{stage}_error") or ""
-                        setattr(
-                            rec,
-                            f"{stage}_error",
-                            (prev + " | reset_running_on_resume").strip(" |"),
-                        )
-                        changed = True
                 if changed:
+                    # recompute aggregate; do not force-reset status independently
                     note = rec.error or ""
                     rec.error = (note + " | reset_running_on_resume").strip(" |")
                     rec.recompute_status()

@@ -59,12 +59,20 @@ from qrp_atlas.pipeline.pit_backfill.rate_limit import (
     is_rate_limit_error,
 )
 from qrp_atlas.pipeline.pit_backfill.raw_io import (
+    CorruptParquetError,
     cleaned_file_path,
     load_parquet,
+    load_parquet_or_quarantine,
+    quarantine_corrupt,
     raw_file_path,
     save_parquet,
+    validate_parquet,
 )
-from qrp_atlas.pipeline.pit_backfill.safety import pipeline_db_lock, preflight
+from qrp_atlas.pipeline.pit_backfill.safety import (
+    ensure_load_backup,
+    pipeline_db_lock,
+    preflight,
+)
 from qrp_atlas.pipeline.pit_utils import NextTradeDateResolver
 
 RUN_TAG = "20260714"
@@ -332,7 +340,21 @@ class PitBackfillRunner:
         try:
             if raw_path.exists():
                 self.logger.info("batch=%s FETCH offline raw=%s", batch.batch_id, raw_path)
-                raw = load_parquet(raw_path)
+                try:
+                    raw = self._load_parquet_resilient(rec, STAGE_FETCH, raw_path)
+                except CorruptParquetError:
+                    # reset to pending and try network unless offline_only
+                    if self.config.offline_only:
+                        raise
+                    self.logger.warning("batch=%s re-fetch after corrupt raw", batch.batch_id)
+                    raw = self._fetch_from_api(batch)
+                    save_parquet(raw, raw_path)
+                    offline = False
+                    fetched = 0 if raw is None else len(raw)
+                    rec.fetched_rows = fetched
+                    rec.set_stage(STAGE_FETCH, STATUS_EMPTY if fetched == 0 else STATUS_SUCCESS, finished=True)
+                    self.manifest.save(rec)
+                    return rec
                 offline = True
             else:
                 if self.config.offline_only:
@@ -394,9 +416,16 @@ class PitBackfillRunner:
                 raise FileNotFoundError(f"raw missing for clean: {raw_path}")
 
             if cleaned_path.exists() and rec.clean_status in TERMINAL_OK:
-                cleaned = load_parquet(cleaned_path)
+                try:
+                    cleaned = self._load_parquet_resilient(rec, STAGE_CLEAN, cleaned_path)
+                except CorruptParquetError:
+                    cleaned = None
+                if cleaned is None:
+                    raw = self._load_parquet_resilient(rec, STAGE_FETCH, raw_path)
+                    cleaned = self._clean_df(batch, raw)
+                    save_parquet(cleaned, cleaned_path)
             else:
-                raw = load_parquet(raw_path)
+                raw = self._load_parquet_resilient(rec, STAGE_FETCH, raw_path)
                 cleaned = self._clean_df(batch, raw)
                 save_parquet(cleaned, cleaned_path)
             rec.cleaned_rows = 0 if cleaned is None else len(cleaned)
@@ -439,7 +468,7 @@ class PitBackfillRunner:
                 return rec
             if not cleaned_path.exists():
                 raise FileNotFoundError(f"cleaned missing for load: {cleaned_path}")
-            cleaned = load_parquet(cleaned_path)
+            cleaned = self._load_parquet_resilient(rec, STAGE_CLEAN, cleaned_path)
             inserted = self._load_df(batch, cleaned)
             rec.inserted_rows = int(inserted)
             # load success even when inserted=0 (idempotent)
@@ -461,6 +490,121 @@ class PitBackfillRunner:
             self.manifest.save(rec)
             return rec
 
+
+    def _quarantine_and_reset_stage(self, rec: BatchRecord, stage: str, path: Path, reason: str) -> BatchRecord:
+        q = None
+        try:
+            if path.exists():
+                q = quarantine_corrupt(path)
+        except Exception as exc:
+            self.logger.warning("quarantine failed path=%s err=%s", path, exc)
+        self.logger.error(
+            "batch=%s %s corrupt path=%s reason=%s quarantined=%s",
+            rec.batch_id,
+            stage,
+            path,
+            reason,
+            q,
+        )
+        if stage == STAGE_FETCH:
+            rec.fetched_rows = 0
+            rec.raw_path = str(path)
+            rec.set_stage(STAGE_FETCH, STATUS_PENDING, error=f"corrupt raw: {reason}")
+            # downstream must redo
+            if rec.clean_status in TERMINAL_OK or rec.clean_status == STATUS_FAILED:
+                rec.set_stage(STAGE_CLEAN, STATUS_PENDING, error="reset after corrupt raw")
+            if rec.load_status in TERMINAL_OK or rec.load_status == STATUS_FAILED:
+                rec.set_stage(STAGE_LOAD, STATUS_PENDING, error="reset after corrupt raw")
+        elif stage == STAGE_CLEAN:
+            rec.cleaned_rows = 0
+            rec.cleaned_path = str(path)
+            rec.set_stage(STAGE_CLEAN, STATUS_PENDING, error=f"corrupt cleaned: {reason}")
+            if rec.load_status in TERMINAL_OK or rec.load_status == STATUS_FAILED:
+                rec.set_stage(STAGE_LOAD, STATUS_PENDING, error="reset after corrupt cleaned")
+        self.manifest.save(rec)
+        return rec
+
+    def _load_parquet_resilient(self, rec: BatchRecord, stage: str, path: Path) -> pd.DataFrame:
+        try:
+            return load_parquet_or_quarantine(path)
+        except CorruptParquetError as exc:
+            self._quarantine_and_reset_stage(rec, stage, path, exc.reason)
+            raise
+
+    def validate_raw_gate(self, batches: list[Batch]) -> dict:
+        """Full raw integrity scan. Returns issues; mutates manifest for corrupt/missing."""
+        issues: list[dict[str, Any]] = []
+        # Reload latest multi-process state
+        self.manifest.reload()
+        for batch in batches:
+            rec = self.manifest.get(batch.batch_id)
+            if rec is None:
+                issues.append({"batch_id": batch.batch_id, "issue": "fetch_not_terminal", "status": "missing"})
+                continue
+            if rec.fetch_status == STATUS_FAILED:
+                issues.append({"batch_id": batch.batch_id, "issue": "fetch_failed"})
+                continue
+            if rec.fetch_status not in TERMINAL_OK:
+                issues.append(
+                    {
+                        "batch_id": batch.batch_id,
+                        "issue": "fetch_not_terminal",
+                        "status": rec.fetch_status,
+                    }
+                )
+                continue
+            raw_path = Path(rec.raw_path) if rec.raw_path else raw_file_path(self.raw_dir, batch.batch_id)
+            rec.raw_path = str(raw_path)
+            if not raw_path.exists():
+                issues.append({"batch_id": batch.batch_id, "issue": "raw_missing", "path": str(raw_path)})
+                rec.set_stage(STAGE_FETCH, STATUS_PENDING, error="raw missing at gate")
+                rec.set_stage(STAGE_CLEAN, STATUS_PENDING, error="reset after raw missing")
+                rec.set_stage(STAGE_LOAD, STATUS_PENDING, error="reset after raw missing")
+                self.manifest.save(rec)
+                continue
+            try:
+                n = validate_parquet(raw_path)
+                prev = int(rec.fetched_rows or 0)
+                if prev and abs(prev - n) > max(1, int(0.01 * max(prev, n))):
+                    issues.append(
+                        {
+                            "batch_id": batch.batch_id,
+                            "issue": "row_count_mismatch",
+                            "manifest_rows": prev,
+                            "file_rows": n,
+                        }
+                    )
+                rec.fetched_rows = n
+                expected = STATUS_EMPTY if n == 0 else STATUS_SUCCESS
+                if rec.fetch_status != expected:
+                    rec.set_stage(STAGE_FETCH, expected, finished=True)
+                    self.manifest.save(rec)
+            except CorruptParquetError as exc:
+                self._quarantine_and_reset_stage(rec, STAGE_FETCH, raw_path, exc.reason)
+                issues.append({"batch_id": batch.batch_id, "issue": "raw_corrupt", "reason": exc.reason})
+        blocking = {
+            "raw_missing",
+            "raw_corrupt",
+            "fetch_failed",
+            "fetch_not_terminal",
+            "row_count_mismatch",
+        }
+        blocking_issues = [i for i in issues if i["issue"] in blocking]
+        # After mutations, require every batch fetch terminal ok
+        self.manifest.reload()
+        all_terminal_ok = all(
+            (self.manifest.get(b.batch_id) is not None)
+            and (self.manifest.get(b.batch_id).fetch_status in TERMINAL_OK)
+            for b in batches
+        )
+        summary = {
+            "ok": not blocking_issues and all_terminal_ok,
+            "issues": issues,
+            "issue_count": len(issues),
+            "blocking_issue_count": len(blocking_issues),
+        }
+        return summary
+
     def process_batch(self, batch: Batch) -> dict[str, Any]:
         rec = self.manifest.get(batch.batch_id)
         if rec is None:
@@ -481,23 +625,52 @@ class PitBackfillRunner:
         if not rec.cleaned_path:
             rec.cleaned_path = str(cleaned_file_path(self.cleaned_dir, batch.batch_id))
 
+        # Terminal stages must not keep unreadable artifacts forever.
+        if STAGE_FETCH in self.stages and rec.fetch_status in TERMINAL_OK:
+            raw_check = Path(rec.raw_path)
+            if not raw_check.exists():
+                rec.set_stage(STAGE_FETCH, STATUS_PENDING, error="raw missing on resume")
+                rec.set_stage(STAGE_CLEAN, STATUS_PENDING, error="reset after raw missing")
+                rec.set_stage(STAGE_LOAD, STATUS_PENDING, error="reset after raw missing")
+                self.manifest.save(rec)
+            else:
+                try:
+                    validate_parquet(raw_check)
+                except CorruptParquetError as exc:
+                    self._quarantine_and_reset_stage(rec, STAGE_FETCH, raw_check, exc.reason)
+                    rec = self.manifest.get(batch.batch_id) or rec
+        if STAGE_CLEAN in self.stages and rec.clean_status in TERMINAL_OK:
+            cleaned_check = Path(rec.cleaned_path)
+            if cleaned_check.exists():
+                try:
+                    validate_parquet(cleaned_check)
+                except CorruptParquetError as exc:
+                    self._quarantine_and_reset_stage(rec, STAGE_CLEAN, cleaned_check, exc.reason)
+                    rec = self.manifest.get(batch.batch_id) or rec
+
         # Artifact-driven promotion before stages (resume friendliness)
         raw_p = Path(rec.raw_path)
         if raw_p.exists() and rec.fetch_status not in TERMINAL_OK:
             try:
-                n = len(load_parquet(raw_p))
+                df = load_parquet_or_quarantine(raw_p)
+                n = len(df)
                 rec.fetched_rows = n
                 rec.set_stage(STAGE_FETCH, STATUS_EMPTY if n == 0 else STATUS_SUCCESS, finished=True)
                 self.manifest.save(rec)
+            except CorruptParquetError as exc:
+                self._quarantine_and_reset_stage(rec, STAGE_FETCH, raw_p, exc.reason)
             except Exception:
                 pass
         cleaned_p = Path(rec.cleaned_path)
         if cleaned_p.exists() and rec.clean_status not in TERMINAL_OK:
             try:
-                n = len(load_parquet(cleaned_p))
+                df = load_parquet_or_quarantine(cleaned_p)
+                n = len(df)
                 rec.cleaned_rows = n
                 rec.set_stage(STAGE_CLEAN, STATUS_EMPTY if n == 0 else STATUS_SUCCESS, finished=True)
                 self.manifest.save(rec)
+            except CorruptParquetError as exc:
+                self._quarantine_and_reset_stage(rec, STAGE_CLEAN, cleaned_p, exc.reason)
             except Exception:
                 pass
 
@@ -643,24 +816,99 @@ class PitBackfillRunner:
             preflight_info = preflight(
                 self.db_path,
                 state_dir=self.state_dir,
-                create_backup=self.config.create_backup and not self.config.resume,
+                create_backup=False,
                 backup_tag=self.config.run_tag,
             )
             self.logger.info(
-                "preflight ok free_gb=%s backup=%s",
+                "preflight ok free_gb=%s",
                 preflight_info["free_gb"],
-                preflight_info["backup_path"],
             )
 
         batches = self.build_plan()
         summary = self.save_plan(batches)
         self.manifest.ensure_batches(batches)
         if self.config.resume:
-            reset_n = self.manifest.reset_running_to_pending()
+            reset_n = self.manifest.reset_running_to_pending(
+                stages=self.stages,
+                stale_seconds=3600.0,
+            )
             if reset_n:
-                self.logger.info("reset %s running batches/stages to pending", reset_n)
+                self.logger.info(
+                    "reset %s running records for stages=%s",
+                    reset_n,
+                    ",".join(self.stages),
+                )
 
         self.logger.info("plan %s", summary)
+
+        raw_gate = None
+        backup_info = None
+        # Clean/load workers (no fetch stage) must pass full raw integrity + DB backup
+        # before any load. Same-process fetch+load skips the full pre-gate because
+        # each fetch already validates parquet on write; post-run audit still applies.
+        if (
+            STAGE_LOAD in self.stages
+            and STAGE_FETCH not in self.stages
+            and self.config.mode not in {"plan-only"}
+            and not self.config.dry_run
+        ):
+            raw_gate = self.validate_raw_gate(batches)
+            self.logger.info("raw gate ok=%s issues=%s", raw_gate["ok"], raw_gate["issue_count"])
+            if not raw_gate["ok"]:
+                if not self.config.offline_only:
+                    self.logger.warning("raw gate failed; re-fetching broken batches before load")
+                    issue_ids = {i["batch_id"] for i in raw_gate["issues"]}
+                    old_stages = self.stages
+                    self.stages = (STAGE_FETCH,)
+                    try:
+                        for batch in batches:
+                            if batch.batch_id not in issue_ids:
+                                continue
+                            self.process_batch(batch)
+                    finally:
+                        self.stages = old_stages
+                    raw_gate = self.validate_raw_gate(batches)
+                    self.logger.info(
+                        "raw gate after refetch ok=%s issues=%s",
+                        raw_gate["ok"],
+                        raw_gate["issue_count"],
+                    )
+                if not raw_gate["ok"]:
+                    raise RuntimeError(
+                        f"raw integrity gate failed with {raw_gate['issue_count']} issues; refuse load"
+                    )
+
+            # Backup gate before any load (marker reuses an existing verified backup)
+            if self.config.create_backup:
+                backup_info = ensure_load_backup(
+                    self.db_path,
+                    state_dir=self.state_dir,
+                    tag=self.config.run_tag,
+                )
+                self.logger.info(
+                    "load backup ready path=%s size=%s reused=%s",
+                    backup_info["backup_path"],
+                    backup_info.get("backup_size_bytes"),
+                    backup_info["reused"],
+                )
+            else:
+                # Still require a verified marker/backup from an earlier pass
+                from qrp_atlas.pipeline.pit_backfill.safety import load_backup_marker, assert_db_readable
+
+                marker = load_backup_marker(self.state_dir)
+                if not marker or not marker.get("backup_path"):
+                    raise RuntimeError("refusing load without backup (create_backup=False and no marker)")
+                bp = Path(marker["backup_path"])
+                if not bp.exists():
+                    raise RuntimeError(f"refusing load; backup marker path missing: {bp}")
+                assert_db_readable(bp)
+                backup_info = {
+                    "backup_path": str(bp),
+                    "marker_path": str(self.state_dir / "backup_marker.json"),
+                    "backup_size_bytes": bp.stat().st_size,
+                    "reused": True,
+                }
+                self.logger.info("load backup reused via marker path=%s", backup_info["backup_path"])
 
         if self.config.mode == "plan-only" or self.config.dry_run:
             return {
@@ -685,6 +933,31 @@ class PitBackfillRunner:
 
         with lock_cm:
             for batch in batches:
+                # Revalidate terminal artifacts before skip decision so corrupt/missing
+                # raw or cleaned files are reopened even when stage status is success.
+                rec = self.manifest.get(batch.batch_id)
+                if rec is not None and self.config.resume:
+                    if STAGE_FETCH in self.stages and rec.fetch_status in TERMINAL_OK:
+                        raw_check = Path(rec.raw_path) if rec.raw_path else raw_file_path(self.raw_dir, batch.batch_id)
+                        if not raw_check.exists():
+                            rec.set_stage(STAGE_FETCH, STATUS_PENDING, error="raw missing on resume")
+                            rec.set_stage(STAGE_CLEAN, STATUS_PENDING, error="reset after raw missing")
+                            rec.set_stage(STAGE_LOAD, STATUS_PENDING, error="reset after raw missing")
+                            self.manifest.save(rec)
+                        else:
+                            try:
+                                validate_parquet(raw_check)
+                            except CorruptParquetError as exc:
+                                self._quarantine_and_reset_stage(rec, STAGE_FETCH, raw_check, exc.reason)
+                    rec = self.manifest.get(batch.batch_id)
+                    if rec is not None and STAGE_CLEAN in self.stages and rec.clean_status in TERMINAL_OK:
+                        cleaned_check = Path(rec.cleaned_path) if rec.cleaned_path else cleaned_file_path(self.cleaned_dir, batch.batch_id)
+                        if cleaned_check.exists():
+                            try:
+                                validate_parquet(cleaned_check)
+                            except CorruptParquetError as exc:
+                                self._quarantine_and_reset_stage(rec, STAGE_CLEAN, cleaned_check, exc.reason)
+
                 if not self.manifest.should_process(
                     batch.batch_id, resume=self.config.resume, stages=self.stages
                 ):
@@ -727,6 +1000,8 @@ class PitBackfillRunner:
                 "db_path": str(self.db_path),
             },
             "preflight": preflight_info,
+            "raw_gate": raw_gate,
+            "backup": backup_info,
         }
 
         if self.config.run_audit:
@@ -741,13 +1016,17 @@ class PitBackfillRunner:
             self.logger.info("audit written %s", audit_path)
 
         failed = counts.get(STATUS_FAILED, 0)
+        stage_failed = 0
+        for st in stage_counts.values():
+            stage_failed += int(st.get(STATUS_FAILED, 0))
         self.logger.info(
             "finished counts=%s stage_counts=%s requests=%s",
             counts,
             stage_counts,
             self.request_count,
         )
-        out["ok"] = failed == 0
+        out["ok"] = failed == 0 and stage_failed == 0
+        out["exit_nonzero_reason"] = None if out["ok"] else "failed_batches_or_stages"
         return out
 
 

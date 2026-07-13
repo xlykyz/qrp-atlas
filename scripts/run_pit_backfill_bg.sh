@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fallback launcher when user systemd is unavailable.
 set -euo pipefail
-ROOT="/home/claire/projects/qrp-atlas"
+ROOT="${QRP_PROJECT_ROOT:-${QRP_ATLAS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}}"
 TAG="${1:-20260714}"
 MODE="${2:-full}"
 LOG_DIR="$ROOT/data/logs"

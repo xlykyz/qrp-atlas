@@ -151,27 +151,49 @@ def index_batches(
 
 
 def discover_sw2021_l1_codes(client=None) -> list[str]:
-    """Fetch Shenwan 2021 level-1 industry codes via Tushare index_classify."""
+    """Fetch Shenwan 2021 level-1 industry codes via Tushare index_classify.
+
+    Strict SW2021 only. Never silently fall back to legacy SW.
+    Only signature compatibility: some older clients reject the `src` kwarg.
+    """
     from qrp_atlas.config import get_tushare_pro
 
     pro = client or get_tushare_pro()
     method = getattr(pro, "index_classify")
-    # Prefer SW2021; fall back to SW if gateway returns empty for SW2021.
-    frames: list[pd.DataFrame] = []
-    for src in ("SW2021", "SW"):
+    used_src_kw = True
+    try:
+        df = method(level="L1", src="SW2021")
+    except TypeError:
+        # Client signature does not accept src=...; call without it, but still
+        # require SW2021 evidence in the payload (never treat legacy SW as SW2021).
+        used_src_kw = False
         try:
-            df = method(level="L1", src=src)
-        except TypeError:
-            # older signature without src
             df = method(level="L1")
-        except Exception:
-            df = None
-        if df is not None and not getattr(df, "empty", True):
-            frames.append(df)
-            break
-    if not frames:
-        raise RuntimeError("index_classify returned no SW L1 industries")
-    df = frames[0]
+        except Exception as exc:
+            raise RuntimeError(f"index_classify(L1) failed without src kw: {exc}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"index_classify(SW2021/L1) failed: {exc}") from exc
+
+    if df is None or getattr(df, "empty", True):
+        raise RuntimeError("index_classify(SW2021/L1) returned empty result")
+
+    if "src" in df.columns:
+        srcs = {str(x).strip().upper() for x in df["src"].dropna().tolist()}
+        if not srcs:
+            raise RuntimeError("index_classify result missing src values; cannot verify SW2021")
+        if not any(s in {"SW2021", "SW21"} or "2021" in s for s in srcs):
+            raise RuntimeError(f"index_classify result src not SW2021: {sorted(srcs)}")
+        # keep only SW2021 rows if mixed
+        mask = df["src"].astype(str).str.upper().str.contains("2021")
+        df = df.loc[mask]
+        if df.empty:
+            raise RuntimeError("index_classify produced no SW2021 rows after filtering")
+    elif not used_src_kw:
+        raise RuntimeError(
+            "index_classify client rejected src= and response has no src column; "
+            "refusing to treat unverified payload as SW2021"
+        )
+
     code_col = "index_code" if "index_code" in df.columns else None
     if code_col is None:
         for c in ("code", "l1_code", "ts_code"):
@@ -182,7 +204,7 @@ def discover_sw2021_l1_codes(client=None) -> list[str]:
         raise RuntimeError(f"index_classify missing code column: {list(df.columns)}")
     codes = sorted({str(x).strip() for x in df[code_col].tolist() if str(x).strip()})
     if not codes:
-        raise RuntimeError("index_classify produced empty L1 code list")
+        raise RuntimeError("index_classify(SW2021/L1) produced empty L1 code list")
     return codes
 
 

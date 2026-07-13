@@ -5,14 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/claire/projects/qrp-atlas
+WorkingDirectory=%h/projects/qrp-atlas
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/home/claire/projects/qrp-atlas/.env
-# stages=all keeps fetch/clean/load decoupled under one process; use --stages fetch to network-only.
-ExecStart=/home/claire/projects/qrp-atlas/.venv/bin/python -m qrp_atlas.pipeline.pit_backfill --mode full --resume --stages all --run-tag 20260714 --audit
+Environment=QRP_PROJECT_ROOT=%h/projects/qrp-atlas
+Environment=QRP_ATLAS_ROOT=%h/projects/qrp-atlas
+EnvironmentFile=-%h/projects/qrp-atlas/.env
+ExecStart=%h/projects/qrp-atlas/.venv/bin/python -m qrp_atlas.pipeline.pit_backfill --mode full --resume --stages all --run-tag 20260714 --audit
 RemainAfterExit=yes
-StandardOutput=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.service.out
-StandardError=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.service.err
+StandardOutput=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.service.out
+StandardError=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.service.err
 TimeoutStartSec=infinity
 
 [Install]

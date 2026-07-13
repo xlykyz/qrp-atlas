@@ -4,13 +4,15 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/claire/projects/qrp-atlas
+WorkingDirectory=%h/projects/qrp-atlas
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/home/claire/projects/qrp-atlas/.env
-ExecStart=/home/claire/projects/qrp-atlas/scripts/run_pit_backfill_offline_loop.sh 20260714
+Environment=QRP_PROJECT_ROOT=%h/projects/qrp-atlas
+Environment=QRP_ATLAS_ROOT=%h/projects/qrp-atlas
+EnvironmentFile=-%h/projects/qrp-atlas/.env
+ExecStart=%h/projects/qrp-atlas/scripts/run_pit_backfill_offline_loop.sh 20260714
 RemainAfterExit=yes
-StandardOutput=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.load.out
-StandardError=append:/home/claire/projects/qrp-atlas/data/logs/pit_backfill_20260714.load.err
+StandardOutput=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.load.out
+StandardError=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.load.err
 TimeoutStartSec=infinity
 
 [Install]
