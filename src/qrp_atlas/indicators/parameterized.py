@@ -11,6 +11,8 @@ from typing import Any
 import pandas as pd
 
 from qrp_atlas.contracts import CLOSE, HIGH, LOW, TICKER, TRADE_DATE
+from qrp_atlas.indicators.stock import calculate_stock_trend
+from qrp_atlas.indicators.system_b import calculate_system_b_basic_states_from_prices
 
 
 class IndicatorRequestError(ValueError):
@@ -204,35 +206,28 @@ def _rolling_zscore(df: pd.DataFrame, parameters: Mapping[str, Any]) -> Mapping[
     return {"value": zscore.replace([math.inf, -math.inf], math.nan)}
 
 
-def _consecutive_true(series: pd.Series) -> pd.Series:
-    mask = series.fillna(False).astype(bool)
-    return mask.groupby((~mask).cumsum()).cumsum().astype(int)
+def _legacy_trend_adapter(df: pd.DataFrame, _: Mapping[str, Any]) -> Mapping[str, pd.Series]:
+    """Expose the pre-parameterization trend outputs through the generic registry."""
 
-
-def _legacy_trend(df: pd.DataFrame, _: Mapping[str, Any]) -> Mapping[str, pd.Series]:
-    ma = df.groupby(TICKER, sort=False)[CLOSE].transform(
-        lambda series: series.rolling(5, min_periods=5).mean()
-    )
-    above = (df[CLOSE] > ma).fillna(False).astype(bool)
-    below = (df[CLOSE] < ma).fillna(False).astype(bool)
+    trend = calculate_stock_trend(df)
     return {
-        "ma5": ma,
-        "close_above_ma5": above,
-        "close_below_ma5": below,
-        "close_above_ma5_days": above.groupby(df[TICKER], sort=False).transform(_consecutive_true),
-        "close_below_ma5_days": below.groupby(df[TICKER], sort=False).transform(_consecutive_true),
+        "ma5": trend["ma5"],
+        "close_above_ma5": trend["close_above_ma5"],
+        "close_below_ma5": trend["close_below_ma5"],
+        "close_above_ma5_days": trend["close_above_ma5_days"],
+        "close_below_ma5_days": trend["close_below_ma5_days"],
     }
 
 
-def _legacy_system_b(df: pd.DataFrame, _: Mapping[str, Any]) -> Mapping[str, pd.Series]:
-    trend = _legacy_trend(df, {})
-    ma = trend["ma5"]
-    ge = (df[CLOSE] >= ma).fillna(False).astype(bool)
-    lt = (df[CLOSE] < ma).fillna(False).astype(bool)
-    confirmed = lambda values: values.rolling(2, min_periods=2).sum().eq(2)  # noqa: E731
+def _legacy_system_b_adapter(
+    df: pd.DataFrame, _: Mapping[str, Any]
+) -> Mapping[str, pd.Series]:
+    """Expose existing System B indicator states through the generic registry."""
+
+    states = calculate_system_b_basic_states_from_prices(df)
     return {
-        "system_b_trend_valid": ge.groupby(df[TICKER], sort=False).transform(confirmed).fillna(False).astype(bool),
-        "system_b_exit_triggered": lt.groupby(df[TICKER], sort=False).transform(confirmed).fillna(False).astype(bool),
+        "system_b_trend_valid": states["system_b_trend_valid"],
+        "system_b_exit_triggered": states["system_b_exit_triggered"],
     }
 
 
@@ -251,11 +246,11 @@ CALCULATION_REGISTRY: dict[str, IndicatorCalculationDefinition] = {
     "stock_trend_legacy": IndicatorCalculationDefinition(
         "stock_trend_legacy", {}, (CLOSE,),
         ("ma5", "close_above_ma5", "close_below_ma5", "close_above_ma5_days", "close_below_ma5_days"),
-        _legacy_trend,
+        _legacy_trend_adapter,
     ),
     "system_b_states": IndicatorCalculationDefinition(
         "system_b_states", {}, (CLOSE,),
-        ("system_b_trend_valid", "system_b_exit_triggered"), _legacy_system_b,
+        ("system_b_trend_valid", "system_b_exit_triggered"), _legacy_system_b_adapter,
     ),
 }
 

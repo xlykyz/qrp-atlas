@@ -13,6 +13,8 @@ from qrp_atlas.indicators import (
     calculate_indicators,
     resolve_indicator_requests,
 )
+from qrp_atlas.indicators.stock import calculate_stock_trend
+from qrp_atlas.indicators.system_b import calculate_system_b_basic_states_from_prices
 
 
 def _prices() -> pd.DataFrame:
@@ -130,3 +132,67 @@ def test_rolling_mean_and_population_std_publish_defaults_and_warmup() -> None:
     assert math.isnan(asset.loc[0, "mean"])
     assert asset.loc[1, "mean"] == 1.5
     assert asset.loc[1, "std"] == 0.5
+
+
+def test_legacy_compatibility_indicators_match_public_calculators_row_by_row() -> None:
+    """Compatibility registry entries delegate to the established indicator APIs."""
+
+    rows = []
+    for ticker, closes in (
+        ("A", [10, 10, 10, 10, 10, 10, 11, 11]),
+        ("B", [20, 20, 20, 20, 20, 19, 19, 20]),
+    ):
+        for day, close in enumerate(closes, 1):
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "trade_date": f"2024-02-{day:02d}",
+                    "open": close,
+                    "high": close + 1,
+                    "low": close - 1,
+                    "close": close,
+                }
+            )
+    prices = pd.DataFrame(rows).sample(frac=1, random_state=23).reset_index(drop=True)
+
+    trend_columns = (
+        "ma5",
+        "close_above_ma5",
+        "close_below_ma5",
+        "close_above_ma5_days",
+        "close_below_ma5_days",
+    )
+    system_b_columns = ("system_b_trend_valid", "system_b_exit_triggered")
+    actual = calculate_indicators(
+        prices,
+        (
+            IndicatorRequest(
+                "stock_trend_legacy",
+                alias="trend",
+                output_fields={column: column for column in trend_columns},
+            ),
+            IndicatorRequest(
+                "system_b_states",
+                alias="system_b",
+                output_fields={column: column for column in system_b_columns},
+            ),
+        ),
+    )
+    expected_trend = calculate_stock_trend(prices)
+    expected_system_b = calculate_system_b_basic_states_from_prices(prices)
+
+    pd.testing.assert_frame_equal(
+        actual.loc[:, trend_columns].reset_index(drop=True),
+        expected_trend.loc[:, trend_columns].reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        actual.loc[:, system_b_columns].reset_index(drop=True),
+        expected_system_b.loc[:, system_b_columns].reset_index(drop=True),
+    )
+
+    asset_a = actual[actual["ticker"] == "A"].reset_index(drop=True)
+    asset_b = actual[actual["ticker"] == "B"].reset_index(drop=True)
+    assert asset_a["ma5"].iloc[:4].isna().all()  # warm-up
+    assert not asset_a.loc[4, "close_above_ma5"]  # close equals MA5
+    assert asset_a.loc[7, "system_b_trend_valid"]  # two consecutive days at/above MA5
+    assert asset_b.loc[6, "system_b_exit_triggered"]  # two consecutive days below MA5
