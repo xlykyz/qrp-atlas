@@ -1,7 +1,7 @@
-"""qrp_atlas.backtest.results - 回测结果读取层。
+"""qrp_atlas.backtest.results - 回测结果读写层。
 
-从本地 JSON 文件读取回测结果，对外暴露 service 函数和 schema。
-不依赖数据库，未来切换 DuckDB 时替换 loader 即可。
+从本地 JSON 文件读取回测结果，对外暴露 service 函数和 schema；
+组合回测可通过 BacktestRunWriter 写入同一文件契约。
 """
 
 from .loader import BacktestRunsLoader, ResultFileMissingError, RunNotFoundError
@@ -22,6 +22,7 @@ from .service import (
     get_trades,
     list_runs,
 )
+from .writer import BacktestRunWriter, portfolio_fills_to_trades
 
 __all__ = [
     "BacktestRunsLoader",
@@ -33,6 +34,8 @@ __all__ = [
     "BacktestTrade",
     "SkippedTrade",
     "BacktestConfigSnapshot",
+    "BacktestRunWriter",
+    "portfolio_fills_to_trades",
     "list_runs",
     "get_run_meta",
     "get_summary",
