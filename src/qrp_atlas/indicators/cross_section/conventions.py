@@ -12,12 +12,16 @@ Rules shared by operators and the pipeline entry point:
 - samples from different dates must never mix;
 - callers' DataFrames are never mutated;
 - empty inputs return empty frames with stable columns;
-- outputs have deterministic sort order (trade_date, asset_id).
+- outputs have deterministic sort order (trade_date, asset_id);
+- trade_date is normalized to timezone-naive midnight timestamps;
+- (trade_date, asset_id) is a unique non-null primary key.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -28,6 +32,143 @@ REQUIRED_CROSS_SECTION_COLUMNS: tuple[str, str] = (TRADE_DATE, ASSET_ID)
 
 class CrossSectionFrameError(ValueError):
     """Raised when a cross-section frame fails validation."""
+
+
+def _is_scalar_date_like(value: Any) -> bool:
+    """Return True for a single date-like value (not a date sequence)."""
+    if value is None or isinstance(value, (str, bytes, date, datetime, pd.Timestamp)):
+        return True
+    if isinstance(value, pd.Period):
+        return True
+    if getattr(value, "shape", None) == ():
+        return True
+    return False
+
+
+def normalize_trade_date(value: Any) -> pd.Timestamp:
+    """Normalize one trade_date to a timezone-naive midnight Timestamp.
+
+    Accepts str / date / datetime / Timestamp (and other pandas-parseable
+    scalars). Unparseable or empty values raise ``CrossSectionFrameError``.
+    """
+    if value is None:
+        raise CrossSectionFrameError("trade_date must be non-empty and parseable")
+    try:
+        if isinstance(value, float) and pd.isna(value):
+            raise CrossSectionFrameError("trade_date must be non-empty and parseable")
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise CrossSectionFrameError("trade_date must be non-empty and parseable")
+        value = text
+
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise CrossSectionFrameError(
+            f"trade_date must be non-empty and parseable: {value!r}"
+        ) from exc
+
+    if pd.isna(ts):
+        raise CrossSectionFrameError(
+            f"trade_date must be non-empty and parseable: {value!r}"
+        )
+
+    if ts.tz is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts.normalize()
+
+
+def normalize_trade_dates(trade_dates: Sequence[Any] | Any) -> list[pd.Timestamp]:
+    """Normalize zero-or-more trade dates with scalar-safe iteration.
+
+    Supports:
+    - a single string / date / datetime / Timestamp
+    - a sequence of date-like values
+    - an empty sequence
+
+    Strings are never iterated character-by-character.
+    """
+    if trade_dates is None:
+        return []
+    if _is_scalar_date_like(trade_dates):
+        return [normalize_trade_date(trade_dates)]
+    if isinstance(trade_dates, pd.Series):
+        values = trade_dates.tolist()
+    elif isinstance(trade_dates, Sequence) and not isinstance(trade_dates, (str, bytes)):
+        values = list(trade_dates)
+    else:
+        return [normalize_trade_date(trade_dates)]
+    return [normalize_trade_date(value) for value in values]
+
+
+def normalize_trade_date_series(series: pd.Series) -> pd.Series:
+    """Normalize a Series of trade dates to timezone-naive midnight timestamps."""
+    if series.empty:
+        return pd.Series(dtype="datetime64[ns]", index=series.index, name=series.name)
+    return pd.Series(
+        [normalize_trade_date(value) for value in series.tolist()],
+        index=series.index,
+        name=series.name,
+        dtype="datetime64[ns]",
+    )
+
+
+def normalize_asset_id(value: Any) -> str:
+    """Normalize one asset_id to a non-empty string."""
+    if value is None:
+        raise CrossSectionFrameError("asset_id must be a non-empty string")
+    try:
+        if isinstance(value, float) and pd.isna(value):
+            raise CrossSectionFrameError("asset_id must be a non-empty string")
+    except (TypeError, ValueError):
+        pass
+    if pd.isna(value):
+        raise CrossSectionFrameError("asset_id must be a non-empty string")
+    text = value.strip() if isinstance(value, str) else str(value).strip()
+    if not text:
+        raise CrossSectionFrameError("asset_id must be a non-empty string")
+    return text
+
+
+def normalize_asset_id_series(series: pd.Series) -> pd.Series:
+    """Normalize a Series of asset ids to non-empty strings."""
+    if series.empty:
+        return series.astype(object)
+    return series.map(normalize_asset_id)
+
+
+def enforce_cross_section_primary_key(df: pd.DataFrame) -> None:
+    """Raise if (trade_date, asset_id) is not a unique non-null primary key."""
+    if df is None or df.empty:
+        return
+    if TRADE_DATE not in df.columns or ASSET_ID not in df.columns:
+        raise CrossSectionFrameError(
+            "cross-section frame missing required columns: "
+            f"{[c for c in REQUIRED_CROSS_SECTION_COLUMNS if c not in getattr(df, 'columns', [])]}"
+        )
+    if df[TRADE_DATE].isna().any():
+        raise CrossSectionFrameError("trade_date must be non-empty and parseable")
+    if df[ASSET_ID].isna().any():
+        raise CrossSectionFrameError("asset_id must be a non-empty string")
+    blank_assets = df[ASSET_ID].map(lambda x: isinstance(x, str) and x == "")
+    if bool(blank_assets.any()):
+        raise CrossSectionFrameError("asset_id must be a non-empty string")
+    duplicated = df.duplicated(subset=[TRADE_DATE, ASSET_ID], keep=False)
+    if bool(duplicated.any()):
+        sample = (
+            df.loc[duplicated, [TRADE_DATE, ASSET_ID]]
+            .drop_duplicates()
+            .head(5)
+            .to_dict(orient="records")
+        )
+        raise CrossSectionFrameError(
+            "duplicate cross-section primary key (trade_date, asset_id): "
+            f"{sample}"
+        )
 
 
 def normalize_feature_columns(
@@ -88,6 +229,7 @@ def ensure_cross_section_frame(
     feature_columns: str | Sequence[str] | None = None,
     require_features: bool = False,
     copy: bool = True,
+    enforce_primary_key: bool = True,
 ) -> pd.DataFrame:
     """Validate and normalize a cross-section input frame.
 
@@ -96,10 +238,15 @@ def ensure_cross_section_frame(
         feature_columns: optional feature columns that must exist when provided.
         require_features: when True, at least one feature column is required.
         copy: when True (default), return a defensive copy.
+        enforce_primary_key: when True (default), require unique non-null
+            ``(trade_date, asset_id)`` keys after normalization.
 
     Returns:
         A validated DataFrame. Empty/None inputs become empty frames that still
         carry trade_date/asset_id (and requested feature) columns when known.
+
+        ``trade_date`` values are normalized to timezone-naive midnight
+        timestamps. ``asset_id`` values are normalized to non-empty strings.
     """
     features = normalize_feature_columns(feature_columns)
     if require_features and not features:
@@ -107,7 +254,7 @@ def ensure_cross_section_frame(
 
     if df is None:
         columns = list(REQUIRED_CROSS_SECTION_COLUMNS) + features
-        return pd.DataFrame(columns=columns)
+        return empty_cross_section_frame(features)
 
     if not isinstance(df, pd.DataFrame):
         raise CrossSectionFrameError("cross-section input must be a pandas DataFrame")
@@ -123,7 +270,15 @@ def ensure_cross_section_frame(
         raise CrossSectionFrameError("at least one feature column is required")
 
     out = df.copy() if copy else df
-    out[ASSET_ID] = out[ASSET_ID].map(lambda x: x if pd.isna(x) else str(x))
+    if out.empty:
+        out[TRADE_DATE] = pd.Series(dtype="datetime64[ns]")
+        out[ASSET_ID] = out[ASSET_ID].astype(object)
+        return out
+
+    out[TRADE_DATE] = normalize_trade_date_series(out[TRADE_DATE])
+    out[ASSET_ID] = normalize_asset_id_series(out[ASSET_ID])
+    if enforce_primary_key:
+        enforce_cross_section_primary_key(out)
     return out
 
 
@@ -137,4 +292,8 @@ def empty_cross_section_frame(
     for col in list(feature_columns or ()) + list(extra_columns or ()):
         if col not in cols:
             cols.append(str(col))
-    return pd.DataFrame(columns=cols)
+    out = pd.DataFrame(columns=cols)
+    out[TRADE_DATE] = pd.Series(dtype="datetime64[ns]")
+    if ASSET_ID in out.columns:
+        out[ASSET_ID] = pd.Series(dtype=object)
+    return out

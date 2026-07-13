@@ -11,8 +11,12 @@ from __future__ import annotations
 from qrp_atlas.indicators.cross_section.conventions import (
     CrossSectionFrameError,
     REQUIRED_CROSS_SECTION_COLUMNS,
+    enforce_cross_section_primary_key,
     ensure_cross_section_frame,
+    normalize_asset_id,
     normalize_feature_columns,
+    normalize_trade_date,
+    normalize_trade_dates,
     sort_cross_section_frame,
 )
 from qrp_atlas.indicators.cross_section.operators import (
@@ -41,8 +45,12 @@ __all__ = [
     "cross_section_rank",
     "cross_section_winsorize",
     "cross_section_zscore",
+    "enforce_cross_section_primary_key",
     "ensure_cross_section_frame",
+    "normalize_asset_id",
     "normalize_feature_columns",
+    "normalize_trade_date",
+    "normalize_trade_dates",
     "process_cross_section",
     "resolve_historical_universe",
     "sort_cross_section_frame",

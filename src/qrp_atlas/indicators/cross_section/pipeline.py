@@ -53,21 +53,24 @@ def _align_features_to_universe(
                 cols.append(col)
         return pd.DataFrame(columns=cols)
 
-    left = universe.copy()
-    left[ASSET_ID] = left[ASSET_ID].astype(str)
+    # Both sides must already use the shared trade_date/asset_id contract.
+    left = ensure_cross_section_frame(universe, enforce_primary_key=True)
     right_cols = [TRADE_DATE, ASSET_ID] + [
         c for c in feature_columns if c in features.columns and c not in (TRADE_DATE, ASSET_ID)
     ]
-    # keep any extra audit columns from features that share the join key
     extra = [
         c
         for c in features.columns
         if c not in right_cols and c not in (TRADE_DATE, ASSET_ID)
     ]
-    right = features[right_cols + extra].copy()
-    right[ASSET_ID] = right[ASSET_ID].astype(str)
+    right = ensure_cross_section_frame(
+        features[right_cols + extra],
+        feature_columns=[c for c in feature_columns if c in features.columns],
+        enforce_primary_key=True,
+    )
 
     merged = left.merge(right, on=[TRADE_DATE, ASSET_ID], how=how, suffixes=("", "_feature"))
+    # left/right keys were unique; result must remain unique on the join key
     return sort_cross_section_frame(merged)
 
 
@@ -123,6 +126,10 @@ def process_cross_section(
     Notes:
         - Does not mutate caller inputs.
         - Cross-section operators still run per trade_date only.
+        - ``trade_date`` values are normalized before merge/operators.
+        - Caller feature frames and explicit universes must have unique
+          ``(trade_date, asset_id)`` keys; duplicates raise
+          ``CrossSectionFrameError``.
         - Does not implement Top-N, neutralization or strategy selection.
     """
     if features is None and universe is None and universe_request is None:
@@ -135,12 +142,7 @@ def process_cross_section(
     resolved_features: list[str] = []
     if features is not None:
         if feature_columns is None:
-            # default: all non-key columns
-            candidate = [
-                c
-                for c in features.columns
-                if c not in (TRADE_DATE, ASSET_ID)
-            ]
+            candidate = [c for c in features.columns if c not in (TRADE_DATE, ASSET_ID)]
             resolved_features = normalize_feature_columns(candidate)
         else:
             resolved_features = normalize_feature_columns(feature_columns)
@@ -148,6 +150,7 @@ def process_cross_section(
             features,
             feature_columns=resolved_features if resolved_features else None,
             require_features=bool(resolved_features),
+            enforce_primary_key=True,
         )
     elif feature_columns is not None:
         resolved_features = normalize_feature_columns(feature_columns)
@@ -178,6 +181,12 @@ def process_cross_section(
             con=con,
             index_query=index_query,
         )
+    elif resolved_universe is not None:
+        # Caller-supplied universes must satisfy the same primary-key contract.
+        resolved_universe = ensure_cross_section_frame(
+            resolved_universe,
+            enforce_primary_key=True,
+        )
 
     if resolved_universe is not None and feature_frame is not None:
         working = _align_features_to_universe(
@@ -187,7 +196,7 @@ def process_cross_section(
             how=align,
         )
     elif resolved_universe is not None:
-        working = ensure_cross_section_frame(resolved_universe)
+        working = ensure_cross_section_frame(resolved_universe, enforce_primary_key=True)
     elif feature_frame is not None:
         working = feature_frame
     else:
@@ -196,7 +205,6 @@ def process_cross_section(
     if not resolved_features or working.empty:
         return sort_cross_section_frame(working)
 
-    # only apply operators to features that are present after alignment
     present_features = [c for c in resolved_features if c in working.columns]
     if not present_features:
         return sort_cross_section_frame(working)

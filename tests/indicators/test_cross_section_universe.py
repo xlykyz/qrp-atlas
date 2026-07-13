@@ -11,8 +11,10 @@ import pytest
 
 from qrp_atlas.contracts import INDEX_COMPONENT_HISTORY, init_database
 from qrp_atlas.indicators import (
+    CrossSectionFrameError,
     HistoricalUniverseRequest,
     build_historical_universe,
+    normalize_trade_date,
     process_cross_section,
     resolve_historical_universe,
 )
@@ -23,6 +25,10 @@ def _insert_df(con: duckdb.DuckDBPyConnection, table: str, df: pd.DataFrame) -> 
     cols = ", ".join(df.columns)
     con.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM tmp_u")
     con.unregister("tmp_u")
+
+
+def _day(value: str) -> pd.Timestamp:
+    return normalize_trade_date(value)
 
 
 @pytest.fixture
@@ -114,10 +120,10 @@ def test_explicit_asset_list_and_multi_date() -> None:
         source="explicit",
     )
     assert out[["trade_date", "asset_id"]].values.tolist() == [
-        ["2024-01-02", "A"],
-        ["2024-01-02", "B"],
-        ["2024-01-03", "A"],
-        ["2024-01-03", "B"],
+        [_day("2024-01-02"), "A"],
+        [_day("2024-01-02"), "B"],
+        [_day("2024-01-03"), "A"],
+        [_day("2024-01-03"), "B"],
     ]
 
 
@@ -176,7 +182,7 @@ def test_multi_date_index_universe_stable_sort(index_db: Path) -> None:
         index_code="000300.SH",
         db_path=index_db,
     )
-    keys = out[["trade_date", "asset_id"]].astype(str).values.tolist()
+    keys = out[["trade_date", "asset_id"]].values.tolist()
     assert keys == sorted(keys)
     # both dates present
     assert out["trade_date"].nunique() == 2
@@ -213,8 +219,113 @@ def test_process_cross_section_joins_universe(index_db: Path) -> None:
         db_path=index_db,
     )
     pd.testing.assert_frame_equal(features, original)
-    day1 = out[out["trade_date"] == "2024-02-01"]
+    day1 = out[out["trade_date"] == _day("2024-02-01")]
     assert set(day1["asset_id"]) == {"AAA", "BBB"}
     assert "CCC" not in set(day1["asset_id"])
     assert day1.loc[day1["asset_id"] == "AAA", "momentum_rank"].iloc[0] == 1.0
     assert day1.loc[day1["asset_id"] == "BBB", "momentum_rank"].iloc[0] == 2.0
+
+
+def test_request_scalar_string_date_is_not_split_into_chars(index_db: Path) -> None:
+    request = HistoricalUniverseRequest(
+        trade_dates="2024-02-01",
+        source="index",
+        index_code="000300.SH",
+    )
+    out = resolve_historical_universe(request, db_path=index_db)
+    assert out["trade_date"].nunique() == 1
+    assert (out["trade_date"] == _day("2024-02-01")).all()
+    assert set(out["asset_id"]) == {"AAA", "BBB"}
+
+
+def test_request_scalar_date_and_timestamp() -> None:
+    out_date = build_historical_universe(
+        date(2024, 1, 2),
+        asset_ids=["A", "B"],
+        source="explicit",
+    )
+    out_ts = build_historical_universe(
+        pd.Timestamp("2024-01-02 16:00:00"),
+        asset_ids=["A", "B"],
+        source="explicit",
+    )
+    assert out_date["trade_date"].nunique() == 1
+    assert out_ts["trade_date"].nunique() == 1
+    assert (out_date["trade_date"] == _day("2024-01-02")).all()
+    assert (out_ts["trade_date"] == _day("2024-01-02")).all()
+
+
+def test_feature_timestamp_universe_string_merge(index_db: Path) -> None:
+    features = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2024-02-01 10:00:00"),
+                "asset_id": "AAA",
+                "momentum": 0.1,
+            },
+            {
+                "trade_date": pd.Timestamp("2024-02-01 10:00:00"),
+                "asset_id": "BBB",
+                "momentum": 0.4,
+            },
+        ]
+    )
+    original = features.copy(deep=True)
+    out = process_cross_section(
+        features,
+        feature_columns="momentum",
+        trade_dates="2024-02-01",
+        index_code="000300.SH",
+        operators=("rank",),
+        db_path=index_db,
+    )
+    pd.testing.assert_frame_equal(features, original)
+    assert len(out) == 2
+    assert set(out["asset_id"]) == {"AAA", "BBB"}
+    assert out.loc[out["asset_id"] == "AAA", "momentum_rank"].iloc[0] == 1.0
+    assert out.loc[out["asset_id"] == "BBB", "momentum_rank"].iloc[0] == 2.0
+
+
+def test_duplicate_caller_universe_is_rejected() -> None:
+    features = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A", "x": 1.0},
+            {"trade_date": "2024-01-02", "asset_id": "B", "x": 2.0},
+        ]
+    )
+    universe = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A"},
+            {"trade_date": "2024-01-02", "asset_id": "A"},
+        ]
+    )
+    with pytest.raises(CrossSectionFrameError, match="duplicate cross-section primary key"):
+        process_cross_section(
+            features,
+            feature_columns="x",
+            universe=universe,
+            operators=("rank",),
+        )
+
+
+def test_process_cross_section_universe_request_scalar_string(index_db: Path) -> None:
+    features = pd.DataFrame(
+        [
+            {"trade_date": pd.Timestamp("2024-02-01"), "asset_id": "AAA", "momentum": 0.2},
+            {"trade_date": pd.Timestamp("2024-02-01"), "asset_id": "BBB", "momentum": 0.1},
+        ]
+    )
+    request = HistoricalUniverseRequest(
+        trade_dates="2024-02-01",
+        source="index",
+        index_code="000300.SH",
+    )
+    out = process_cross_section(
+        features,
+        feature_columns="momentum",
+        universe_request=request,
+        operators=("rank",),
+        db_path=index_db,
+    )
+    assert out["trade_date"].nunique() == 1
+    assert set(out["asset_id"]) == {"AAA", "BBB"}

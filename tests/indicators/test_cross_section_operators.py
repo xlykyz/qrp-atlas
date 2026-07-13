@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import math
+from datetime import date, datetime
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -16,12 +16,17 @@ from qrp_atlas.indicators import (
     cross_section_winsorize,
     cross_section_zscore,
     ensure_cross_section_frame,
+    normalize_trade_date,
     process_cross_section,
 )
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows).sample(frac=1.0, random_state=7).reset_index(drop=True)
+
+
+def _day(value: str) -> pd.Timestamp:
+    return normalize_trade_date(value)
 
 
 def test_multi_date_isolation_and_same_day_multi_asset() -> None:
@@ -34,8 +39,8 @@ def test_multi_date_isolation_and_same_day_multi_asset() -> None:
         ]
     )
     ranked = cross_section_rank(df, "momentum", ascending=True)
-    day1 = ranked[ranked["trade_date"] == "2024-01-02"].set_index("asset_id")
-    day2 = ranked[ranked["trade_date"] == "2024-01-03"].set_index("asset_id")
+    day1 = ranked[ranked["trade_date"] == _day("2024-01-02")].set_index("asset_id")
+    day2 = ranked[ranked["trade_date"] == _day("2024-01-03")].set_index("asset_id")
     assert day1.loc["A", "momentum_rank"] == 1.0
     assert day1.loc["B", "momentum_rank"] == 2.0
     # date 2 ranking is independent; high value is not compared with day 1
@@ -110,10 +115,10 @@ def test_zscore_mean_std_and_zero_variance() -> None:
         ]
     )
     out = cross_section_zscore(df, "x", ddof=0, min_count=2)
-    day1 = out[out["trade_date"] == "2024-01-02"]["x_zscore"]
+    day1 = out[out["trade_date"] == _day("2024-01-02")]["x_zscore"]
     assert day1.mean() == pytest.approx(0.0, abs=1e-12)
     assert day1.std(ddof=0) == pytest.approx(1.0, abs=1e-12)
-    day2 = out[out["trade_date"] == "2024-01-03"]["x_zscore"]
+    day2 = out[out["trade_date"] == _day("2024-01-03")]["x_zscore"]
     assert day2.isna().all()
 
 
@@ -225,3 +230,58 @@ def test_invalid_winsor_limits() -> None:
     )
     with pytest.raises(CrossSectionFrameError):
         cross_section_winsorize(df, "x", limits=(0.8, 0.2))
+
+
+def test_mixed_date_types_form_one_cross_section() -> None:
+    df = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A", "x": 1.0},
+            {"trade_date": date(2024, 1, 2), "asset_id": "B", "x": 2.0},
+            {"trade_date": datetime(2024, 1, 2, 15, 30), "asset_id": "C", "x": 3.0},
+            {"trade_date": pd.Timestamp("2024-01-02 09:00:00"), "asset_id": "D", "x": 4.0},
+        ]
+    )
+    original = df.copy(deep=True)
+    out = cross_section_rank(df, "x")
+    pd.testing.assert_frame_equal(df, original)
+    assert out["trade_date"].nunique() == 1
+    assert (out["trade_date"] == _day("2024-01-02")).all()
+    assert set(out["x_rank"]) == {1.0, 2.0, 3.0, 4.0}
+
+
+def test_duplicate_feature_keys_are_rejected() -> None:
+    df = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A", "x": 1.0},
+            {"trade_date": date(2024, 1, 2), "asset_id": "A", "x": 2.0},
+        ]
+    )
+    with pytest.raises(CrossSectionFrameError, match="duplicate cross-section primary key"):
+        cross_section_rank(df, "x")
+
+
+def test_null_trade_date_and_blank_asset_id_are_rejected() -> None:
+    with pytest.raises(CrossSectionFrameError, match="trade_date"):
+        ensure_cross_section_frame(
+            pd.DataFrame(
+                [{"trade_date": None, "asset_id": "A", "x": 1.0}]
+            )
+        )
+    with pytest.raises(CrossSectionFrameError, match="trade_date"):
+        ensure_cross_section_frame(
+            pd.DataFrame(
+                [{"trade_date": "", "asset_id": "A", "x": 1.0}]
+            )
+        )
+    with pytest.raises(CrossSectionFrameError, match="asset_id"):
+        ensure_cross_section_frame(
+            pd.DataFrame(
+                [{"trade_date": "2024-01-02", "asset_id": "", "x": 1.0}]
+            )
+        )
+    with pytest.raises(CrossSectionFrameError, match="asset_id"):
+        ensure_cross_section_frame(
+            pd.DataFrame(
+                [{"trade_date": "2024-01-02", "asset_id": None, "x": 1.0}]
+            )
+        )
