@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timedelta
-from typing import Iterable, Mapping, Sequence
+from datetime import date, datetime
+from typing import Iterable, Literal, Mapping, Sequence
 
 import duckdb
 import pandas as pd
@@ -13,6 +13,8 @@ from qrp_atlas.config import DB_PATH
 from qrp_atlas.contracts import IS_OPEN, TRADE_DATE
 
 SOURCE_TUSHARE = "tushare"
+
+OnCalendarExhausted = Literal["raise"]
 
 
 def to_date(value) -> date | None:
@@ -41,7 +43,9 @@ def normalize_date_series(series: pd.Series) -> pd.Series:
 
 def stable_hash(parts: Sequence[object], *, length: int = 16) -> str:
     """Stable, reproducible content/business hash (not random UUID)."""
-    payload = "\u001f".join("" if p is None or (isinstance(p, float) and pd.isna(p)) else str(p) for p in parts)
+    payload = "\u001f".join(
+        "" if p is None or (isinstance(p, float) and pd.isna(p)) else str(p) for p in parts
+    )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:length]
 
 
@@ -66,12 +70,25 @@ def load_open_trade_dates(db_path: str | None = None) -> list[date]:
 class NextTradeDateResolver:
     """Map announcement/event dates to the next open trade date (strictly later)."""
 
-    def __init__(self, open_dates: Sequence[date] | None = None, *, db_path: str | None = None):
+    def __init__(
+        self,
+        open_dates: Sequence[date] | None = None,
+        *,
+        db_path: str | None = None,
+        on_calendar_exhausted: OnCalendarExhausted = "raise",
+    ):
         if open_dates is None:
             open_dates = load_open_trade_dates(db_path)
         self.open_dates = sorted({d for d in open_dates if d is not None})
         if not self.open_dates:
             raise ValueError("open trade dates are empty; trading_calendar is required")
+        if on_calendar_exhausted != "raise":
+            raise ValueError(
+                "on_calendar_exhausted only supports 'raise'; "
+                "silent calendar-day fallback is not allowed"
+            )
+        self.on_calendar_exhausted = on_calendar_exhausted
+        self.db_path = db_path
 
     def next_trade_date(self, event_date: date | str | None) -> date | None:
         d = to_date(event_date)
@@ -86,8 +103,7 @@ class NextTradeDateResolver:
             else:
                 hi = mid
         if lo >= len(self.open_dates):
-            # fall back: if calendar ends, use +1 calendar day heuristic only for tests with synthetic calendars
-            return d + timedelta(days=1)
+            raise ValueError(f"No open trade date found after {d.isoformat()}")
         return self.open_dates[lo]
 
     def map_series(self, series: pd.Series) -> pd.Series:

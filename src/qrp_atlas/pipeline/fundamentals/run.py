@@ -54,6 +54,8 @@ def run_one(
     init_db: bool = True,
 ) -> dict:
     print(f"[FUNDAMENTALS] table={table} mode={mode} periods={periods} tickers={tickers}")
+    if resolver is None and db_path is not None:
+        resolver = NextTradeDateResolver(db_path=db_path)
     raw = fetch_financial(
         table,
         periods=periods,

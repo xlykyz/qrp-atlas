@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -25,14 +26,14 @@ from qrp_atlas.contracts import (
     TUSHARE_INCOME,
     TUSHARE_INDEX_MEMBER_ALL,
     TUSHARE_INDEX_WEIGHT,
-    get_table,
     init_database,
 )
 from qrp_atlas.pipeline.fundamentals.clean import clean_financial
 from qrp_atlas.pipeline.fundamentals.load_duckdb import load_financial
-from qrp_atlas.pipeline.fundamentals.run import run_fundamentals
+from qrp_atlas.pipeline.fundamentals.run import run_fundamentals, run_one as run_financial_one
 from qrp_atlas.pipeline.index_component.clean import clean_index_component
 from qrp_atlas.pipeline.index_component.load_duckdb import load_index_component
+from qrp_atlas.pipeline.index_component.run import run_index_component
 from qrp_atlas.pipeline.industry_membership.clean import clean_industry_membership
 from qrp_atlas.pipeline.industry_membership.load_duckdb import load_industry_membership
 from qrp_atlas.pipeline.pit_utils import NextTradeDateResolver, stable_hash
@@ -180,7 +181,6 @@ class FakePro:
 
     def index_member_all(self, **kwargs):
         self._record("index_member_all", **kwargs)
-        # includes a historical exit row for coverage
         return pd.DataFrame(
             [
                 {
@@ -214,18 +214,53 @@ class FakePro:
 
     def index_weight(self, index_code: str, start_date: str, end_date: str):
         self._record("index_weight", index_code=index_code, start_date=start_date, end_date=end_date)
-        return pd.DataFrame(
+        start = int(start_date)
+        end = int(end_date)
+        frames = []
+        # Two indices intentionally use different snapshot calendars.
+        calendars = {
+            "000300.SH": [
+                ("20240131", 5.5, 0.8),
+                ("20240229", 5.7, 0.7),
+                ("20240329", 5.9, 0.6),
+                ("20240430", 6.0, 0.5),
+            ],
+            "000905.SH": [
+                ("20240115", 1.1, 0.4),
+                ("20240215", 1.2, 0.3),
+                ("20240315", 1.3, 0.2),
+                ("20240415", 1.4, 0.1),
+            ],
+        }
+        rows = calendars.get(
+            index_code,
             [
-                {"index_code": index_code, "con_code": "600519.SH", "trade_date": "20240131", "weight": 5.5},
-                {"index_code": index_code, "con_code": "000001.SZ", "trade_date": "20240131", "weight": 0.8},
-                {"index_code": index_code, "con_code": "600519.SH", "trade_date": "20240229", "weight": 5.7},
-                {"index_code": index_code, "con_code": "000001.SZ", "trade_date": "20240229", "weight": 0.7},
-            ]
+                ("20240131", 1.0, 1.0),
+                ("20240229", 1.0, 1.0),
+            ],
         )
+        for snap, w1, w2 in rows:
+            if start <= int(snap) <= end:
+                frames.extend(
+                    [
+                        {
+                            "index_code": index_code,
+                            "con_code": "600519.SH",
+                            "trade_date": snap,
+                            "weight": w1,
+                        },
+                        {
+                            "index_code": index_code,
+                            "con_code": "000001.SZ",
+                            "trade_date": snap,
+                            "weight": w2,
+                        },
+                    ]
+                )
+        return pd.DataFrame(frames)
 
 
 def _open_dates() -> list[date]:
-    # weekdays only for a small window covering test announcements / weekends
     start = date(2024, 1, 1)
     end = date(2024, 12, 31)
     days = []
@@ -235,6 +270,11 @@ def _open_dates() -> list[date]:
             days.append(cur)
         cur += timedelta(days=1)
     return days
+
+
+def _seed_calendar(con: duckdb.DuckDBPyConnection, open_dates: list[date]) -> None:
+    rows = [(d, True, d.year, d.month, (d.month - 1) // 3 + 1) for d in open_dates]
+    con.executemany("INSERT INTO trading_calendar VALUES (?, ?, ?, ?, ?)", rows)
 
 
 @pytest.fixture
@@ -248,12 +288,7 @@ def tmp_db(tmp_path):
     con = duckdb.connect(str(path))
     try:
         init_database(con)
-        # seed trading_calendar subset
-        rows = [(d, True, d.year, d.month, (d.month - 1) // 3 + 1) for d in _open_dates()]
-        con.executemany(
-            "INSERT INTO trading_calendar VALUES (?, ?, ?, ?, ?)",
-            rows,
-        )
+        _seed_calendar(con, _open_dates())
     finally:
         con.close()
     return path
@@ -264,7 +299,6 @@ def test_six_tables_in_contracts_and_exports():
     for table in PIT_TABLES:
         assert table.name in names
         assert table.primary_key == (REVISION_ID,)
-        # primary key not nullable
         for col in table.columns:
             if col.name in table.primary_key:
                 assert col.nullable is False
@@ -294,13 +328,25 @@ def test_stable_hash_is_reproducible():
 
 
 def test_next_trade_date_and_weekend(resolver: NextTradeDateResolver):
-    # Friday announcement -> next Monday
     assert resolver.next_trade_date(date(2024, 3, 15)) == date(2024, 3, 18)
-    # Saturday / Sunday -> Monday
     assert resolver.next_trade_date(date(2024, 3, 16)) == date(2024, 3, 18)
     assert resolver.next_trade_date(date(2024, 3, 17)) == date(2024, 3, 18)
-    # weekday -> next weekday
     assert resolver.next_trade_date(date(2024, 3, 18)) == date(2024, 3, 19)
+
+
+def test_next_trade_date_raises_when_calendar_exhausted():
+    open_dates = [date(2024, 3, 15), date(2024, 3, 18), date(2024, 3, 19)]
+    resolver = NextTradeDateResolver(open_dates, on_calendar_exhausted="raise")
+
+    with pytest.raises(ValueError, match="No open trade date found after 2024-03-19"):
+        resolver.next_trade_date(date(2024, 3, 19))
+
+    with pytest.raises(ValueError, match="No open trade date found after 2024-03-20"):
+        resolver.next_trade_date(date(2024, 3, 20))
+
+    # Normal mapping still works inside the calendar.
+    assert resolver.next_trade_date(date(2024, 3, 15)) == date(2024, 3, 18)
+    assert resolver.next_trade_date(date(2024, 3, 16)) == date(2024, 3, 18)
 
 
 def test_financial_same_content_idempotent(resolver: NextTradeDateResolver):
@@ -308,7 +354,10 @@ def test_financial_same_content_idempotent(resolver: NextTradeDateResolver):
     c1 = clean_financial(raw, "income_statement", trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
     c2 = clean_financial(raw, "income_statement", trade_date_resolver=resolver, ingested_at=datetime(2024, 2, 2))
     assert set(c1[REVISION_ID]) == set(c2[REVISION_ID])
-    assert c1.iloc[0][AVAILABLE_TRADE_DATE].date() == date(2024, 3, 18) or c1.iloc[0][AVAILABLE_TRADE_DATE] == date(2024, 3, 18)
+    first_available = c1.iloc[0][AVAILABLE_TRADE_DATE]
+    if hasattr(first_available, "date"):
+        first_available = first_available.date()
+    assert first_available == date(2024, 3, 18)
 
 
 def test_financial_content_change_appends_revision(resolver: NextTradeDateResolver):
@@ -340,7 +389,6 @@ def test_financial_four_tables_fake_pipeline(tmp_db, resolver: NextTradeDateReso
         assert con.execute("select count(*) from balance_sheet").fetchone()[0] == 1
         assert con.execute("select count(*) from cashflow_statement").fetchone()[0] == 1
         assert con.execute("select count(*) from financial_indicator").fetchone()[0] == 1
-        # available_trade_date is next open day after Friday 2024-03-15
         row = con.execute(
             "select available_trade_date from income_statement where ticker='000001.SZ'"
         ).fetchone()
@@ -348,7 +396,6 @@ def test_financial_four_tables_fake_pipeline(tmp_db, resolver: NextTradeDateReso
     finally:
         con.close()
 
-    # rerun identical -> no growth
     results2 = run_fundamentals(
         tables=("income_statement",),
         periods=["20231231"],
@@ -359,11 +406,6 @@ def test_financial_four_tables_fake_pipeline(tmp_db, resolver: NextTradeDateReso
         resolver=resolver,
     )
     assert results2[0]["inserted"] == 0
-    con = duckdb.connect(str(tmp_db), read_only=True)
-    try:
-        assert con.execute("select count(*) from income_statement").fetchone()[0] == 2
-    finally:
-        con.close()
 
 
 def test_financial_append_new_revision_in_duckdb(tmp_db, resolver: NextTradeDateResolver):
@@ -374,7 +416,7 @@ def test_financial_append_new_revision_in_duckdb(tmp_db, resolver: NextTradeDate
     raw2.loc[0, "n_income"] = 999.0
     cleaned2 = clean_financial(raw2, "income_statement", trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 2))
     inserted = load_financial(cleaned2, "income_statement", db_path=tmp_db, init=False)
-    assert inserted == 1  # only changed row
+    assert inserted == 1
     con = duckdb.connect(str(tmp_db), read_only=True)
     try:
         n = con.execute("select count(*) from income_statement where ticker='000001.SZ'").fetchone()[0]
@@ -386,27 +428,150 @@ def test_financial_append_new_revision_in_duckdb(tmp_db, resolver: NextTradeDate
 def test_industry_history_pipeline(tmp_db, resolver: NextTradeDateResolver):
     raw = FakePro().index_member_all(ts_code="300750.SZ")
     cleaned = clean_industry_membership(raw, trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
-    # 2 membership rows * 3 levels = 6
     assert len(cleaned) == 6
     assert set(cleaned["industry_level"]) == {1, 2, 3}
-    # historical exit retained
     assert cleaned["effective_to"].notna().any()
     inserted = load_industry_membership(cleaned, db_path=tmp_db, init=True)
     assert inserted == 6
     assert load_industry_membership(cleaned, db_path=tmp_db, init=False) == 0
 
 
-def test_index_snapshot_intervals(tmp_db, resolver: NextTradeDateResolver):
+def test_index_snapshot_model_no_batch_intervals(tmp_db, resolver: NextTradeDateResolver):
     raw = FakePro().index_weight("000300.SH", "20240101", "20240331")
     cleaned = clean_index_component(raw, trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
-    assert len(cleaned) == 4
-    first = cleaned[cleaned["snapshot_date"].astype(str) == "2024-01-31"]
-    assert set(first["effective_to"].astype(str)) == {"2024-02-29"}
-    last = cleaned[cleaned["snapshot_date"].astype(str) == "2024-02-29"]
-    assert last["effective_to"].isna().all()
+    assert len(cleaned) == 6  # 3 snapshots * 2 constituents
+    # Snapshot model: effective_from = snapshot_date, effective_to always empty.
+    assert cleaned["effective_to"].isna().all()
+    assert (
+        cleaned["effective_from"].map(lambda x: x.date() if hasattr(x, "date") else x).tolist()
+        == cleaned["snapshot_date"].map(lambda x: x.date() if hasattr(x, "date") else x).tolist()
+    )
     inserted = load_index_component(cleaned, db_path=tmp_db, init=True)
-    assert inserted == 4
+    assert inserted == 6
     assert load_index_component(cleaned, db_path=tmp_db, init=False) == 0
+
+
+def test_index_multi_index_isolation(resolver: NextTradeDateResolver):
+    client = FakePro()
+    raw = pd.concat(
+        [
+            client.index_weight("000300.SH", "20240101", "20240229"),
+            client.index_weight("000905.SH", "20240101", "20240229"),
+        ],
+        ignore_index=True,
+    )
+    cleaned = clean_index_component(raw, trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
+    snaps_300 = set(
+        cleaned.loc[cleaned["index_code"] == "000300.SH", "snapshot_date"].astype(str)
+    )
+    snaps_905 = set(
+        cleaned.loc[cleaned["index_code"] == "000905.SH", "snapshot_date"].astype(str)
+    )
+    assert snaps_300 == {"2024-01-31", "2024-02-29"}
+    assert snaps_905 == {"2024-01-15", "2024-02-15"}
+    assert snaps_300.isdisjoint(snaps_905)
+    # No cross-index effective_to construction; all remain empty.
+    assert cleaned["effective_to"].isna().all()
+
+
+def test_index_batched_backfill_snapshot_model(tmp_db, resolver: NextTradeDateResolver):
+    client = FakePro()
+    r1 = run_index_component(
+        index_codes=["000300.SH"],
+        start_date="20240101",
+        end_date="20240229",
+        client=client,
+        db_path=str(tmp_db),
+        resolver=resolver,
+    )
+    r2 = run_index_component(
+        index_codes=["000300.SH"],
+        start_date="20240301",
+        end_date="20240430",
+        client=client,
+        db_path=str(tmp_db),
+        resolver=resolver,
+    )
+    assert r1["inserted"] == 4  # Jan+Feb * 2 members
+    assert r2["inserted"] == 4  # Mar+Apr * 2 members
+
+    # rerun first batch remains idempotent and independent
+    r1b = run_index_component(
+        index_codes=["000300.SH"],
+        start_date="20240101",
+        end_date="20240229",
+        client=client,
+        db_path=str(tmp_db),
+        resolver=resolver,
+    )
+    assert r1b["inserted"] == 0
+
+    con = duckdb.connect(str(tmp_db), read_only=True)
+    try:
+        snaps = [
+            str(r[0])
+            for r in con.execute(
+                "select distinct snapshot_date from index_component_history order by 1"
+            ).fetchall()
+        ]
+        assert snaps == ["2024-01-31", "2024-02-29", "2024-03-29", "2024-04-30"]
+        assert con.execute("select count(*) from index_component_history").fetchone()[0] == 8
+        assert con.execute(
+            "select count(*) from index_component_history where effective_to is not null"
+        ).fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_run_entries_use_db_path_calendar_not_default(tmp_path, monkeypatch):
+    """When db_path is passed without resolver, calendar is read from that DB only."""
+    from qrp_atlas.pipeline import pit_utils as pu
+    from qrp_atlas.pipeline.fundamentals import run as frun
+
+    custom_db = tmp_path / "custom.duckdb"
+    con = duckdb.connect(str(custom_db))
+    try:
+        init_database(con)
+        # Custom calendar: after 2024-03-15 the next open day is 2024-03-20 (not Mon 18).
+        rows = [
+            (date(2024, 3, 14), True, 2024, 3, 1),
+            (date(2024, 3, 15), True, 2024, 3, 1),
+            (date(2024, 3, 20), True, 2024, 3, 1),
+            (date(2024, 4, 3), True, 2024, 4, 2),
+            (date(2024, 4, 8), True, 2024, 4, 2),
+        ]
+        con.executemany("INSERT INTO trading_calendar VALUES (?, ?, ?, ?, ?)", rows)
+    finally:
+        con.close()
+
+    real_loader = pu.load_open_trade_dates
+
+    def guarded_loader(db_path=None):
+        if db_path is None:
+            raise AssertionError("attempted to load default trading_calendar")
+        return real_loader(db_path)
+
+    monkeypatch.setattr(pu, "load_open_trade_dates", guarded_loader)
+    monkeypatch.setattr(frun, "NextTradeDateResolver", pu.NextTradeDateResolver)
+
+    result = frun.run_one(
+        "income_statement",
+        periods=["20231231"],
+        tickers=["000001.SZ"],
+        mode="period",
+        client=FakePro(),
+        db_path=str(custom_db),
+        resolver=None,
+    )
+    assert result["inserted"] == 1
+    con = duckdb.connect(str(custom_db), read_only=True)
+    try:
+        avail = con.execute(
+            "select available_trade_date from income_statement where ticker='000001.SZ'"
+        ).fetchone()[0]
+        assert str(avail) == "2024-03-20"
+    finally:
+        con.close()
 
 
 def test_duckdb_create_sql_for_pit_tables(tmp_path):

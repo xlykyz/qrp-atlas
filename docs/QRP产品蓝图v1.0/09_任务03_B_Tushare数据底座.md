@@ -48,7 +48,15 @@
 ### 1.4 交易日历
 
 本地 `trading_calendar` 当前仅存储开市日（`is_open=True` 全表 8797 行）。  
-`available_trade_date` 计算采用“严格晚于公告日的下一个开市日”。
+`available_trade_date` 计算采用“严格晚于事件日的下一个开市日”。
+
+若事件日等于或晚于交易日历最后一天，导致找不到后续开市日，则 **明确抛错**：
+
+```text
+No open trade date found after YYYY-MM-DD
+```
+
+不会静默回退到自然日 `+1`，也不会生成周末/节假日。需要先更新 `trading_calendar` 再重跑。
 
 ## 2. 六张表与主键
 
@@ -125,13 +133,32 @@ available_trade_date = announcement_date 之后的首个开市日
 - 每条原始成员记录展开为 level=1/2/3 三行。
 - `effective_from=in_date`，`effective_to=out_date`（空表示仍有效）。
 
-### 指数
+### 指数（快照模型，非精确成员生效区间）
 
-- `snapshot_date` 保留 Tushare `trade_date`。
-- 对同一 `index_code` 的快照排序后：
-  - `effective_from = snapshot_date`
-  - `effective_to = 下一快照日期`（最后一档为空）
-- 注意：`index_weight` 为月频近似，不是日频精确调仓权重。
+- `snapshot_date` 保留 Tushare `trade_date`（月度权重快照）。
+- `effective_from = snapshot_date`，仅作统一时间字段兼容。
+- `effective_to` **不由单次 Pipeline 构造**，统一保持为空。
+- 不同 `index_code` 完全隔离；禁止跨指数拼接“下一快照”。
+- 分批回填：各批次独立按 `revision_id` 幂等追加快照，不依赖前后批次衔接。
+- 注意：`index_weight` 是月度权重快照近似，**不是**精确的历史成员生效区间。
+
+后续任务 03-C 查询某个 `as_of_date` 时，按：
+
+```text
+同一 index_code
+snapshot_date <= as_of_date
+available_trade_date <= as_of_date
+选择最新 snapshot_date
+```
+
+取得当时可用的完整成分快照。
+
+## 6.1 验收修正（PR 跟进）
+
+1. 交易日历越界默认 `raise`，禁止自然日回退。
+2. 指数采用**快照模型**：不在单批 fetch 内固化相邻 `effective_to`。
+3. 多指数隔离与分批回填由测试覆盖。
+4. 运行入口在仅传入 `db_path` 时，使用同一 `db_path` 读取交易日历。
 
 ## 7. Pipeline 入口
 
@@ -204,8 +231,8 @@ python scripts/migrate_pit_tables.py --db-path data/db/quant.db
 指数：
 
 - `000300.SH`，2024-01-01~2024-03-31
-- 6 个相邻快照 × 300 = 1800 行
-- 相邻快照 `effective_to` 正确；最后一档为空
+- 6 个快照 × 300 = 1800 行
+- 快照模型：`effective_from=snapshot_date`，`effective_to` 为空
 - 二次执行 inserted=0
 
 ## 10. 幂等验证

@@ -1,4 +1,11 @@
-"""Normalize index_weight snapshots and derive adjacent effective intervals."""
+"""Normalize index_weight monthly weight snapshots.
+
+Snapshot model (task 03-B):
+- retain snapshot_date + weight
+- effective_from = snapshot_date for unified time field compatibility
+- effective_to is left empty; do NOT construct adjacent intervals from a single batch
+- later task 03-C selects the latest available snapshot by as_of_date
+"""
 
 from __future__ import annotations
 
@@ -50,24 +57,13 @@ def clean_index_component(
     if out.empty:
         return out
 
-    # derive effective interval from adjacent snapshots per index
-    snapshots = sorted({to_date(d) for d in out[SNAPSHOT_DATE].tolist() if to_date(d) is not None})
-    next_map: dict = {}
-    for i, snap in enumerate(snapshots):
-        next_map[snap] = snapshots[i + 1] if i + 1 < len(snapshots) else None
-
+    # Snapshot model: effective_from mirrors snapshot_date; effective_to stays open/empty.
+    # Intervals are intentionally not derived from the current fetch batch.
     out[EFFECTIVE_FROM] = out[SNAPSHOT_DATE].map(to_date)
-    out[EFFECTIVE_TO] = out[EFFECTIVE_FROM].map(lambda d: next_map.get(d))
+    out[EFFECTIVE_TO] = None
 
     resolver = trade_date_resolver or NextTradeDateResolver(open_dates)
-    # weight snapshots are known on snapshot date; still use next trade day for safety when non-trade day
-    out[AVAILABLE_TRADE_DATE] = out[SNAPSHOT_DATE].map(
-        lambda d: resolver.next_trade_date(d) if to_date(d) not in set(resolver.open_dates) else to_date(d)
-    )
-    # if snapshot itself is open trade day, available same day after close is still conservative next day?
-    # Task rule for announcements: after announcement next day. For monthly index weights, snapshot_date is
-    # the published trade date of the weight file; use next open day strictly after snapshot for consistency
-    # with no-intraday-time conservative rule.
+    # No trusted intraday timestamp: available on the first open day strictly after snapshot_date.
     out[AVAILABLE_TRADE_DATE] = out[SNAPSHOT_DATE].map(resolver.next_trade_date)
 
     out[SOURCE] = SOURCE_TUSHARE
@@ -88,7 +84,7 @@ def clean_index_component(
         payload = {
             "weight": row.get(WEIGHT),
             "effective_from": to_date(row[EFFECTIVE_FROM]).isoformat() if to_date(row[EFFECTIVE_FROM]) else "",
-            "effective_to": to_date(row[EFFECTIVE_TO]).isoformat() if to_date(row[EFFECTIVE_TO]) else "",
+            "effective_to": "",
             **{f"b{i}": v for i, v in enumerate(biz)},
         }
         revision_ids.append(content_signature(payload, list(payload.keys())))

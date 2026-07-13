@@ -37,6 +37,8 @@ def run_index_component(
     init_db: bool = True,
 ) -> dict:
     print(f"[INDEX] codes={index_codes} range={start_date}->{end_date}")
+    if resolver is None and db_path is not None:
+        resolver = NextTradeDateResolver(db_path=db_path)
     raw = fetch_index_weights(index_codes, start_date=start_date, end_date=end_date, client=client)
     print(f"[INDEX] fetched={0 if raw is None else len(raw)}")
     if raw is None or raw.empty:

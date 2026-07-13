@@ -38,6 +38,8 @@ def run_industry_membership(
     init_db: bool = True,
 ) -> dict:
     print(f"[INDUSTRY] tickers={tickers} l1={l1_code} l2={l2_code} l3={l3_code}")
+    if resolver is None and db_path is not None:
+        resolver = NextTradeDateResolver(db_path=db_path)
     raw = fetch_industry_membership(
         tickers=tickers,
         l1_code=l1_code,
