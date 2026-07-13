@@ -18,7 +18,7 @@
 | 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
 | 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
 | 3 | point-in-time 数据底座与查询服务 | contracts / pipeline / data / backtest | ✅ 已完成：03-A/03-B/03-C |
-| 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3；04-A 已完成，整体 🟡 部分完成 |
+| 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3；04-A/04-B 已完成，整体 🟡 部分完成 |
 | 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
 | 6 | 残差相对价值与稳健性验证 | indicators / strategies / backtest / results | 阶段 2-4 |
 | 7 | 策略 API 与前端产品闭环 | api / web | 稳定策略与回测接口 |
@@ -115,7 +115,7 @@
 
 ## 六、阶段 4：横截面与多因子
 
-> 状态：🟡 部分完成（2026-07-14）。04-A 已完成横截面基础算子与历史股票池；其余 04-B～04-E 未开始。
+> 状态：🟡 部分完成（2026-07-14）。04-A 已完成横截面基础算子与历史股票池；04-B 已完成正式因子定义与生成；其余 04-C～04-E 未开始。
 
 ### 目标
 
@@ -125,6 +125,7 @@
 
 - [x] 横截面 rank、winsorize、z-score（04-A）；
 - [x] 历史股票池与截面处理入口（04-A）；
+- [x] 正式动量 / 市值 / 财务因子定义与生成（04-B）；
 - 行业/市值中性化；
 - 股票池过滤扩展（ST/停牌/流动性等）；
 - Top N 和目标权重；
