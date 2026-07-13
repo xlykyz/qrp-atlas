@@ -15,7 +15,7 @@ import pandas as pd
 
 from qrp_atlas.config.paths import BACKTEST_RUNS_DIR
 
-from ..portfolio import ORDER_REJECTED, PortfolioBacktestResult
+from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _RESULT_FILENAMES = (
@@ -39,7 +39,7 @@ def _validate_run_id(run_id: str) -> str:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
@@ -178,8 +178,8 @@ def _summary_payload(
         "profit_loss_ratio": profit_loss_ratio,
         "trade_count": len(closed),
         "avg_holding_days": (sum(holdings) / len(holdings)) if holdings else None,
-        "max_trade_loss_pct": min(returns) if returns else None,
-        "max_trade_profit_pct": max(returns) if returns else None,
+        "max_trade_loss_pct": min(losses) if losses else None,
+        "max_trade_profit_pct": max(wins) if wins else None,
         "skipped_count": int(result.summary["skipped_count"]),
         "turnover": float(result.summary["turnover"]),
         "commission": float(result.summary["commission"]),
@@ -207,7 +207,7 @@ def _skipped_payload(result: PortfolioBacktestResult) -> list[dict[str, Any]]:
 
 
 class BacktestRunWriter:
-    """Atomically write portfolio output for the existing loader and API."""
+    """Write portfolio output through a temporary result directory."""
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else BACKTEST_RUNS_DIR
