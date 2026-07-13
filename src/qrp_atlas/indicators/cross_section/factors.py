@@ -4,6 +4,17 @@ This module produces raw factor values for historical stock pools. It does not
 implement rank / winsorize / z-score (reuse 04-A), neutralization, Top-N,
 weights, or backtest strategies.
 
+Architecture boundary:
+
+```text
+contracts -> indicators -> backtest
+```
+
+Indicators consume already-prepared panels only. Point-in-time financial
+version selection and DuckDB access live in ``qrp_atlas.backtest.factor_data``
+(``prepare_financial_factor_panel``). This module never imports backtest and
+never opens a database.
+
 Factor frame contract (aligned with 04-A):
 
 - columns include ``trade_date``, ``asset_id``, and named factor columns;
@@ -16,7 +27,7 @@ Factor frame contract (aligned with 04-A):
 
 Layers of data:
 
-- raw market / financial fields (inputs);
+- raw market / financial fields (inputs / prepared panels);
 - raw factor values (this module);
 - cross-sectionally standardized scores (04-A operators).
 """
@@ -25,23 +36,19 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import pandas as pd
 
-from qrp_atlas.backtest.point_in_time import select_latest_available_records
 from qrp_atlas.contracts import (
     ASSET_ID,
-    AVAILABLE_TRADE_DATE,
     BPS,
     CIRC_MV,
     CLOSE,
-    FINANCIAL_INDICATOR,
     FLOAT_CAP,
     MARKET_CAP,
-    REPORT_PERIOD,
     ROE,
     TICKER,
     TOTAL_MV,
@@ -61,6 +68,7 @@ from qrp_atlas.indicators.cross_section.universe import build_historical_univers
 _SIZE_FIELDS: tuple[str, ...] = (MARKET_CAP, FLOAT_CAP, TOTAL_MV, CIRC_MV)
 _PRICE_ID_CANDIDATES: tuple[str, ...] = (ASSET_ID, TICKER)
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_RESERVED_OUTPUT_COLUMNS: frozenset[str] = frozenset({TRADE_DATE, ASSET_ID})
 
 
 class FactorError(CrossSectionFrameError):
@@ -138,12 +146,18 @@ class ResolvedFactorRequest:
     output_column: str
 
 
-FinancialQuery = Callable[..., pd.DataFrame]
-
-
 def _validate_identifier(value: str, label: str) -> None:
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise FactorRequestError(f"{label} must be a stable identifier: {value!r}")
+
+
+def _validate_output_column(value: str) -> None:
+    _validate_identifier(value, "factor output column")
+    if value in _RESERVED_OUTPUT_COLUMNS:
+        raise FactorRequestError(
+            f"factor output column {value!r} is reserved; "
+            f"cannot use {sorted(_RESERVED_OUTPUT_COLUMNS)}"
+        )
 
 
 def _stable_value(value: Any) -> str:
@@ -219,13 +233,32 @@ def _resolve_id_column(df: pd.DataFrame, *, label: str) -> str:
     )
 
 
+def _reject_duplicate_keys(df: pd.DataFrame, *, label: str) -> None:
+    """Raise when (trade_date, asset_id) is duplicated in an input panel."""
+    if df is None or df.empty:
+        return
+    if TRADE_DATE not in df.columns or ASSET_ID not in df.columns:
+        return
+    duplicated = df.duplicated(subset=[TRADE_DATE, ASSET_ID], keep=False)
+    if bool(duplicated.any()):
+        sample = (
+            df.loc[duplicated, [TRADE_DATE, ASSET_ID]]
+            .drop_duplicates()
+            .head(5)
+            .to_dict(orient="records")
+        )
+        raise FactorRequestError(
+            f"{label} contains duplicate (trade_date, asset_id) keys: {sample}"
+        )
+
+
 def _normalize_panel_keys(
     df: pd.DataFrame,
     *,
     label: str,
     required_value_columns: Sequence[str] = (),
 ) -> pd.DataFrame:
-    """Normalize a date/asset panel without enforcing cross-section uniqueness yet."""
+    """Normalize a date/asset panel and reject duplicate keys."""
     if df is None:
         raise FactorRequestError(f"{label} is required")
     if not isinstance(df, pd.DataFrame):
@@ -248,6 +281,7 @@ def _normalize_panel_keys(
     out = df.copy()
     out[TRADE_DATE] = [normalize_trade_date(v) for v in out[TRADE_DATE].tolist()]
     out[ASSET_ID] = [normalize_asset_id(v) for v in out[id_col].tolist()]
+    _reject_duplicate_keys(out, label=label)
     return out
 
 
@@ -282,16 +316,15 @@ def compute_momentum_factor(
     Formula:
         momentum = close[T] / close[T - lookback] - 1
 
+    Implementation is a standard per-asset N-bar row shift. The window requires
+    ``lookback + 1`` bars in the asset's ordered history. Intermediate missing
+    closes still occupy bar positions; only the two endpoints must be finite and
+    strictly positive for a non-NaN result.
+
     Time semantics:
         Uses only bars with ``trade_date <= T`` for each target date T. The
         target bar's close is included. Values are therefore known only after
         the close of T and are intended for execution on T+1 or later.
-
-    Window behavior:
-        Lookback is measured in available bars per asset (sorted ascending).
-        When fewer than ``lookback + 1`` finite positive closes exist up to T,
-        or either endpoint is non-finite / non-positive, the result is NaN.
-        Assets never borrow prices from other assets.
     """
     if not isinstance(lookback, int) or isinstance(lookback, bool) or lookback < 1:
         raise FactorRequestError(
@@ -315,11 +348,10 @@ def compute_momentum_factor(
 
     needed_assets = set(uni[ASSET_ID].tolist())
     panel = panel.loc[panel[ASSET_ID].isin(needed_assets)].copy()
-    panel[price_column] = _as_finite_series(panel[price_column])
+    # Keep bar positions even when closes are invalid; only endpoints matter.
+    panel[price_column] = pd.to_numeric(panel[price_column], errors="coerce")
     panel.loc[panel[price_column] <= 0, price_column] = math.nan
-
     panel = panel.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort")
-    panel = panel.drop_duplicates(subset=[ASSET_ID, TRADE_DATE], keep="last")
 
     def _one_asset(group: pd.DataFrame) -> pd.DataFrame:
         closes = group[price_column]
@@ -343,7 +375,6 @@ def compute_momentum_factor(
         feature_columns=[output_column],
         enforce_primary_key=True,
     )
-
     out = uni[[TRADE_DATE, ASSET_ID]].merge(
         computed[[TRADE_DATE, ASSET_ID, output_column]],
         on=[TRADE_DATE, ASSET_ID],
@@ -392,12 +423,10 @@ def compute_log_market_cap_factor(
         return _attach_nan_column(uni, output_column)
 
     panel = panel.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort")
-    panel = panel.drop_duplicates(subset=[ASSET_ID, TRADE_DATE], keep="last")
     raw = _as_finite_series(panel[field])
     log_values = raw.where(raw > 0).map(
         lambda x: math.log(float(x)) if pd.notna(x) else math.nan
     )
-
     computed = pd.DataFrame(
         {
             TRADE_DATE: panel[TRADE_DATE].to_numpy(),
@@ -419,178 +448,68 @@ def compute_log_market_cap_factor(
     return sort_cross_section_frame(out)
 
 
-def _normalize_financials(financials: pd.DataFrame) -> pd.DataFrame:
-    if financials is None:
-        raise FactorRequestError("financials is required")
-    if not isinstance(financials, pd.DataFrame):
-        raise FactorRequestError("financials must be a pandas DataFrame")
-    if financials.empty:
-        out = financials.copy()
+def _normalize_financial_panel(financial_panel: pd.DataFrame) -> pd.DataFrame:
+    """Validate a prepared financial factor panel.
+
+    Expected columns:
+        trade_date, asset_id, and one or both of roe / bps.
+
+    This is not a versioned statement table. PIT selection must already have
+    been performed by backtest data preparation.
+    """
+    if financial_panel is None:
+        raise FactorRequestError("financial_panel is required")
+    if not isinstance(financial_panel, pd.DataFrame):
+        raise FactorRequestError("financial_panel must be a pandas DataFrame")
+    if financial_panel.empty:
+        out = financial_panel.copy()
         if ASSET_ID not in out.columns and TICKER in out.columns:
-            out[ASSET_ID] = pd.Series(dtype=object)
+            out[ASSET_ID] = out[TICKER].astype(str)
+        if TRADE_DATE in out.columns:
+            out[TRADE_DATE] = pd.Series(dtype="datetime64[ns]")
         return out
 
-    id_col = _resolve_id_column(financials, label="financials")
-    required = [AVAILABLE_TRADE_DATE, REPORT_PERIOD]
-    missing = [c for c in required if c not in financials.columns]
-    if missing:
-        raise FactorRequestError(f"financials missing required columns: {missing}")
-
-    out = financials.copy()
+    if TRADE_DATE not in financial_panel.columns:
+        raise FactorRequestError("financial_panel missing required column: 'trade_date'")
+    id_col = _resolve_id_column(financial_panel, label="financial_panel")
+    out = financial_panel.copy()
+    out[TRADE_DATE] = [normalize_trade_date(v) for v in out[TRADE_DATE].tolist()]
     out[ASSET_ID] = [normalize_asset_id(v) for v in out[id_col].tolist()]
-    if TICKER not in out.columns:
-        out[TICKER] = out[ASSET_ID]
-    out[AVAILABLE_TRADE_DATE] = pd.to_datetime(out[AVAILABLE_TRADE_DATE], errors="coerce")
-    out[REPORT_PERIOD] = pd.to_datetime(out[REPORT_PERIOD], errors="coerce")
+    _reject_duplicate_keys(out, label="financial_panel")
     return out
-
-
-def _latest_financial_rows_as_of(
-    financials: pd.DataFrame,
-    *,
-    as_of_date: Any,
-    asset_ids: Sequence[str],
-    value_columns: Sequence[str],
-) -> pd.DataFrame:
-    """Return one PIT-valid financial row per asset as of a trade date.
-
-    Rules:
-    1. Eligible only when ``available_trade_date <= as_of_date``;
-    2. Within each ``(asset_id, report_period)`` keep the latest version via
-       :func:`select_latest_available_records`;
-    3. Among remaining reports for an asset, keep the latest ``report_period``.
-
-    Later revisions that become available only after ``as_of_date`` never affect
-    earlier target dates.
-    """
-    as_of = normalize_trade_date(as_of_date)
-    assets = [normalize_asset_id(a) for a in asset_ids]
-    empty_cols = [ASSET_ID, REPORT_PERIOD, AVAILABLE_TRADE_DATE, *value_columns]
-    if not assets:
-        return pd.DataFrame(columns=empty_cols)
-
-    panel = _normalize_financials(financials)
-    if panel.empty:
-        return pd.DataFrame(columns=empty_cols)
-
-    missing_vals = [c for c in value_columns if c not in panel.columns]
-    if missing_vals:
-        raise FactorRequestError(
-            f"financials missing required value columns: {missing_vals}"
-        )
-
-    panel = panel.loc[panel[ASSET_ID].isin(set(assets))].copy()
-    if panel.empty:
-        return pd.DataFrame(columns=empty_cols)
-
-    selected = select_latest_available_records(
-        panel,
-        as_of_date=as_of,
-        entity_keys=[ASSET_ID, REPORT_PERIOD],
-        available_date_col=AVAILABLE_TRADE_DATE,
-        published_at_col="published_at" if "published_at" in panel.columns else None,
-        ingested_at_col="ingested_at" if "ingested_at" in panel.columns else None,
-        revision_col="revision_id" if "revision_id" in panel.columns else None,
-    )
-    if selected.empty:
-        return pd.DataFrame(columns=empty_cols)
-
-    selected = selected.sort_values(
-        [ASSET_ID, REPORT_PERIOD, AVAILABLE_TRADE_DATE],
-        kind="mergesort",
-    )
-    latest = selected.drop_duplicates(subset=[ASSET_ID], keep="last")
-    cols = [ASSET_ID, REPORT_PERIOD, AVAILABLE_TRADE_DATE, *value_columns]
-    extra = [c for c in ("published_at", "ingested_at", "revision_id") if c in latest.columns]
-    return latest[cols + extra].reset_index(drop=True)
-
-
-def _load_financials_via_query(
-    *,
-    financial_query: FinancialQuery | None,
-    as_of_date: Any,
-    asset_ids: Sequence[str],
-    db_path: Any,
-    con: Any,
-) -> pd.DataFrame:
-    query = financial_query
-    if query is None:
-        from qrp_atlas.backtest.pit_queries import query_financial_as_of
-
-        query = query_financial_as_of
-
-    if not asset_ids:
-        return pd.DataFrame()
-
-    frame = query(
-        as_of_date=as_of_date,
-        table=FINANCIAL_INDICATOR.name,
-        tickers=list(asset_ids),
-        db_path=db_path,
-        con=con,
-    )
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    return frame
 
 
 def compute_roe_factor(
     *,
     universe: pd.DataFrame,
-    financials: pd.DataFrame | None = None,
-    financial_query: FinancialQuery | None = None,
-    db_path: Any = None,
-    con: Any = None,
+    financial_panel: pd.DataFrame,
     output_column: str = "roe",
 ) -> pd.DataFrame:
-    """PIT ROE from ``financial_indicator``.
+    """ROE from a prepared same-day financial panel.
 
     Formula:
-        roe = financial_indicator.roe  (latest available report as of T)
+        roe = financial_panel.roe[trade_date=T, asset_id]
 
-    Direction: higher is better (quality).
-    Non-finite ROE values become NaN.
+    Direction: higher is better (quality). Non-finite ROE values become NaN.
+    ``financial_panel`` must already be point-in-time aligned for each target
+    ``trade_date`` (see ``prepare_financial_factor_panel`` in backtest).
     """
     uni = ensure_cross_section_frame(universe, enforce_primary_key=True)
     if uni.empty:
         return empty_cross_section_frame([output_column])
 
-    pieces: list[pd.DataFrame] = []
-    for trade_date, day_uni in uni.groupby(TRADE_DATE, sort=False):
-        assets = day_uni[ASSET_ID].tolist()
-        if financials is not None:
-            day_fin = financials
-        else:
-            day_fin = _load_financials_via_query(
-                financial_query=financial_query,
-                as_of_date=trade_date,
-                asset_ids=assets,
-                db_path=db_path,
-                con=con,
-            )
-        latest = _latest_financial_rows_as_of(
-            day_fin if day_fin is not None else pd.DataFrame(),
-            as_of_date=trade_date,
-            asset_ids=assets,
-            value_columns=[ROE],
-        )
-        if latest.empty:
-            piece = day_uni[[TRADE_DATE, ASSET_ID]].copy()
-            piece[output_column] = math.nan
-        else:
-            piece = day_uni[[TRADE_DATE, ASSET_ID]].merge(
-                latest[[ASSET_ID, ROE]].rename(columns={ROE: output_column}),
-                on=ASSET_ID,
-                how="left",
-            )
-            piece[output_column] = _as_finite_series(piece[output_column])
-        pieces.append(piece)
+    panel = _normalize_financial_panel(financial_panel)
+    if panel.empty or ROE not in panel.columns:
+        return _attach_nan_column(uni, output_column)
 
-    out = (
-        pd.concat(pieces, ignore_index=True)
-        if pieces
-        else _attach_nan_column(uni, output_column)
+    values = panel[[TRADE_DATE, ASSET_ID, ROE]].copy()
+    values[ROE] = _as_finite_series(values[ROE])
+    out = uni[[TRADE_DATE, ASSET_ID]].merge(
+        values.rename(columns={ROE: output_column}),
+        on=[TRADE_DATE, ASSET_ID],
+        how="left",
     )
+    out[output_column] = _as_finite_series(out[output_column])
     return sort_cross_section_frame(out)
 
 
@@ -598,93 +517,55 @@ def compute_book_to_price_factor(
     *,
     universe: pd.DataFrame,
     prices: pd.DataFrame,
-    financials: pd.DataFrame | None = None,
-    financial_query: FinancialQuery | None = None,
-    db_path: Any = None,
-    con: Any = None,
+    financial_panel: pd.DataFrame,
     output_column: str = "book_to_price",
     price_column: str = CLOSE,
 ) -> pd.DataFrame:
-    """PIT book-to-price = bps / close[T].
+    """Book-to-price = prepared bps / close[T].
 
     Formula:
-        book_to_price = financial_indicator.bps[as_of T] / close[T]
+        book_to_price = financial_panel.bps[T] / close[T]
 
-    Direction: higher is better (value).
-    Requires strictly positive finite BPS and close; otherwise NaN.
-    BPS is point-in-time (available_trade_date <= T); close is the same-day
-    target close and is intended for post-close / T+1 use when combined with
-    same-day prices.
+    Direction: higher is better (value). Requires strictly positive finite BPS
+    and close; otherwise NaN. ``financial_panel`` must already be point-in-time
+    aligned for each target ``trade_date``.
     """
     uni = ensure_cross_section_frame(universe, enforce_primary_key=True)
     if uni.empty:
         return empty_cross_section_frame([output_column])
 
-    panel = _normalize_panel_keys(
+    price_panel = _normalize_panel_keys(
         prices, label="prices", required_value_columns=[price_column]
     )
-    if not panel.empty:
+    if not price_panel.empty:
         max_date = uni[TRADE_DATE].max()
-        panel = panel.loc[panel[TRADE_DATE] <= max_date].copy()
-        panel = panel.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort")
-        panel = panel.drop_duplicates(subset=[ASSET_ID, TRADE_DATE], keep="last")
-        panel[price_column] = _as_finite_series(panel[price_column])
-        panel.loc[panel[price_column] <= 0, price_column] = math.nan
+        price_panel = price_panel.loc[price_panel[TRADE_DATE] <= max_date].copy()
+        price_panel = price_panel.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort")
+        price_panel[price_column] = _as_finite_series(price_panel[price_column])
+        price_panel.loc[price_panel[price_column] <= 0, price_column] = math.nan
 
-    pieces: list[pd.DataFrame] = []
-    for trade_date, day_uni in uni.groupby(TRADE_DATE, sort=False):
-        assets = day_uni[ASSET_ID].tolist()
-        if financials is not None:
-            day_fin = financials
-        else:
-            day_fin = _load_financials_via_query(
-                financial_query=financial_query,
-                as_of_date=trade_date,
-                asset_ids=assets,
-                db_path=db_path,
-                con=con,
-            )
-        latest = _latest_financial_rows_as_of(
-            day_fin if day_fin is not None else pd.DataFrame(),
-            as_of_date=trade_date,
-            asset_ids=assets,
-            value_columns=[BPS],
-        )
+    fina = _normalize_financial_panel(financial_panel)
+    out = uni[[TRADE_DATE, ASSET_ID]].copy()
+    if price_panel.empty or fina.empty or BPS not in fina.columns:
+        out[output_column] = math.nan
+        return sort_cross_section_frame(out)
 
-        piece = day_uni[[TRADE_DATE, ASSET_ID]].copy()
-        if panel.empty:
-            piece[output_column] = math.nan
-        else:
-            day_px = panel.loc[
-                (panel[TRADE_DATE] == normalize_trade_date(trade_date))
-                & (panel[ASSET_ID].isin(assets)),
-                [ASSET_ID, price_column],
-            ]
-            piece = piece.merge(day_px, on=ASSET_ID, how="left")
-            if latest.empty:
-                piece[output_column] = math.nan
-            else:
-                piece = piece.merge(latest[[ASSET_ID, BPS]], on=ASSET_ID, how="left")
-                bps = _as_finite_series(piece[BPS])
-                px = _as_finite_series(piece[price_column])
-                valid = (bps > 0) & (px > 0)
-                ratio = bps.div(px)
-                ratio = ratio.where(valid)
-                ratio = ratio.replace([math.inf, -math.inf], math.nan)
-                piece[output_column] = ratio
-            drop_cols = [
-                c
-                for c in (price_column, BPS)
-                if c in piece.columns and c != output_column
-            ]
-            piece = piece.drop(columns=drop_cols)
-        pieces.append(piece)
-
-    out = (
-        pd.concat(pieces, ignore_index=True)
-        if pieces
-        else _attach_nan_column(uni, output_column)
+    out = out.merge(
+        price_panel[[TRADE_DATE, ASSET_ID, price_column]],
+        on=[TRADE_DATE, ASSET_ID],
+        how="left",
     )
+    out = out.merge(
+        fina[[TRADE_DATE, ASSET_ID, BPS]],
+        on=[TRADE_DATE, ASSET_ID],
+        how="left",
+    )
+    bps = _as_finite_series(out[BPS])
+    px = _as_finite_series(out[price_column])
+    valid = (bps > 0) & (px > 0)
+    ratio = bps.div(px).where(valid).replace([math.inf, -math.inf], math.nan)
+    out[output_column] = ratio
+    out = out.drop(columns=[c for c in (price_column, BPS) if c in out.columns])
     out[output_column] = _as_finite_series(out[output_column])
     return sort_cross_section_frame(out)
 
@@ -712,14 +593,16 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         direction="higher = stronger recent winners",
         time_semantics=(
             "Uses only prices with trade_date <= T; includes T close; "
-            "intended for T+1 or later execution."
+            "intended for T+1 or later execution. Standard N-bar row shift: "
+            "intermediate missing bars still occupy positions."
         ),
         inputs=(CLOSE,),
         parameter_schema=_LOOKBACK,
         default_output="momentum",
         nan_semantics=(
-            "NaN when window < lookback+1 bars, either endpoint non-positive/non-finite, "
-            "or price missing; never zero-filled."
+            "NaN when fewer than lookback+1 bars, or either endpoint is "
+            "non-positive/non-finite; intermediate NaNs keep their bar slots; "
+            "never zero-filled."
         ),
     ),
     "log_market_cap": FactorDefinition(
@@ -739,37 +622,38 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
     ),
     "roe": FactorDefinition(
         code="roe",
-        name="Return on equity (PIT)",
+        name="Return on equity (prepared PIT panel)",
         family="fundamental",
-        description="Latest point-in-time ROE from financial_indicator.",
-        formula="financial_indicator.roe as of available_trade_date <= T",
+        description="ROE from a prepared point-in-time financial panel.",
+        formula="financial_panel.roe[trade_date=T]",
         direction="higher = better quality",
         time_semantics=(
-            "Only rows with available_trade_date <= T; later revisions after T "
-            "do not affect earlier dates; latest report_period is used."
+            "Consumes a prepared financial_panel already aligned so that each "
+            "row is valid for the target trade_date. PIT selection is performed "
+            "by backtest.prepare_financial_factor_panel, not by this module."
         ),
-        inputs=(ROE, AVAILABLE_TRADE_DATE, REPORT_PERIOD),
+        inputs=(ROE,),
         parameter_schema={},
         default_output="roe",
-        nan_semantics="NaN when no eligible report or ROE is non-finite; never fabricated.",
+        nan_semantics=(
+            "NaN when panel lacks the asset/date or ROE is non-finite; never fabricated."
+        ),
     ),
     "book_to_price": FactorDefinition(
         code="book_to_price",
-        name="Book-to-price (PIT)",
+        name="Book-to-price (prepared PIT panel)",
         family="fundamental",
-        description="Point-in-time BPS divided by same-day close.",
-        formula="financial_indicator.bps[as_of T] / close[T]",
+        description="Prepared BPS divided by same-day close.",
+        formula="financial_panel.bps[T] / close[T]",
         direction="higher = cheaper value",
         time_semantics=(
-            "BPS uses available_trade_date <= T with PIT version selection; "
-            "close is the same-day price on T (post-close / T+1 oriented)."
+            "BPS comes from a prepared PIT financial_panel; close is the "
+            "same-day price on T (post-close / T+1 oriented)."
         ),
-        inputs=(BPS, CLOSE, AVAILABLE_TRADE_DATE, REPORT_PERIOD),
+        inputs=(BPS, CLOSE),
         parameter_schema={},
         default_output="book_to_price",
-        nan_semantics=(
-            "NaN when BPS or close missing/non-finite/non-positive, or no eligible report."
-        ),
+        nan_semantics="NaN when BPS or close missing/non-finite/non-positive.",
     ),
 }
 
@@ -855,7 +739,7 @@ def resolve_factor_requests(
                     request.code, parameters, definition.parameter_schema
                 )
 
-        _validate_identifier(output_column, "factor output column")
+        _validate_output_column(output_column)
         if output_column in outputs:
             raise FactorRequestError(f"duplicate factor output column: {output_column}")
         outputs.add(output_column)
@@ -876,10 +760,7 @@ def _compute_one_factor(
     universe: pd.DataFrame,
     prices: pd.DataFrame | None,
     size_panel: pd.DataFrame | None,
-    financials: pd.DataFrame | None,
-    financial_query: FinancialQuery | None,
-    db_path: Any,
-    con: Any,
+    financial_panel: pd.DataFrame | None,
 ) -> pd.DataFrame:
     code = resolved.definition.code
     output = resolved.output_column
@@ -907,24 +788,28 @@ def _compute_one_factor(
             output_column=output,
         )
     if code == "roe":
+        if financial_panel is None:
+            raise FactorRequestError(
+                "roe requires a prepared financial_panel "
+                "(use backtest.prepare_financial_factor_panel)"
+            )
         return compute_roe_factor(
             universe=universe,
-            financials=financials,
-            financial_query=financial_query,
-            db_path=db_path,
-            con=con,
+            financial_panel=financial_panel,
             output_column=output,
         )
     if code == "book_to_price":
         if prices is None:
             raise FactorRequestError("book_to_price requires a prices panel")
+        if financial_panel is None:
+            raise FactorRequestError(
+                "book_to_price requires a prepared financial_panel "
+                "(use backtest.prepare_financial_factor_panel)"
+            )
         return compute_book_to_price_factor(
             universe=universe,
             prices=prices,
-            financials=financials,
-            financial_query=financial_query,
-            db_path=db_path,
-            con=con,
+            financial_panel=financial_panel,
             output_column=output,
         )
     raise UnknownFactorError(f"unknown factor code: {code}")
@@ -938,10 +823,7 @@ def generate_factor_frame(
     universe: pd.DataFrame | None = None,
     prices: pd.DataFrame | None = None,
     size_panel: pd.DataFrame | None = None,
-    financials: pd.DataFrame | None = None,
-    financial_query: FinancialQuery | None = None,
-    db_path: Any = None,
-    con: Any = None,
+    financial_panel: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Generate a unique, stable raw-factor frame for a historical universe.
 
@@ -950,12 +832,13 @@ def generate_factor_frame(
         trade_dates / asset_ids: explicit universe specification.
         universe: optional pre-built cross-section universe frame.
         prices: OHLCV (or at least close) panel keyed by trade_date + asset.
+            Duplicate ``(trade_date, asset_id)`` keys raise explicitly.
         size_panel: optional market-cap panel; defaults to ``prices`` for size.
-        financials: multi-version financial_indicator-like frame for tests /
-            offline generation. When omitted, ``financial_query`` or the
-            project PIT query service is used.
-        financial_query: injectable replacement for ``query_financial_as_of``.
-        db_path / con: optional DuckDB source for PIT financial queries.
+        financial_panel: prepared same-day financial fields with columns
+            ``trade_date``, ``asset_id``, and ``roe`` / ``bps`` as needed.
+            Build it with ``qrp_atlas.backtest.prepare_financial_factor_panel``
+            so that ROE and book-to-price share one PIT snapshot. This entry
+            point never queries DuckDB.
 
     Returns:
         DataFrame with ``trade_date``, ``asset_id`` and factor columns in the
@@ -978,10 +861,7 @@ def generate_factor_frame(
             universe=uni,
             prices=prices,
             size_panel=size_panel,
-            financials=financials,
-            financial_query=financial_query,
-            db_path=db_path,
-            con=con,
+            financial_panel=financial_panel,
         )
         frames.append(factor_frame[[TRADE_DATE, ASSET_ID, item.output_column]])
 
