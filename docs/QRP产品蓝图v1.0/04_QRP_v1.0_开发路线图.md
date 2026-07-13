@@ -16,7 +16,7 @@
 |---|---|---|---|
 | 0 | 架构与产品蓝图封版 | docs | 已完成 |
 | 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
-| 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | 阶段 1 |
+| 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
 | 3 | point-in-time 数据底座 | contracts / pipeline / data | 可与阶段 1-2 并行 |
 | 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3 |
 | 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
@@ -72,6 +72,16 @@
 - 组合净值由真实成交和持仓逐日计算；
 - A 股拒单原因可审计；
 - 前端现有净值/回撤组件可消费真实结果。
+
+### 完成记录
+
+- 状态：✅ 已完成（2026-07-13）
+- 主分支：`feature/portfolio-backtest-core`
+- 主 PR：#5；停牌字段子 PR：#6 已并入主分支
+- 全量回归：`python -m pytest` → 230 passed
+- 本地 DuckDB 已验收涨停、跌停、停牌和多标的调仓
+- 明确排除：short、借券、保证金、多腿、实盘；任务 03/04 未提前完成
+
 
 ## 五、阶段 3：point-in-time 数据底座
 
