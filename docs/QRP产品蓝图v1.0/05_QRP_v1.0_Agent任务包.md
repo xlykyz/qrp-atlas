@@ -104,15 +104,18 @@ short、借券、保证金、多腿、实盘。
 
 ## 任务 04：横截面组合与多因子策略
 
+> 状态：🟡 部分完成（04-A 已完成；详见 11_任务04_A_横截面基础算子与历史股票池.md）
+
 ### 前置
 
 任务 02、03 完成。
 
 ### 目标
 
-- 横截面 rank、winsorize、z-score；
+- [x] 横截面 rank、winsorize、z-score（04-A）；
+- [x] 历史股票池与截面处理入口（04-A）；
 - 行业/市值中性化；
-- 股票池和 Top N；
+- Top N 与完整股票池过滤；
 - cross-sectional momentum long-only；
 - multifactor long-only；
 - 目标权重和周期调仓；
