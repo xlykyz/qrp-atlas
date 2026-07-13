@@ -11,6 +11,16 @@ from .models import (
     Skipped,
     Trade,
 )
+from .portfolio import (
+    PortfolioBacktestConfig,
+    PortfolioBacktestEngine,
+    PortfolioBacktestResult,
+    PortfolioExecutionRule,
+    PortfolioFill,
+    PortfolioOrder,
+    PortfolioSnapshot,
+    PositionSnapshot,
+)
 from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strategy_data, run_strategy_backtest
 
 __all__ = [
@@ -20,7 +30,15 @@ __all__ = [
     "CostRule",
     "EntryRule",
     "ExitRule",
+    "PortfolioBacktestConfig",
+    "PortfolioBacktestEngine",
+    "PortfolioBacktestResult",
+    "PortfolioExecutionRule",
+    "PortfolioFill",
+    "PortfolioOrder",
+    "PortfolioSnapshot",
     "PositionRule",
+    "PositionSnapshot",
     "Skipped",
     "StrategyBacktestRun",
     "StrategyBacktestRuntime",
