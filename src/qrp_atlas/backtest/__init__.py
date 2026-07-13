@@ -12,6 +12,19 @@ from .models import (
     Trade,
 )
 from .point_in_time import select_latest_available_records
+from .portfolio import (
+    PortfolioBacktestConfig,
+    PortfolioBacktestEngine,
+    PortfolioBacktestResult,
+    PortfolioExecutionRule,
+    PortfolioFill,
+    PortfolioOrder,
+    PortfolioSnapshot,
+    PositionSnapshot,
+    StrategyPortfolioBacktestRun,
+    run_strategy_portfolio_backtest,
+    strategy_decisions_to_target_weights,
+)
 from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strategy_data, run_strategy_backtest
 
 __all__ = [
@@ -21,12 +34,23 @@ __all__ = [
     "CostRule",
     "EntryRule",
     "ExitRule",
+    "PortfolioBacktestConfig",
+    "PortfolioBacktestEngine",
+    "PortfolioBacktestResult",
+    "PortfolioExecutionRule",
+    "PortfolioFill",
+    "PortfolioOrder",
+    "PortfolioSnapshot",
     "PositionRule",
+    "PositionSnapshot",
     "Skipped",
     "StrategyBacktestRun",
     "StrategyBacktestRuntime",
+    "StrategyPortfolioBacktestRun",
     "Trade",
     "prepare_strategy_data",
     "run_strategy_backtest",
+    "run_strategy_portfolio_backtest",
     "select_latest_available_records",
+    "strategy_decisions_to_target_weights",
 ]
