@@ -96,6 +96,8 @@ def test_writer_creates_existing_api_contract_and_audit_files(tmp_path: Path):
     assert meta.end_date == "2024-01-03"
     assert summary.trade_count == 1
     assert summary.total_return_pct == pytest.approx(9.87)
+    assert summary.max_trade_loss_pct is None
+    assert summary.max_trade_profit_pct > 0
     assert len(equity) == 2
     assert equity[-1].equity == pytest.approx(1.0987)
     assert len(trades) == 1
