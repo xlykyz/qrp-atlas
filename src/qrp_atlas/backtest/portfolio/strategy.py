@@ -53,18 +53,23 @@ def strategy_decisions_to_target_weights(
     max_positions: int,
     max_weight_per_asset: float,
     default_weight: float | None = None,
+    cash_buffer: float = 0.0,
 ) -> pd.DataFrame:
     """Convert long-only ENTER/HOLD/EXIT decisions into full target snapshots.
 
     Capacity is resolved by latest score, then asset code. Explicit positive
     ``decision.weight`` wins; otherwise selected assets receive ``default_weight``
-    or equal weight. Weights are capped and proportionally scaled to a total of 1.
+    or equal weight inside ``1 - cash_buffer``. Explicit weights that exceed 1 are
+    scaled down; sub-1 totals preserve residual cash and never re-inflate past
+    ``max_weight_per_asset``.
     """
 
     if max_positions <= 0:
         raise ValueError("max_positions must be positive")
     if not 0 < max_weight_per_asset <= 1:
         raise ValueError("max_weight_per_asset must be in (0, 1]")
+    if not 0 <= cash_buffer < 1:
+        raise ValueError("cash_buffer must be in [0, 1)")
     if default_weight is not None and not 0 < default_weight <= max_weight_per_asset:
         raise ValueError("default_weight must be in (0, max_weight_per_asset]")
 
@@ -114,6 +119,7 @@ def strategy_decisions_to_target_weights(
             selected_items,
             max_weight_per_asset=max_weight_per_asset,
             default_weight=default_weight,
+            cash_buffer=cash_buffer,
         )
         priority = {
             asset_id: candidate.score
@@ -155,15 +161,24 @@ def _resolve_weights(
     *,
     max_weight_per_asset: float,
     default_weight: float | None,
+    cash_buffer: float = 0.0,
 ) -> dict[str, float]:
     if not selected_items:
         return {}
-    fallback = default_weight or min(1.0 / len(selected_items), max_weight_per_asset)
+    target_gross = 1.0 - float(cash_buffer)
+    fallback = default_weight or min(
+        target_gross / len(selected_items),
+        max_weight_per_asset,
+    )
     weights = {
-        asset_id: min(candidate.weight or fallback, max_weight_per_asset)
+        asset_id: min(
+            candidate.weight if candidate.weight is not None else fallback,
+            max_weight_per_asset,
+        )
         for asset_id, candidate in selected_items
     }
     total = sum(weights.values())
+    # Never re-inflate below target_gross; only scale down when over 1.
     if total > 1.0 + 1e-12:
         weights = {asset_id: weight / total for asset_id, weight in weights.items()}
     return weights
