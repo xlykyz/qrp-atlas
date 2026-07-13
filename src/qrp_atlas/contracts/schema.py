@@ -77,6 +77,61 @@ from .fields import (
     INTERACTION_PID, COMPANY_CODE, COMPANY_SHORTNAME,
     QUESTION_CONTENT, REPLY_CONTENT, QUESTION_TIME, REPLY_TIME,
     REPLY_DATE, NICKNAME, KEYWORDS,
+    REPORT_PERIOD,
+    ANNOUNCEMENT_DATE,
+    F_ANN_DATE,
+    PUBLISHED_AT,
+    AVAILABLE_TRADE_DATE,
+    UPDATE_FLAG,
+    COMP_TYPE,
+    SOURCE_RECORD_ID,
+    REVISION_ID,
+    INGESTED_AT,
+    ASSET_ID,
+    CLASSIFICATION_SYSTEM,
+    INDUSTRY_LEVEL,
+    EFFECTIVE_FROM,
+    EFFECTIVE_TO,
+    SNAPSHOT_DATE,
+    WEIGHT,
+    BASIC_EPS,
+    DILUTED_EPS,
+    TOTAL_REVENUE,
+    REVENUE,
+    OPERATE_PROFIT,
+    TOTAL_PROFIT,
+    N_INCOME,
+    N_INCOME_ATTR_P,
+    EBIT,
+    EBITDA,
+    TOTAL_ASSETS,
+    TOTAL_LIAB,
+    TOTAL_CUR_ASSETS,
+    TOTAL_NCA,
+    TOTAL_CUR_LIAB,
+    TOTAL_NCL,
+    TOTAL_HLDR_EQY_EXC_MIN_INT,
+    TOTAL_HLDR_EQY_INC_MIN_INT,
+    MONEY_CAP,
+    ACCOUNTS_RECEIV,
+    INVENTORIES,
+    N_CASHFLOW_ACT,
+    N_CASHFLOW_INV_ACT,
+    N_CASH_FLOWS_FNC_ACT,
+    N_INCR_CASH_CASH_EQU,
+    C_CASH_EQU_END_PERIOD,
+    FREE_CASHFLOW,
+    BPS,
+    CFPS,
+    ROE,
+    ROA,
+    GROSSPROFIT_MARGIN,
+    NETPROFIT_MARGIN,
+    DEBT_TO_ASSETS,
+    CURRENT_RATIO,
+    QUICK_RATIO,
+    END_TYPE,
+    EPS,
 )
 
 
@@ -474,6 +529,151 @@ SUSPEND_D = TableSchema(
 )
 
 
+
+
+_PIT_META_COLUMNS = (
+    ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+    ColumnSpec(SOURCE_RECORD_ID, "VARCHAR", nullable=False),
+    ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
+    ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+)
+
+INCOME_STATEMENT = TableSchema(
+    name="income_statement",
+    columns=(
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(REPORT_PERIOD, "DATE", nullable=False),
+        ColumnSpec(ANNOUNCEMENT_DATE, "DATE", nullable=False),
+        ColumnSpec(F_ANN_DATE, "DATE"),
+        ColumnSpec(PUBLISHED_AT, "TIMESTAMP"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(REPORT_TYPE, "VARCHAR", nullable=False),
+        ColumnSpec(UPDATE_FLAG, "VARCHAR", nullable=False),
+        ColumnSpec(COMP_TYPE, "VARCHAR"),
+        ColumnSpec(END_TYPE, "VARCHAR"),
+        ColumnSpec(BASIC_EPS, "DOUBLE"),
+        ColumnSpec(DILUTED_EPS, "DOUBLE"),
+        ColumnSpec(TOTAL_REVENUE, "DOUBLE"),
+        ColumnSpec(REVENUE, "DOUBLE"),
+        ColumnSpec(OPERATE_PROFIT, "DOUBLE"),
+        ColumnSpec(TOTAL_PROFIT, "DOUBLE"),
+        ColumnSpec(N_INCOME, "DOUBLE"),
+        ColumnSpec(N_INCOME_ATTR_P, "DOUBLE"),
+        ColumnSpec(EBIT, "DOUBLE"),
+        ColumnSpec(EBITDA, "DOUBLE"),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
+BALANCE_SHEET = TableSchema(
+    name="balance_sheet",
+    columns=(
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(REPORT_PERIOD, "DATE", nullable=False),
+        ColumnSpec(ANNOUNCEMENT_DATE, "DATE", nullable=False),
+        ColumnSpec(F_ANN_DATE, "DATE"),
+        ColumnSpec(PUBLISHED_AT, "TIMESTAMP"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(REPORT_TYPE, "VARCHAR", nullable=False),
+        ColumnSpec(UPDATE_FLAG, "VARCHAR", nullable=False),
+        ColumnSpec(COMP_TYPE, "VARCHAR"),
+        ColumnSpec(END_TYPE, "VARCHAR"),
+        ColumnSpec(TOTAL_ASSETS, "DOUBLE"),
+        ColumnSpec(TOTAL_LIAB, "DOUBLE"),
+        ColumnSpec(TOTAL_CUR_ASSETS, "DOUBLE"),
+        ColumnSpec(TOTAL_NCA, "DOUBLE"),
+        ColumnSpec(TOTAL_CUR_LIAB, "DOUBLE"),
+        ColumnSpec(TOTAL_NCL, "DOUBLE"),
+        ColumnSpec(TOTAL_HLDR_EQY_EXC_MIN_INT, "DOUBLE"),
+        ColumnSpec(TOTAL_HLDR_EQY_INC_MIN_INT, "DOUBLE"),
+        ColumnSpec(MONEY_CAP, "DOUBLE"),
+        ColumnSpec(ACCOUNTS_RECEIV, "DOUBLE"),
+        ColumnSpec(INVENTORIES, "DOUBLE"),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
+CASHFLOW_STATEMENT = TableSchema(
+    name="cashflow_statement",
+    columns=(
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(REPORT_PERIOD, "DATE", nullable=False),
+        ColumnSpec(ANNOUNCEMENT_DATE, "DATE", nullable=False),
+        ColumnSpec(F_ANN_DATE, "DATE"),
+        ColumnSpec(PUBLISHED_AT, "TIMESTAMP"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(REPORT_TYPE, "VARCHAR", nullable=False),
+        ColumnSpec(UPDATE_FLAG, "VARCHAR", nullable=False),
+        ColumnSpec(COMP_TYPE, "VARCHAR"),
+        ColumnSpec(END_TYPE, "VARCHAR"),
+        ColumnSpec(N_CASHFLOW_ACT, "DOUBLE"),
+        ColumnSpec(N_CASHFLOW_INV_ACT, "DOUBLE"),
+        ColumnSpec(N_CASH_FLOWS_FNC_ACT, "DOUBLE"),
+        ColumnSpec(N_INCR_CASH_CASH_EQU, "DOUBLE"),
+        ColumnSpec(C_CASH_EQU_END_PERIOD, "DOUBLE"),
+        ColumnSpec(FREE_CASHFLOW, "DOUBLE"),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
+FINANCIAL_INDICATOR = TableSchema(
+    name="financial_indicator",
+    columns=(
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(REPORT_PERIOD, "DATE", nullable=False),
+        ColumnSpec(ANNOUNCEMENT_DATE, "DATE", nullable=False),
+        ColumnSpec(PUBLISHED_AT, "TIMESTAMP"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(UPDATE_FLAG, "VARCHAR", nullable=False),
+        ColumnSpec(EPS, "DOUBLE"),
+        ColumnSpec(BPS, "DOUBLE"),
+        ColumnSpec(CFPS, "DOUBLE"),
+        ColumnSpec(ROE, "DOUBLE"),
+        ColumnSpec(ROA, "DOUBLE"),
+        ColumnSpec(GROSSPROFIT_MARGIN, "DOUBLE"),
+        ColumnSpec(NETPROFIT_MARGIN, "DOUBLE"),
+        ColumnSpec(DEBT_TO_ASSETS, "DOUBLE"),
+        ColumnSpec(CURRENT_RATIO, "DOUBLE"),
+        ColumnSpec(QUICK_RATIO, "DOUBLE"),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
+INDUSTRY_MEMBERSHIP_HISTORY = TableSchema(
+    name="industry_membership_history",
+    columns=(
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CLASSIFICATION_SYSTEM, "VARCHAR", nullable=False),
+        ColumnSpec(INDUSTRY_LEVEL, "INTEGER", nullable=False),
+        ColumnSpec(INDUSTRY_CODE, "VARCHAR", nullable=False),
+        ColumnSpec(INDUSTRY_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(EFFECTIVE_FROM, "DATE", nullable=False),
+        ColumnSpec(EFFECTIVE_TO, "DATE"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
+INDEX_COMPONENT_HISTORY = TableSchema(
+    name="index_component_history",
+    columns=(
+        ColumnSpec(INDEX_CODE, "VARCHAR", nullable=False),
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_DATE, "DATE", nullable=False),
+        ColumnSpec(WEIGHT, "DOUBLE"),
+        ColumnSpec(EFFECTIVE_FROM, "DATE", nullable=False),
+        ColumnSpec(EFFECTIVE_TO, "DATE"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        *_PIT_META_COLUMNS,
+    ),
+    primary_key=(REVISION_ID,),
+)
+
 IRM_INTERACTION_QA = TableSchema(
     name="irm_interaction_qa",
     columns=(
@@ -494,7 +694,7 @@ IRM_INTERACTION_QA = TableSchema(
     primary_key=(INTERACTION_PID,),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL, DAILY_BASIC, SUSPEND_D, IRM_INTERACTION_QA)
+ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL, DAILY_BASIC, SUSPEND_D, IRM_INTERACTION_QA, INCOME_STATEMENT, BALANCE_SHEET, CASHFLOW_STATEMENT, FINANCIAL_INDICATOR, INDUSTRY_MEMBERSHIP_HISTORY, INDEX_COMPONENT_HISTORY)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 

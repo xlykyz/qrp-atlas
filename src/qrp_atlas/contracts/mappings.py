@@ -54,6 +54,16 @@ from .fields import (
     INTERACTION_PID, COMPANY_CODE, COMPANY_SHORTNAME,
     QUESTION_CONTENT, REPLY_CONTENT, QUESTION_TIME, REPLY_TIME,
     NICKNAME, SOURCE,
+    REPORT_PERIOD, ANNOUNCEMENT_DATE, F_ANN_DATE, UPDATE_FLAG,
+    COMP_TYPE, END_TYPE, REPORT_TYPE, BASIC_EPS, DILUTED_EPS,
+    TOTAL_REVENUE, REVENUE, OPERATE_PROFIT, TOTAL_PROFIT, N_INCOME, N_INCOME_ATTR_P,
+    EBIT, EBITDA, TOTAL_ASSETS, TOTAL_LIAB, TOTAL_CUR_ASSETS, TOTAL_NCA,
+    TOTAL_CUR_LIAB, TOTAL_NCL, TOTAL_HLDR_EQY_EXC_MIN_INT, TOTAL_HLDR_EQY_INC_MIN_INT,
+    MONEY_CAP, ACCOUNTS_RECEIV, INVENTORIES, N_CASHFLOW_ACT, N_CASHFLOW_INV_ACT,
+    N_CASH_FLOWS_FNC_ACT, N_INCR_CASH_CASH_EQU, C_CASH_EQU_END_PERIOD, FREE_CASHFLOW,
+    EPS, BPS, CFPS, ROE, ROA, GROSSPROFIT_MARGIN, NETPROFIT_MARGIN, DEBT_TO_ASSETS,
+    CURRENT_RATIO, QUICK_RATIO, ASSET_ID, INDUSTRY_CODE, INDUSTRY_NAME, EFFECTIVE_FROM,
+    EFFECTIVE_TO, INDEX_CODE, SNAPSHOT_DATE, WEIGHT,
 )
 
 
@@ -203,6 +213,104 @@ P5W_INTERACTION_QA: Dict[str, str] = {
     "nickname": NICKNAME,
 }
 
+
+TUSHARE_INCOME: Dict[str, str] = {
+    "ts_code": TICKER,
+    "end_date": REPORT_PERIOD,
+    "ann_date": ANNOUNCEMENT_DATE,
+    "f_ann_date": F_ANN_DATE,
+    "report_type": REPORT_TYPE,
+    "update_flag": UPDATE_FLAG,
+    "comp_type": COMP_TYPE,
+    "end_type": END_TYPE,
+    "basic_eps": BASIC_EPS,
+    "diluted_eps": DILUTED_EPS,
+    "total_revenue": TOTAL_REVENUE,
+    "revenue": REVENUE,
+    "operate_profit": OPERATE_PROFIT,
+    "total_profit": TOTAL_PROFIT,
+    "n_income": N_INCOME,
+    "n_income_attr_p": N_INCOME_ATTR_P,
+    "ebit": EBIT,
+    "ebitda": EBITDA,
+}
+
+TUSHARE_BALANCESHEET: Dict[str, str] = {
+    "ts_code": TICKER,
+    "end_date": REPORT_PERIOD,
+    "ann_date": ANNOUNCEMENT_DATE,
+    "f_ann_date": F_ANN_DATE,
+    "report_type": REPORT_TYPE,
+    "update_flag": UPDATE_FLAG,
+    "comp_type": COMP_TYPE,
+    "end_type": END_TYPE,
+    "total_assets": TOTAL_ASSETS,
+    "total_liab": TOTAL_LIAB,
+    "total_cur_assets": TOTAL_CUR_ASSETS,
+    "total_nca": TOTAL_NCA,
+    "total_cur_liab": TOTAL_CUR_LIAB,
+    "total_ncl": TOTAL_NCL,
+    "total_hldr_eqy_exc_min_int": TOTAL_HLDR_EQY_EXC_MIN_INT,
+    "total_hldr_eqy_inc_min_int": TOTAL_HLDR_EQY_INC_MIN_INT,
+    "money_cap": MONEY_CAP,
+    "accounts_receiv": ACCOUNTS_RECEIV,
+    "inventories": INVENTORIES,
+}
+
+TUSHARE_CASHFLOW: Dict[str, str] = {
+    "ts_code": TICKER,
+    "end_date": REPORT_PERIOD,
+    "ann_date": ANNOUNCEMENT_DATE,
+    "f_ann_date": F_ANN_DATE,
+    "report_type": REPORT_TYPE,
+    "update_flag": UPDATE_FLAG,
+    "comp_type": COMP_TYPE,
+    "end_type": END_TYPE,
+    "n_cashflow_act": N_CASHFLOW_ACT,
+    "n_cashflow_inv_act": N_CASHFLOW_INV_ACT,
+    "n_cash_flows_fnc_act": N_CASH_FLOWS_FNC_ACT,
+    "n_incr_cash_cash_equ": N_INCR_CASH_CASH_EQU,
+    "c_cash_equ_end_period": C_CASH_EQU_END_PERIOD,
+    "free_cashflow": FREE_CASHFLOW,
+}
+
+TUSHARE_FINA_INDICATOR: Dict[str, str] = {
+    "ts_code": TICKER,
+    "end_date": REPORT_PERIOD,
+    "ann_date": ANNOUNCEMENT_DATE,
+    "update_flag": UPDATE_FLAG,
+    "eps": EPS,
+    "bps": BPS,
+    "cfps": CFPS,
+    "roe": ROE,
+    "roa": ROA,
+    "grossprofit_margin": GROSSPROFIT_MARGIN,
+    "netprofit_margin": NETPROFIT_MARGIN,
+    "debt_to_assets": DEBT_TO_ASSETS,
+    "current_ratio": CURRENT_RATIO,
+    "quick_ratio": QUICK_RATIO,
+}
+
+TUSHARE_INDEX_MEMBER_ALL: Dict[str, str] = {
+    "ts_code": ASSET_ID,
+    "l1_code": "l1_code",
+    "l1_name": "l1_name",
+    "l2_code": "l2_code",
+    "l2_name": "l2_name",
+    "l3_code": "l3_code",
+    "l3_name": "l3_name",
+    "in_date": EFFECTIVE_FROM,
+    "out_date": EFFECTIVE_TO,
+    "name": NAME,
+}
+
+TUSHARE_INDEX_WEIGHT: Dict[str, str] = {
+    "index_code": INDEX_CODE,
+    "con_code": ASSET_ID,
+    "trade_date": SNAPSHOT_DATE,
+    "weight": WEIGHT,
+}
+
 SOURCE_MAPPINGS = {
     "akshare_daily_bar": AKSHARE_DAILY_BAR,
     "akshare_realtime": AKSHARE_REALTIME,
@@ -212,6 +320,12 @@ SOURCE_MAPPINGS = {
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,
     "p5w_interaction_qa": P5W_INTERACTION_QA,
+    "tushare_income": TUSHARE_INCOME,
+    "tushare_balancesheet": TUSHARE_BALANCESHEET,
+    "tushare_cashflow": TUSHARE_CASHFLOW,
+    "tushare_fina_indicator": TUSHARE_FINA_INDICATOR,
+    "tushare_index_member_all": TUSHARE_INDEX_MEMBER_ALL,
+    "tushare_index_weight": TUSHARE_INDEX_WEIGHT,
 }
 
 

@@ -17,7 +17,7 @@
 | 0 | 架构与产品蓝图封版 | docs | 已完成 |
 | 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
 | 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
-| 3 | point-in-time 数据底座 | contracts / pipeline / data | 可与阶段 1-2 并行 |
+| 3 | point-in-time 数据底座 | contracts / pipeline / data / backtest | 🟡 部分完成：03-A/03-B 已合入 main |
 | 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3 |
 | 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
 | 6 | 残差相对价值与稳健性验证 | indicators / strategies / backtest / results | 阶段 2-4 |
@@ -75,15 +75,23 @@
 
 ### 完成记录
 
-- 状态：✅ 已完成（2026-07-13）
+- 状态：✅ 已完成（2026-07-13；2026-07-14 已同步最新 main）
 - 主分支：`feature/portfolio-backtest-core`
 - 主 PR：#5；停牌字段子 PR：#6 已并入主分支
-- 全量回归：`python -m pytest` → 230 passed
+- 全量回归：以合并最新 main 后的实际 pytest 结果为准（见任务 02 文档）
 - 本地 DuckDB 已验收涨停、跌停、停牌和多标的调仓
-- 明确排除：short、借券、保证金、多腿、实盘；任务 03/04 未提前完成
+- 明确排除：short、借券、保证金、多腿、实盘；任务 04 未启动；任务 03 仅部分完成且不由任务 02 承担
 
 
 ## 五、阶段 3：point-in-time 数据底座
+
+- 状态：🟡 部分完成（2026-07-14）
+- 已合入 main：
+  - 任务 03-A：`select_latest_available_records` 版本选择器（PR #7）
+  - 任务 03-B：财务/行业/指数 Tushare 数据底座、六表 contracts、小范围真实入库（PR #8）
+- 尚未完成：PIT 查询服务、结构化事件主表、全市场历史回填、任务 03 整体验收
+- 不得将任务 03 标记为整体完成
+
 
 ### 目标
 

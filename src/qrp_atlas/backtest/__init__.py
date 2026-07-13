@@ -11,6 +11,7 @@ from .models import (
     Skipped,
     Trade,
 )
+from .point_in_time import select_latest_available_records
 from .portfolio import (
     PortfolioBacktestConfig,
     PortfolioBacktestEngine,
@@ -50,5 +51,6 @@ __all__ = [
     "prepare_strategy_data",
     "run_strategy_backtest",
     "run_strategy_portfolio_backtest",
+    "select_latest_available_records",
     "strategy_decisions_to_target_weights",
 ]
