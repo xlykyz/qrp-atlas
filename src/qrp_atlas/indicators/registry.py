@@ -13,6 +13,13 @@ from qrp_atlas.indicators.stock.trend import (
     CLOSE_BELOW_MA5_DAYS,
     MA5,
 )
+from qrp_atlas.indicators.stock.residual import (
+    RESIDUAL_RETURN,
+    RESIDUAL_ZSCORE,
+    ROLLING_ALPHA,
+    ROLLING_BETA,
+    ROLLING_R2,
+)
 from qrp_atlas.indicators.system_b.detector import (
     SYSTEM_B_EXIT_TRIGGERED,
     SYSTEM_B_TREND_VALID,
@@ -36,6 +43,11 @@ ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
     IndicatorDefinition(CLOSE_BELOW_MA5_DAYS, "Consecutive closes below MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Consecutive sessions with close below MA5."),
     IndicatorDefinition(SYSTEM_B_TREND_VALID, "System B trend valid", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close at or above MA5."),
     IndicatorDefinition(SYSTEM_B_EXIT_TRIGGERED, "System B exit triggered", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close below MA5."),
+    IndicatorDefinition(ROLLING_ALPHA, "Rolling residual alpha", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only rolling OLS intercept versus a market benchmark."),
+    IndicatorDefinition(ROLLING_BETA, "Rolling residual beta", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only rolling OLS beta versus a market benchmark."),
+    IndicatorDefinition(ROLLING_R2, "Rolling residual R2", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only rolling OLS R-squared versus a market benchmark."),
+    IndicatorDefinition(RESIDUAL_RETURN, "Residual return", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Sample-out residual return using prior-only alpha/beta."),
+    IndicatorDefinition(RESIDUAL_ZSCORE, "Residual z-score", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only z-score of residual returns."),
     IndicatorDefinition(
         PROFIT_CHANGE_MIDPOINT,
         "Profit change midpoint",

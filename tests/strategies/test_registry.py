@@ -42,6 +42,7 @@ def test_definition_is_serializable_and_builtin_is_registered() -> None:
         "donchian_breakout",
         "dual_sma_trend",
         "event_drift_basic",
+        "market_residual_mean_reversion",
         "multifactor_long_only",
         "rolling_zscore_mean_reversion",
         "system_b_basic",
