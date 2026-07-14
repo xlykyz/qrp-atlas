@@ -225,13 +225,59 @@ def _strategy_to_catalog_item(definition: Any) -> StrategyCatalogItem:
     )
 
 
+def _declarative_to_catalog_item(record: Any) -> StrategyCatalogItem:
+    definition = record.definition if hasattr(record, "definition") else record.get("definition")
+    if not isinstance(definition, dict):
+        definition = {}
+    code = str(definition.get("code") or getattr(record, "code", ""))
+    version = str(definition.get("version") or getattr(record, "version", ""))
+    name = str(definition.get("name") or getattr(record, "name", code))
+    description = str(definition.get("description") or getattr(record, "description", ""))
+    params = definition.get("parameters") or definition.get("parameter_schema") or {}
+    schema = {
+        key: _parameter_spec_dto(spec)
+        for key, spec in (params.items() if isinstance(params, dict) else [])
+    }
+    return StrategyCatalogItem(
+        code=code,
+        name=name,
+        version=version,
+        family="other",
+        description=description or "User declarative strategy",
+        scope="声明式策略；白名单规则；版本不可变。",
+        strategy_type="declarative",
+        required_fields=list(definition.get("required_fields") or []),
+        required_indicators=list(definition.get("required_indicators") or []),
+        parameter_schema=schema,
+        indicator_requests=[],
+        product_supported=True,
+        requires_historical_universe=False,
+        supported_universe_modes=["tickers"],
+        supported_entry_timings=["next_open", "same_close", "next_close"],
+        requires_portfolio_config=True,
+    )
+
+
 def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogItem]:
-    """List strategy catalog items from the live registry (no second catalog copy)."""
+    """List strategy catalog items from the live registry + user declarative store."""
 
     items = [_strategy_to_catalog_item(definition) for definition in list_strategies()]
     if product_only:
         items = [item for item in items if item.code in PRODUCT_SUPPORTED_STRATEGY_CODES]
-    return items
+    # Merge active declarative strategies (product supported).
+    try:
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        for record in get_declarative_store().list(include_archived=False):
+            items.append(_declarative_to_catalog_item(record))
+    except Exception:
+        # Catalog must remain available even if store is empty/unavailable.
+        pass
+    # stable unique by code@version
+    dedup: dict[tuple[str, str], StrategyCatalogItem] = {}
+    for item in items:
+        dedup[(item.code, item.version)] = item
+    return sorted(dedup.values(), key=lambda x: (x.code, x.version))
 
 
 def get_strategy_catalog_item(code: str, version: str | None = None) -> StrategyCatalogItem:

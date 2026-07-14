@@ -87,6 +87,30 @@ def _normalize_tickers(values: list[str] | None) -> list[str]:
     return cleaned
 
 
+
+
+def _resolve_product_strategy(strategy_code: str, strategy_version: str):
+    """Resolve builtin registry strategy or declarative store strategy."""
+
+    try:
+        return get_strategy(strategy_code, strategy_version)
+    except StrategyNotFoundError:
+        from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        record = get_declarative_store().get(strategy_code, strategy_version)
+        strategy = DeclarativeStrategy.from_dict(record.definition)
+        try:
+            get_declarative_store().mark_referenced(
+                strategy_code,
+                strategy_version,
+                owner_user_id=record.owner_user_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return strategy
+
+
 def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktestTaskRequest:
     """Validate and normalize a create-task request (backend is authoritative)."""
 
@@ -94,15 +118,34 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
     strategy_version = str(request.strategy_version or "").strip()
     if not strategy_code:
         raise BacktestTaskValidationError("strategy_code is required")
-    if strategy_code not in PRODUCT_SUPPORTED_STRATEGY_CODES:
-        raise BacktestTaskValidationError(
-            f"strategy not supported by product path: {strategy_code}"
-        )
     if not strategy_version:
         raise BacktestTaskValidationError("strategy_version is required")
 
+    declarative_strategy = None
+    if strategy_code not in PRODUCT_SUPPORTED_STRATEGY_CODES:
+        try:
+            from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+            from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+            record = get_declarative_store().get(strategy_code, strategy_version)
+            if record.status != "active":
+                raise BacktestTaskValidationError(
+                    f"declarative strategy is not active: {strategy_code}@{strategy_version}"
+                )
+            declarative_strategy = DeclarativeStrategy.from_dict(record.definition)
+        except BacktestTaskValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise BacktestTaskValidationError(
+                f"strategy not supported by product path: {strategy_code}"
+            ) from exc
+
     try:
-        strategy = get_strategy(strategy_code, strategy_version)
+        strategy = (
+            declarative_strategy
+            if declarative_strategy is not None
+            else get_strategy(strategy_code, strategy_version)
+        )
     except StrategyNotFoundError as exc:
         raise BacktestTaskValidationError(str(exc)) from exc
 
@@ -310,7 +353,7 @@ def _run_product_portfolio(
 ) -> tuple[Any, pd.DataFrame, Any, list[dict[str, str]]]:
     """Prepare warmup-isolated decisions and execute on formal range only."""
 
-    strategy = get_strategy(request.strategy_code, request.strategy_version)
+    strategy = _resolve_product_strategy(request.strategy_code, request.strategy_version)
     resolved = dict(request.strategy_params)
     prepared_full = prepare_strategy_data(price_df, strategy.definition, resolved)
 
@@ -386,7 +429,7 @@ def execute_validated_task(
 ) -> tuple[str, Path]:
     """Run strategy + portfolio engine and persist a standard results package."""
 
-    strategy = get_strategy(request.strategy_code, request.strategy_version)
+    strategy = _resolve_product_strategy(request.strategy_code, request.strategy_version)
     cross_section_meta: dict[str, Any] = {}
     if is_cross_sectional_product_strategy(request.strategy_code):
         if db_path is None:
