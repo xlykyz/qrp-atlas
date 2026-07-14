@@ -35,7 +35,7 @@ export function useBacktestTasks() {
   // Poll while any task is non-terminal
   useEffect(() => {
     const hasActive = tasks.some(
-      (t) => t.status === 'queued' || t.status === 'running',
+      (t) => t.status === 'pending' || t.status === 'running',
     );
 
     if (pollRef.current) {

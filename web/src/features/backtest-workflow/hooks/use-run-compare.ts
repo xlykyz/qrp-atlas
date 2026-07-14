@@ -34,7 +34,7 @@ export function useRunCompare(initialSelected: string[] = []) {
     listResultRuns()
       .then((list) => {
         if (cancelled) return;
-        setAvailableRuns(list.filter((r) => r.status === 'success'));
+        setAvailableRuns(list.filter((r) => ['success', 'succeeded', 'completed'].includes(String(r.status))));
         setRunsLoading(false);
       })
       .catch((err) => {

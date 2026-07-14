@@ -5,7 +5,8 @@
 
 import type { StrategyParamValues } from './strategy';
 
-export type BacktestTaskStatus = 'queued' | 'running' | 'success' | 'failed';
+/** Product status enum used by backend task API. */
+export type BacktestTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 export type EntryTiming = 'next_open' | 'same_close' | 'next_close';
 
@@ -68,6 +69,8 @@ export interface BacktestTask {
   updated_at: string;
   /** True when results come from local mock fixtures, not a real engine run. */
   is_mock: boolean;
+  /** Optional backend request snapshot. */
+  request_snapshot?: Record<string, unknown>;
 }
 
 export interface CreateBacktestTaskResponse {

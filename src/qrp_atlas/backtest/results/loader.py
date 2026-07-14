@@ -17,11 +17,12 @@ run_id 仅允许 [A-Za-z0-9_-]+，避免路径穿越。
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR
+from qrp_atlas.config.paths import BACKTEST_RUNS_DIR, PROJECT_ROOT
 
 
 class RunNotFoundError(Exception):
@@ -51,31 +52,64 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
+def _default_search_roots() -> list[Path]:
+    """Resolve result roots: explicit env first, then product + fixture defaults."""
+
+    roots: list[Path] = []
+    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
+    if env:
+        roots.append(Path(env))
+    product = PROJECT_ROOT / "data" / "backtest_runs"
+    if product not in roots:
+        roots.append(product)
+    if BACKTEST_RUNS_DIR not in roots:
+        roots.append(BACKTEST_RUNS_DIR)
+    # Deduplicate while preserving order.
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root.resolve()) if root.exists() else str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(root)
+    return unique
+
+
 class BacktestRunsLoader:
     """从本地 JSON 文件读取回测结果。
 
-    通过 BACKTEST_RUNS_DIR 配置入口路径，可被环境变量覆盖。
+    Supports one or more search roots so product runs under data/backtest_runs
+    and fixture runs under tests/fixtures/backtest_runs can coexist.
     """
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else BACKTEST_RUNS_DIR
+    def __init__(self, root: Path | Iterable[Path] | None = None) -> None:
+        if root is None:
+            self.roots = _default_search_roots()
+        elif isinstance(root, (str, Path)):
+            self.roots = [Path(root)]
+        else:
+            self.roots = [Path(item) for item in root]
+        # Backward-compatible single-root attribute used by existing tests.
+        self.root = self.roots[0]
 
     def _run_dir(self, run_id: str) -> Path:
         _validate_run_id(run_id)
-        path = self.root / run_id
-        if not path.is_dir():
-            raise RunNotFoundError(run_id)
-        return path
+        for root in self.roots:
+            path = root / run_id
+            if path.is_dir():
+                return path
+        raise RunNotFoundError(run_id)
 
     def list_run_ids(self) -> list[str]:
-        """列出所有 run_id，按字母序。"""
-        if not self.root.is_dir():
-            return []
-        ids = [
-            p.name
-            for p in self.root.iterdir()
-            if p.is_dir() and _RUN_ID_PATTERN.match(p.name)
-        ]
+        """列出所有 run_id，按字母序。Product roots take precedence for duplicates."""
+        ids: set[str] = set()
+        for root in self.roots:
+            if not root.is_dir():
+                continue
+            for path in root.iterdir():
+                if path.is_dir() and _RUN_ID_PATTERN.match(path.name):
+                    ids.add(path.name)
         return sorted(ids)
 
     def _load_json(self, run_id: str, filename: str) -> Any:

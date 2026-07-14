@@ -60,7 +60,7 @@ export function RunComparePanel({
     <div className="space-y-4">
       <div>
         <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
-          选择 2–4 个成功 run 进行指标与配置对比（当前为 mock 结果，不伪造 fixture 中不存在的组合能力）。
+          选择 2–4 个成功 run 进行指标与配置对比。真实模式下读取后端结果 API；Mock 模式使用本地 fixtures。
         </p>
         <div className="flex flex-wrap gap-2">
           {availableRuns.length === 0 ? (

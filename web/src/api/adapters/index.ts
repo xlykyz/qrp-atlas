@@ -1,5 +1,7 @@
 import { createMockStrategyCatalogApi } from './strategy-catalog.mock';
+import { createHttpStrategyCatalogApi } from './strategy-catalog.http';
 import { createMockBacktestTaskApi } from './backtest-task.mock';
+import { createHttpBacktestTaskApi } from './backtest-task.http';
 import { createMockBacktestResultApi } from './backtest-result.mock';
 import { createHttpBacktestResultApi } from './backtest-result.http';
 import { getResultSource, isMockCatalogAndTasksEnabled } from './mode';
@@ -18,17 +20,18 @@ let backtestResultApi: BacktestResultApi | null = null;
 
 export function getStrategyCatalogApi(): StrategyCatalogApi {
   if (!strategyCatalogApi) {
-    // Future: swap to HTTP adapter when strategy catalog API is ready.
     strategyCatalogApi = isMockCatalogAndTasksEnabled()
       ? createMockStrategyCatalogApi()
-      : createMockStrategyCatalogApi();
+      : createHttpStrategyCatalogApi();
   }
   return strategyCatalogApi;
 }
 
 export function getBacktestTaskApi(): BacktestTaskApi {
   if (!backtestTaskApi) {
-    backtestTaskApi = createMockBacktestTaskApi();
+    backtestTaskApi = isMockCatalogAndTasksEnabled()
+      ? createMockBacktestTaskApi()
+      : createHttpBacktestTaskApi();
   }
   return backtestTaskApi;
 }
@@ -49,4 +52,3 @@ export function resetAdapters() {
   backtestTaskApi = null;
   backtestResultApi = null;
 }
-
