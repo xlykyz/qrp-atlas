@@ -9,6 +9,9 @@ from __future__ import annotations
 import pytest
 
 from qrp_atlas.api.server import app
+from qrp_atlas.backtest.results.loader import BacktestRunsLoader
+from qrp_atlas.backtest.results.service import set_loader_for_tests
+from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR
 from tests.api.asgi_client import ASGITestClient
 
 
@@ -17,7 +20,12 @@ SAMPLE_RUN = "sample_run_001"
 
 @pytest.fixture
 def client() -> ASGITestClient:
-    return ASGITestClient(app)
+    # Explicit fixture root: product API must not include fixtures by default.
+    set_loader_for_tests(BacktestRunsLoader(BACKTEST_FIXTURE_RUNS_DIR))
+    try:
+        yield ASGITestClient(app)
+    finally:
+        set_loader_for_tests(None)
 
 
 # ────────────────────────────────────────────────────────────

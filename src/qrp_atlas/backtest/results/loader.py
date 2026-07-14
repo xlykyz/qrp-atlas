@@ -19,9 +19,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR
+from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR, PROJECT_ROOT
 
 
 class RunNotFoundError(Exception):
@@ -51,31 +51,59 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
+def _product_runs_dir() -> Path:
+    import os
+
+    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
+    if env:
+        return Path(env)
+    return PROJECT_ROOT / "data" / "backtest_runs"
+
+
 class BacktestRunsLoader:
     """从本地 JSON 文件读取回测结果。
 
-    通过 BACKTEST_RUNS_DIR 配置入口路径，可被环境变量覆盖。
+    Default product mode only searches BACKTEST_RUNS_DIR (env-overridable).
+    Fixture runs must be requested explicitly via root=BACKTEST_FIXTURE_RUNS_DIR
+    or include_fixtures=True for dedicated mock/tests.
     """
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else BACKTEST_RUNS_DIR
+    def __init__(
+        self,
+        root: Path | Iterable[Path] | None = None,
+        *,
+        include_fixtures: bool = False,
+    ) -> None:
+        if root is None:
+            roots = [_product_runs_dir()]
+            if include_fixtures:
+                roots.append(BACKTEST_FIXTURE_RUNS_DIR)
+            self.roots = roots
+        elif isinstance(root, (str, Path)):
+            self.roots = [Path(root)]
+        else:
+            self.roots = [Path(item) for item in root]
+        # Backward-compatible single-root attribute used by existing tests.
+        self.root = self.roots[0]
+        self.include_fixtures = include_fixtures
 
     def _run_dir(self, run_id: str) -> Path:
         _validate_run_id(run_id)
-        path = self.root / run_id
-        if not path.is_dir():
-            raise RunNotFoundError(run_id)
-        return path
+        for root in self.roots:
+            path = root / run_id
+            if path.is_dir():
+                return path
+        raise RunNotFoundError(run_id)
 
     def list_run_ids(self) -> list[str]:
         """列出所有 run_id，按字母序。"""
-        if not self.root.is_dir():
-            return []
-        ids = [
-            p.name
-            for p in self.root.iterdir()
-            if p.is_dir() and _RUN_ID_PATTERN.match(p.name)
-        ]
+        ids: set[str] = set()
+        for root in self.roots:
+            if not root.is_dir():
+                continue
+            for path in root.iterdir():
+                if path.is_dir() and _RUN_ID_PATTERN.match(path.name) and not path.name.startswith("."):
+                    ids.add(path.name)
         return sorted(ids)
 
     def _load_json(self, run_id: str, filename: str) -> Any:

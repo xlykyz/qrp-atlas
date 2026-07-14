@@ -44,7 +44,7 @@ function scheduleStatus(
     const current = tasks.get(taskId);
     if (!current) return;
     // Do not advance terminal states.
-    if (current.status === 'success' || current.status === 'failed') return;
+    if (current.status === 'succeeded' || current.status === 'failed') return;
     tasks.set(taskId, {
       ...current,
       ...patch,
@@ -109,7 +109,7 @@ export function mockCreateTask(req: CreateBacktestTaskRequest): BacktestTask {
     position: { ...req.position },
     cost: { ...req.cost },
     execution: { ...req.execution },
-    status: 'queued',
+    status: 'pending',
     error_message: null,
     created_at,
     updated_at: created_at,
@@ -130,7 +130,7 @@ export function mockCreateTask(req: CreateBacktestTaskRequest): BacktestTask {
     // Attach a stable fixture run_id so results can be opened.
     // Use fixture id for known strategies so summary/equity match presets;
     // also register a virtual alias under generated run_id pointing to same fixture via mapping.
-    scheduleStatus(task_id, 'success', 2200, {
+    scheduleStatus(task_id, 'succeeded', 2200, {
       run_id: fixtureRunId,
       error_message: null,
     });

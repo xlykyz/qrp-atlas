@@ -19,6 +19,7 @@ import {
   type BacktestWorkflowFormState,
 } from '@/features/backtest-workflow/lib/form-model';
 import { validateWorkflowForm } from '@/features/backtest-workflow/lib/validate';
+import { getResultSource, getWorkflowSource } from '@/api/adapters/mode';
 
 type Step = 'configure' | 'tasks' | 'compare';
 
@@ -44,14 +45,17 @@ export default function BacktestWorkflowPage() {
   const [step, setStep] = useState<Step>('configure');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
-  const compare = useRunCompare(['sample_run_001', 'sample_run_002']);
+  const workflowSource = getWorkflowSource();
+  const resultSource = getResultSource();
+  const compare = useRunCompare();
+  const isMockMode = workflowSource === 'mock';
 
   useEffect(() => {
     setPageTitle('策略回测工作流');
     setHeaderControls(
       <div className="flex items-center gap-2">
         <Link
-          to="/backtest?source=mock"
+          to={`/backtest?source=${resultSource}`}
           className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}
         >
           回测分析
@@ -62,7 +66,7 @@ export default function BacktestWorkflowPage() {
       setPageTitle('');
       setHeaderControls(null);
     };
-  }, [setPageTitle, setHeaderControls]);
+  }, [setPageTitle, setHeaderControls, resultSource]);
 
   const selectedStrategy: StrategyCatalogItem | null = useMemo(() => {
     if (!form.strategyCode) return null;
@@ -113,7 +117,7 @@ export default function BacktestWorkflowPage() {
   }
 
   function openResult(runId: string) {
-    navigate(`/backtest?runId=${encodeURIComponent(runId)}&source=mock`);
+    navigate(`/backtest?runId=${encodeURIComponent(runId)}&source=${isMockMode ? 'mock' : 'http'}`);
   }
 
   function addToCompare(runId: string) {
@@ -132,9 +136,17 @@ export default function BacktestWorkflowPage() {
   return (
     <div className="space-y-6">
       <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-        当前为<strong>前端模拟工作流</strong>：策略目录与任务状态由 mock adapter
-        提供，成功任务会挂接已有 fixture 结果。浏览器内不执行策略算法。
-        未来仅需替换 adapter 接入真实 StrategyCatalog / BacktestTask / Result API。
+        {isMockMode ? (
+          <>
+            当前为<strong>Mock 模式</strong>：策略目录与任务状态由 mock adapter
+            驱动，成功任务绑定本地 fixture run，不执行真实策略算法。
+          </>
+        ) : (
+          <>
+            当前为<strong>真实 HTTP 模式</strong>：策略目录、任务创建/状态与结果
+            均来自后端产品 API。任务与结果会持久化，刷新后仍可再次打开。
+          </>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-1 rounded-md border border-slate-200 bg-white p-1 dark:border-slate-800 dark:bg-slate-900">
@@ -215,7 +227,7 @@ export default function BacktestWorkflowPage() {
 
           <div className="flex flex-wrap items-center gap-3">
             <Button onClick={() => void handleSubmit()} disabled={submitting}>
-              {submitting ? '提交中…' : '创建模拟回测'}
+              {submitting ? '提交中…' : '创建回测任务'}
             </Button>
             <Button
               variant="outline"
@@ -241,7 +253,7 @@ export default function BacktestWorkflowPage() {
         <section>
           <div className="mb-3 flex items-center justify-between gap-2">
             <h2 className="text-sm font-medium text-slate-700 dark:text-slate-200">
-              模拟任务
+              回测任务
             </h2>
             <Button size="sm" variant="outline" onClick={() => setStep('configure')}>
               修改配置再运行

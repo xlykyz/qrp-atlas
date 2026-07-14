@@ -34,7 +34,7 @@ export const UNIVERSE_PRESETS = [
 
 export const ENTRY_TIMING_OPTIONS: { value: EntryTiming; label: string }[] = [
   { value: 'next_open', label: '次日开盘' },
-  { value: 'same_close', label: '当日收盘（演示）' },
+  { value: 'same_close', label: '当日收盘（同 bar，非严格 PIT）' },
   { value: 'next_close', label: '次日收盘' },
 ];
 
@@ -60,8 +60,8 @@ export function createDefaultFormState(): BacktestWorkflowFormState {
     strategyCode: '',
     strategyVersion: '',
     strategyParams: {},
-    universeMode: 'preset',
-    universePreset: 'A_SHARE',
+    universeMode: 'tickers',
+    universePreset: 'CUSTOM',
     tickersText: '000001.SZ, 600519.SH',
     startDate: '2024-01-01',
     endDate: '2024-12-31',
