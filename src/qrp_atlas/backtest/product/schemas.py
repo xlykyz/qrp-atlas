@@ -40,6 +40,14 @@ class StrategyCatalogItem(BaseModel):
     required_indicators: list[str] = Field(default_factory=list)
     parameter_schema: dict[str, ParameterSpecDTO] = Field(default_factory=dict)
     indicator_requests: list[dict[str, Any]] = Field(default_factory=list)
+    # Product capability metadata (07-B1+)
+    product_supported: bool = False
+    requires_historical_universe: bool = False
+    supported_universe_modes: list[str] = Field(default_factory=lambda: ["tickers"])
+    supported_entry_timings: list[str] = Field(
+        default_factory=lambda: ["next_open", "same_close", "next_close"]
+    )
+    requires_portfolio_config: bool = True
 
 
 class BacktestCostConfigDTO(BaseModel):
@@ -65,6 +73,8 @@ class CreateBacktestTaskRequest(BaseModel):
     strategy_params: dict[str, Any] = Field(default_factory=dict)
     universe_mode: str = "tickers"
     universe_preset: str | None = None
+    # 07-B1: PIT historical index membership universe.
+    index_code: str | None = None
     tickers: list[str] | None = None
     start_date: str
     end_date: str
@@ -82,6 +92,7 @@ class BacktestTaskRecord(BaseModel):
     strategy_params: dict[str, Any] = Field(default_factory=dict)
     universe_mode: str
     universe_preset: str | None = None
+    index_code: str | None = None
     tickers: list[str] = Field(default_factory=list)
     start_date: str
     end_date: str

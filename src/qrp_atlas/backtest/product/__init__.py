@@ -13,6 +13,10 @@ from .schemas import (
     IndicatorCatalogItem,
     StrategyCatalogItem,
 )
+from .cross_section import (
+    CROSS_SECTIONAL_MOMENTUM_CODE,
+    run_cross_sectional_momentum_product_backtest,
+)
 from .service import (
     BacktestProductService,
     BacktestTaskExecutionError,
@@ -29,6 +33,8 @@ __all__ = [
     "PRODUCT_SUPPORTED_STRATEGY_CODES",
     "list_indicator_catalog",
     "list_strategy_catalog",
+    "run_cross_sectional_momentum_product_backtest",
+    "CROSS_SECTIONAL_MOMENTUM_CODE",
     "get_strategy_catalog_item",
     "IndicatorCatalogItem",
     "StrategyCatalogItem",

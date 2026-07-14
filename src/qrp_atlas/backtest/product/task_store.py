@@ -85,6 +85,7 @@ class BacktestTaskStore:
                 strategy_params=dict(request.strategy_params or {}),
                 universe_mode=request.universe_mode,
                 universe_preset=request.universe_preset,
+                index_code=request.index_code,
                 tickers=tickers,
                 start_date=request.start_date,
                 end_date=request.end_date,
