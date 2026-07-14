@@ -43,16 +43,20 @@ from typing import Any, Literal
 import pandas as pd
 
 from qrp_atlas.contracts import (
+    AMOUNT,
     ASSET_ID,
     BPS,
     CIRC_MV,
     CLOSE,
     FLOAT_CAP,
+    HIGH,
+    LOW,
     MARKET_CAP,
     ROE,
     TICKER,
     TOTAL_MV,
     TRADE_DATE,
+    TURNOVER,
 )
 from qrp_atlas.indicators.cross_section.conventions import (
     CrossSectionFrameError,
@@ -127,7 +131,7 @@ class FactorDefinition:
 
     code: str
     name: str
-    family: Literal["momentum", "size", "fundamental"]
+    family: Literal["momentum", "size", "fundamental", "trend", "risk", "liquidity"]
     description: str
     formula: str
     direction: str
@@ -349,7 +353,7 @@ def compute_momentum_factor(
     needed_assets = set(uni[ASSET_ID].tolist())
     panel = panel.loc[panel[ASSET_ID].isin(needed_assets)].copy()
     # Keep bar positions even when closes are invalid; only endpoints matter.
-    panel[price_column] = pd.to_numeric(panel[price_column], errors="coerce")
+    panel[price_column] = _as_finite_series(panel[price_column])
     panel.loc[panel[price_column] <= 0, price_column] = math.nan
     panel = panel.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort")
 
@@ -573,6 +577,20 @@ def compute_book_to_price_factor(
 _LOOKBACK = {
     "lookback": FactorParameterSpec("integer", 20, True, 1, 10000),
 }
+_INTERMEDIATE_MOMENTUM_PARAMETERS = {
+    "lookback": FactorParameterSpec("integer", 252, True, 1, 10000),
+    "skip_recent": FactorParameterSpec("integer", 21, True, 0, 10000),
+}
+_SHORT_REVERSAL_LOOKBACK = {
+    "lookback": FactorParameterSpec("integer", 5, True, 1, 10000),
+}
+_LONG_LOOKBACK = {
+    "lookback": FactorParameterSpec("integer", 252, True, 1, 10000),
+}
+_TURNOVER_CHANGE_PARAMETERS = {
+    "recent_window": FactorParameterSpec("integer", 20, True, 1, 10000),
+    "prior_window": FactorParameterSpec("integer", 20, True, 1, 10000),
+}
 _SIZE_FIELD = {
     "field": FactorParameterSpec(
         "string",
@@ -603,6 +621,148 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
             "NaN when fewer than lookback+1 bars, or either endpoint is "
             "non-positive/non-finite; intermediate NaNs keep their bar slots; "
             "never zero-filled."
+        ),
+    ),
+    "intermediate_momentum": FactorDefinition(
+        code="intermediate_momentum",
+        name="Intermediate-horizon momentum",
+        family="momentum",
+        description=(
+            "Return over a configurable intermediate horizon while skipping "
+            "the most recent bars; defaults to classic 252/21 (12-1) semantics."
+        ),
+        formula="close[T-skip_recent] / close[T-lookback] - 1",
+        direction="higher = stronger intermediate-horizon winner",
+        time_semantics=(
+            "Uses only endpoint closes dated <= T. With skip_recent=0 it includes "
+            "T close; otherwise it ends at T-skip_recent. Intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_INTERMEDIATE_MOMENTUM_PARAMETERS,
+        default_output="intermediate_momentum",
+        nan_semantics=(
+            "NaN until T-lookback exists, or when either endpoint is non-positive "
+            "or non-finite. Intermediate missing bars keep their positions."
+        ),
+    ),
+    "short_term_reversal": FactorDefinition(
+        code="short_term_reversal",
+        name="Short-term reversal raw return",
+        family="momentum",
+        description=(
+            "Raw short-horizon trailing return; lower values represent larger "
+            "recent losses and stronger classic reversal candidates."
+        ),
+        formula="close[T] / close[T-lookback] - 1",
+        direction="lower = larger recent loss / stronger reversal candidate",
+        time_semantics=(
+            "Includes T close and is known only after the close of T; intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_SHORT_REVERSAL_LOOKBACK,
+        default_output="short_term_reversal",
+        nan_semantics=(
+            "NaN until lookback+1 bars exist, or when either endpoint is "
+            "non-positive or non-finite; no sign flip or zero fill."
+        ),
+    ),
+    "distance_to_high": FactorDefinition(
+        code="distance_to_high",
+        name="Distance to rolling high",
+        family="trend",
+        description="Close relative to the inclusive rolling maximum high.",
+        formula="close[T] / max(high[T-lookback+1:T]) - 1",
+        direction="higher / closer to zero = nearer the stage high",
+        time_semantics=(
+            "The rolling window includes the T bar and no future bar; intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE, HIGH),
+        parameter_schema=_LONG_LOOKBACK,
+        default_output="distance_to_high",
+        nan_semantics=(
+            "NaN until every high in the full lookback window is finite and "
+            "positive, or when T close is non-positive/non-finite."
+        ),
+    ),
+    "high_low_range_volatility": FactorDefinition(
+        code="high_low_range_volatility",
+        name="High-low range volatility",
+        family="risk",
+        description="Rolling mean of the close-normalized daily high-low range.",
+        formula="mean((high-low)/close, lookback)",
+        direction="higher = wider intraday ranges / higher risk",
+        time_semantics=(
+            "Each rolling window ends at T and includes the T OHLC bar; intended "
+            "for T+1 or later use."
+        ),
+        inputs=(HIGH, LOW, CLOSE),
+        parameter_schema=_LOOKBACK,
+        default_output="high_low_range_volatility",
+        nan_semantics=(
+            "NaN until a full valid window exists; invalid/non-positive prices "
+            "or high < low invalidate the affected rolling windows."
+        ),
+    ),
+    "average_turnover": FactorDefinition(
+        code="average_turnover",
+        name="Average turnover",
+        family="liquidity",
+        description="Rolling arithmetic mean of the supplied turnover field.",
+        formula="mean(turnover[T-lookback+1:T])",
+        direction="higher = more actively traded / more liquid",
+        time_semantics=(
+            "Uses turnover observations through T only; intended for T+1 or later use."
+        ),
+        inputs=(TURNOVER,),
+        parameter_schema=_LOOKBACK,
+        default_output="average_turnover",
+        nan_semantics=(
+            "NaN until a full window of finite non-negative turnover exists; "
+            "explicit zeros remain valid observations."
+        ),
+    ),
+    "turnover_change": FactorDefinition(
+        code="turnover_change",
+        name="Turnover change",
+        family="liquidity",
+        description=(
+            "Recent mean turnover relative to the immediately preceding, "
+            "non-overlapping mean turnover window."
+        ),
+        formula=(
+            "mean(turnover[T-recent_window+1:T]) / "
+            "mean(turnover[T-recent_window-prior_window+1:T-recent_window]) - 1"
+        ),
+        direction="higher = stronger recent expansion in trading activity",
+        time_semantics=(
+            "Both non-overlapping windows end no later than T; intended for T+1 or later use."
+        ),
+        inputs=(TURNOVER,),
+        parameter_schema=_TURNOVER_CHANGE_PARAMETERS,
+        default_output="turnover_change",
+        nan_semantics=(
+            "NaN until both windows are fully valid, or when the prior-window "
+            "mean is zero; no infinity or zero fill."
+        ),
+    ),
+    "average_traded_amount": FactorDefinition(
+        code="average_traded_amount",
+        name="Average traded amount",
+        family="liquidity",
+        description="Rolling arithmetic mean of the supplied traded amount field.",
+        formula="mean(amount[T-lookback+1:T])",
+        direction="higher = greater traded-value liquidity",
+        time_semantics=(
+            "Uses traded amount observations through T only; intended for T+1 or later use."
+        ),
+        inputs=(AMOUNT,),
+        parameter_schema=_LOOKBACK,
+        default_output="average_traded_amount",
+        nan_semantics=(
+            "NaN until a full window of finite non-negative amounts exists; "
+            "explicit zeros remain valid observations."
         ),
     ),
     "log_market_cap": FactorDefinition(
@@ -687,6 +847,17 @@ def _coerce_factor_request(value: FactorRequest | str | Mapping[str, Any]) -> Fa
     raise FactorRequestError(f"unsupported factor request type: {type(value)!r}")
 
 
+def _validate_parameter_relationships(
+    code: str, parameters: Mapping[str, Any]
+) -> None:
+    if code == "intermediate_momentum" and int(parameters["lookback"]) <= int(
+        parameters["skip_recent"]
+    ):
+        raise FactorRequestError(
+            "factor 'intermediate_momentum' requires lookback > skip_recent"
+        )
+
+
 def resolve_factor_requests(
     factors: Sequence[FactorRequest | str | Mapping[str, Any]],
 ) -> tuple[ResolvedFactorRequest, ...]:
@@ -720,6 +891,7 @@ def resolve_factor_requests(
                 )
             _validate_parameter(request.code, name, value, spec)
             parameters[name] = value
+        _validate_parameter_relationships(request.code, parameters)
 
         if request.alias is not None:
             output_column = request.alias
@@ -770,6 +942,77 @@ def _compute_one_factor(
         if prices is None:
             raise FactorRequestError("momentum requires a prices panel")
         return compute_momentum_factor(
+            prices,
+            universe=universe,
+            lookback=int(params["lookback"]),
+            output_column=output,
+        )
+    if code in {
+        "intermediate_momentum",
+        "short_term_reversal",
+        "distance_to_high",
+        "high_low_range_volatility",
+        "average_turnover",
+        "turnover_change",
+        "average_traded_amount",
+    }:
+        if prices is None:
+            raise FactorRequestError(f"{code} requires a prices panel")
+        from qrp_atlas.indicators.cross_section.market_factors import (
+            compute_average_traded_amount_factor,
+            compute_average_turnover_factor,
+            compute_distance_to_high_factor,
+            compute_high_low_range_volatility_factor,
+            compute_intermediate_momentum_factor,
+            compute_short_term_reversal_factor,
+            compute_turnover_change_factor,
+        )
+
+        if code == "intermediate_momentum":
+            return compute_intermediate_momentum_factor(
+                prices,
+                universe=universe,
+                lookback=int(params["lookback"]),
+                skip_recent=int(params["skip_recent"]),
+                output_column=output,
+            )
+        if code == "short_term_reversal":
+            return compute_short_term_reversal_factor(
+                prices,
+                universe=universe,
+                lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code == "distance_to_high":
+            return compute_distance_to_high_factor(
+                prices,
+                universe=universe,
+                lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code == "high_low_range_volatility":
+            return compute_high_low_range_volatility_factor(
+                prices,
+                universe=universe,
+                lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code == "average_turnover":
+            return compute_average_turnover_factor(
+                prices,
+                universe=universe,
+                lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code == "turnover_change":
+            return compute_turnover_change_factor(
+                prices,
+                universe=universe,
+                recent_window=int(params["recent_window"]),
+                prior_window=int(params["prior_window"]),
+                output_column=output,
+            )
+        return compute_average_traded_amount_factor(
             prices,
             universe=universe,
             lookback=int(params["lookback"]),
