@@ -24,7 +24,12 @@ from qrp_atlas.backtest.product.timing import (
 from qrp_atlas.backtest.residual_data import (
     ResidualDataError,
     ResidualPanelPreparation,
+    prepare_industry_residual_panel,
     prepare_market_residual_panel,
+)
+from qrp_atlas.backtest.exposure_data import (
+    DEFAULT_CLASSIFICATION_SYSTEM,
+    DEFAULT_INDUSTRY_LEVEL,
 )
 from qrp_atlas.contracts import ASSET_ID, TICKER, TRADE_DATE
 from qrp_atlas.indicators.stock.residual import (
@@ -411,6 +416,185 @@ def run_market_residual_mean_reversion_backtest(
     )
 
 
+
+def run_industry_residual_research(
+    asset_prices: pd.DataFrame,
+    *,
+    industry_benchmark_prices: pd.DataFrame | None = None,
+    industry_benchmark_returns: pd.DataFrame | None = None,
+    industry_panel: pd.DataFrame | None = None,
+    industry_query: Any | None = None,
+    classification_system: str = DEFAULT_CLASSIFICATION_SYSTEM,
+    industry_level: int = DEFAULT_INDUSTRY_LEVEL,
+    db_path: Any = None,
+    con: Any = None,
+    window: int = 60,
+    min_periods: int | None = None,
+    z_window: int = 60,
+    fit_intercept: bool = True,
+    n_groups: int = 5,
+    horizons: Sequence[int] = DEFAULT_FORWARD_HORIZONS,
+    residual_panel: pd.DataFrame | None = None,
+) -> ResidualResearchResult:
+    """Evaluate industry residual signals with forward returns only."""
+
+    diagnostics: list[str] = []
+    if residual_panel is None:
+        try:
+            preparation = prepare_industry_residual_panel(
+                asset_prices,
+                industry_benchmark_prices=industry_benchmark_prices,
+                industry_benchmark_returns=industry_benchmark_returns,
+                industry_panel=industry_panel,
+                industry_query=industry_query,
+                classification_system=classification_system,
+                industry_level=industry_level,
+                db_path=db_path,
+                con=con,
+                window=window,
+                min_periods=min_periods,
+                z_window=z_window,
+                fit_intercept=fit_intercept,
+                compute_residuals=True,
+            )
+        except ResidualDataError as exc:
+            raise ResidualResearchError(str(exc)) from exc
+        panel = preparation.panel.copy()
+        diagnostics.extend(preparation.diagnostics)
+        prep_meta = dict(preparation.metadata)
+    else:
+        if not isinstance(residual_panel, pd.DataFrame):
+            raise ResidualResearchError("residual_panel must be a pandas DataFrame")
+        panel = residual_panel.copy()
+        if RESIDUAL_ZSCORE not in panel.columns:
+            try:
+                computed = calculate_market_residuals(
+                    panel,
+                    window=window,
+                    min_periods=min_periods,
+                    z_window=z_window,
+                    fit_intercept=fit_intercept,
+                )
+            except ResidualIndicatorError as exc:
+                raise ResidualResearchError(str(exc)) from exc
+            panel = panel.merge(
+                computed.frame[
+                    [
+                        TRADE_DATE,
+                        ASSET_ID if ASSET_ID in computed.frame.columns else TICKER,
+                        *list(computed.frame.columns.intersection(
+                            {
+                                "rolling_alpha",
+                                "rolling_beta",
+                                "rolling_r2",
+                                RESIDUAL_RETURN,
+                                RESIDUAL_ZSCORE,
+                                "diagnostic_code",
+                            }
+                        )),
+                    ]
+                ],
+                on=[TRADE_DATE, ASSET_ID if ASSET_ID in panel.columns else TICKER],
+                how="left",
+                sort=False,
+            )
+            diagnostics.extend(computed.diagnostics)
+        prep_meta = {
+            "benchmark_kind": "industry",
+            "classification_system": classification_system,
+            "industry_level": industry_level,
+            "window": window,
+            "min_periods": min_periods if min_periods is not None else window,
+            "z_window": z_window,
+            "fit_intercept": fit_intercept,
+        }
+
+    if panel.empty:
+        empty_groups = pd.DataFrame()
+        return ResidualResearchResult(
+            residual_panel=panel,
+            group_assignments=empty_groups,
+            group_returns=empty_groups,
+            group_spreads=empty_groups,
+            extreme_group_comparison=empty_groups,
+            diagnostics=tuple(diagnostics),
+            metadata={
+                **prep_meta,
+                "usable_sample_count": 0,
+                "n_groups": n_groups,
+                "horizons": list(horizons),
+            },
+        )
+
+    research_frame = panel.copy()
+    if ASSET_ID not in research_frame.columns and TICKER in research_frame.columns:
+        research_frame[ASSET_ID] = research_frame[TICKER]
+    usable = (
+        research_frame[RESIDUAL_ZSCORE].notna().sum()
+        if RESIDUAL_ZSCORE in research_frame
+        else 0
+    )
+
+    trading_days = sorted(pd.to_datetime(asset_prices[TRADE_DATE]).unique())
+    prices_for_forward = asset_prices
+    if ASSET_ID not in prices_for_forward.columns and TICKER in prices_for_forward.columns:
+        prices_for_forward = prices_for_forward.rename(columns={TICKER: ASSET_ID})
+    forward = compute_forward_returns(
+        prices_for_forward,
+        trading_days=trading_days,
+        horizons=horizons,
+        price_field="close",
+    )
+    try:
+        assignments = assign_factor_groups(
+            research_frame[[TRADE_DATE, ASSET_ID, RESIDUAL_ZSCORE]].rename(
+                columns={RESIDUAL_ZSCORE: "residual_zscore"}
+            ),
+            factor_columns="residual_zscore",
+            n_groups=n_groups,
+        )
+        group_result = compute_group_returns(
+            assignments,
+            forward,
+            horizons=horizons,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ResidualResearchError(str(exc)) from exc
+
+    extreme = _extreme_group_comparison(group_result.group_returns, n_groups=n_groups)
+    industry_summary = None
+    if "industry_code" in research_frame.columns:
+        industry_summary = (
+            research_frame.groupby("industry_code", dropna=False)
+            .agg(
+                sample_count=(ASSET_ID, "size"),
+                usable_residual_count=(RESIDUAL_RETURN, lambda s: int(s.notna().sum())),
+                usable_zscore_count=(RESIDUAL_ZSCORE, lambda s: int(s.notna().sum())),
+            )
+            .reset_index()
+            .to_dict(orient="records")
+        )
+    metadata = {
+        **prep_meta,
+        "usable_sample_count": int(usable),
+        "n_groups": int(n_groups),
+        "horizons": [int(value) for value in horizons],
+        "industry_summary": industry_summary,
+        "note": "forward outcomes are evaluation-only and never enter strategy decisions",
+    }
+    return ResidualResearchResult(
+        residual_panel=research_frame.sort_values(
+            [TRADE_DATE, ASSET_ID], kind="mergesort"
+        ).reset_index(drop=True),
+        group_assignments=group_result.assignments,
+        group_returns=group_result.group_returns,
+        group_spreads=group_result.spreads,
+        extreme_group_comparison=extreme,
+        diagnostics=tuple(diagnostics),
+        metadata=metadata,
+    )
+
+
 def _extreme_group_comparison(
     group_returns: pd.DataFrame, *, n_groups: int
 ) -> pd.DataFrame:
@@ -452,6 +636,7 @@ __all__ = [
     "ResidualResearchError",
     "ResidualResearchResult",
     "ResidualStrategyBacktestRun",
+    "run_industry_residual_research",
     "run_market_residual_mean_reversion_backtest",
     "run_residual_research",
 ]
