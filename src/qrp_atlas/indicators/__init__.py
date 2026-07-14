@@ -1,20 +1,23 @@
-"""qrp_atlas.indicators - 市场复合指标计算层。
+"""qrp_atlas.indicators - 量化指标、特征与因子计算层。
 
-本包基于 contracts 字段规则和已有行情数据，计算市场宽度、市场风险、
-个股趋势、系统 B 基础状态等复合指标，服务于市场监测、复盘、回测和
-交易系统判断。
+本包基于 contracts 字段规则和调用方已准备的数据，计算市场宽度、市场风险、
+个股趋势、系统 B 基础状态、横截面因子及其标准化结果，服务于市场监测、
+复盘、策略、回测和研究分析。
 
-依赖方向：contracts → indicators → review / backtest / api / frontend。
+Factor 是 Indicator 的专业子类型：本包负责生成可复用的客观事实、特征和
+因子，不负责策略权重、交易授权、仓位、成交或未来收益评价。
+
+依赖方向：contracts → indicators → strategies / backtest / api / frontend。
 
 子模块：
-    - market/    市场宽度与风险
-    - stock/     个股趋势
-    - system_b/  系统 B 基础状态检测
-    - cross_section/ 横截面基础算子与历史股票池
-    - service    对外组合入口
+    - market/         市场宽度与风险
+    - stock/          个股趋势
+    - system_b/       系统 B 基础状态检测
+    - cross_section/  横截面算子、历史股票池、因子与中性化
+    - service         对外组合入口
 """
 
-# 保留：指标元数据定义与注册表（非本次核心）
+# 指标元数据定义与注册表
 from qrp_atlas.indicators.definitions import (
     IndicatorDefinition,
     IndicatorLayer,
@@ -37,7 +40,7 @@ from qrp_atlas.indicators.parameterized import (
     resolve_indicator_requests,
 )
 
-# 新增：市场复合指标计算
+# 市场复合指标计算
 from qrp_atlas.indicators.market import calculate_market_breadth, calculate_market_risk
 from qrp_atlas.indicators.stock import calculate_stock_trend
 from qrp_atlas.indicators.system_b import (
@@ -46,7 +49,7 @@ from qrp_atlas.indicators.system_b import (
 )
 from qrp_atlas.indicators.service import calculate_daily_market_snapshot
 
-# 横截面研究基础（任务 04-A）
+# 横截面指标、因子与研究基础
 from qrp_atlas.indicators.cross_section import (
     CrossSectionFrameError,
     FACTOR_DEFINITIONS,
@@ -89,7 +92,7 @@ from qrp_atlas.indicators.cross_section import (
 )
 
 __all__ = [
-    # 元数据定义（保留）
+    # 元数据定义
     "IndicatorDefinition",
     "IndicatorLayer",
     "IndicatorScope",
@@ -115,7 +118,7 @@ __all__ = [
     "detect_system_b_basic_state",
     "detect_system_b_basic_state_from_prices",
     "calculate_daily_market_snapshot",
-    # 横截面研究基础
+    # 横截面指标与因子
     "CrossSectionFrameError",
     "FACTOR_DEFINITIONS",
     "FactorDefinition",
