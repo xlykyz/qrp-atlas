@@ -148,7 +148,19 @@ def _financial_panel(
 
 def test_list_and_get_factor_definitions() -> None:
     codes = [item.code for item in list_factors()]
-    assert codes == ["book_to_price", "log_market_cap", "momentum", "roe"]
+    assert codes == [
+        "average_traded_amount",
+        "average_turnover",
+        "book_to_price",
+        "distance_to_high",
+        "high_low_range_volatility",
+        "intermediate_momentum",
+        "log_market_cap",
+        "momentum",
+        "roe",
+        "short_term_reversal",
+        "turnover_change",
+    ]
     momentum = get_factor_definition("momentum")
     assert "close[T]" in momentum.formula
     assert "T+1" in momentum.time_semantics
