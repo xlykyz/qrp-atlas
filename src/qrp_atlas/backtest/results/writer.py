@@ -16,6 +16,14 @@ import pandas as pd
 from qrp_atlas.config.paths import PROJECT_ROOT
 
 from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
+from .analytics import (
+    calmar_ratio,
+    daily_returns_from_equity,
+    json_safe,
+    rolling_performance,
+    sharpe_ratio,
+    sortino_ratio,
+)
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _RESULT_FILENAMES = (
@@ -28,6 +36,10 @@ _RESULT_FILENAMES = (
     "orders.json",
     "fills.json",
     "snapshots.json",
+    "daily_returns.json",
+    "rolling_performance.json",
+    "costs.json",
+    "diagnostics.json",
 )
 
 
@@ -39,7 +51,7 @@ def _validate_run_id(run_id: str) -> str:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        json.dumps(json_safe(payload), ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
@@ -180,11 +192,22 @@ def _summary_payload(
         if avg_win is not None and avg_loss not in (None, 0)
         else None
     )
+    equity_curve = list(result.equity_curve)
+    daily_rows = daily_returns_from_equity(equity_curve)
+    daily_vals = [row.get("daily_return") for row in daily_rows]
+    annual = _annual_return_pct(result)
+    max_dd = float(result.summary["max_drawdown_pct"])
+    sharpe = sharpe_ratio(daily_vals)
+    sortino = sortino_ratio(daily_vals)
+    calmar = calmar_ratio(annual, max_dd)
     return {
         "run_id": run_id,
         "total_return_pct": float(result.summary["total_return_pct"]),
-        "annual_return_pct": _annual_return_pct(result),
-        "max_drawdown_pct": float(result.summary["max_drawdown_pct"]),
+        "annual_return_pct": annual,
+        "max_drawdown_pct": max_dd,
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "calmar": calmar,
         "win_rate_pct": (len(wins) / len(closed) * 100.0) if closed else None,
         "profit_loss_ratio": profit_loss_ratio,
         "trade_count": len(closed),
@@ -287,24 +310,67 @@ class BacktestRunWriter:
                 or datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "status": "completed",
             }
+            summary = _summary_payload(
+                run_id,
+                result,
+                trades,
+                extra_skipped_count=len(extra_skipped or []),
+            )
+            equity_curve = list(result.equity_curve)
+            daily_rows = daily_returns_from_equity(equity_curve)
+            rolling_rows = rolling_performance(equity_curve, windows=(20, 60))
+            costs = {
+                "commission": float(result.summary["commission"]),
+                "stamp_tax": float(result.summary["stamp_tax"]),
+                "slippage_cost": float(result.summary["slippage_cost"]),
+                "total_cost": float(result.summary["total_cost"]),
+                "turnover": float(result.summary["turnover"]),
+                "final_equity": float(result.summary["final_equity"]),
+                "total_return_pct": float(result.summary["total_return_pct"]),
+            }
+            diagnostics = {
+                "result_package_version": "1.0",
+                "artifact_set": list(_RESULT_FILENAMES),
+                "has_orders": True,
+                "has_fills": True,
+                "has_snapshots": True,
+                "has_rolling_performance": True,
+                "has_daily_returns": True,
+                "snapshot_count": len(result.snapshots),
+                "order_count": len(result.orders),
+                "fill_count": len(result.fills),
+                "trade_count": len(trades),
+                "skipped_count": len(skipped),
+            }
+            config_payload = {
+                **asdict(result.config),
+                **(config_overlay or {}),
+                "reproducibility": {
+                    "strategy_name": strategy_name,
+                    "universe": universe,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "locked_to_run_snapshot": True,
+                    "note": (
+                        "Historical runs must be reloaded from this config snapshot; "
+                        "do not rebuild from current registry defaults."
+                    ),
+                },
+            }
             payloads = {
                 "run_meta.json": meta,
-                "summary.json": _summary_payload(
-                    run_id,
-                    result,
-                    trades,
-                    extra_skipped_count=len(extra_skipped or []),
-                ),
-                "equity.json": list(result.equity_curve),
+                "summary.json": summary,
+                "equity.json": equity_curve,
                 "trades.json": trades,
                 "skipped.json": skipped,
-                "config.json": {
-                    **asdict(result.config),
-                    **(config_overlay or {}),
-                },
+                "config.json": config_payload,
                 "orders.json": [order.to_dict() for order in result.orders],
                 "fills.json": [fill.to_dict() for fill in result.fills],
                 "snapshots.json": [snapshot.to_dict() for snapshot in result.snapshots],
+                "daily_returns.json": daily_rows,
+                "rolling_performance.json": rolling_rows,
+                "costs.json": costs,
+                "diagnostics.json": diagnostics,
             }
             for filename in _RESULT_FILENAMES:
                 _write_json(temp_dir / filename, payloads[filename])

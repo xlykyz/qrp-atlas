@@ -14,6 +14,9 @@ export interface BacktestSummary {
   total_return_pct: number | null;
   annual_return_pct: number | null;
   max_drawdown_pct: number | null;
+  sharpe?: number | null;
+  sortino?: number | null;
+  calmar?: number | null;
   win_rate_pct: number | null;
   profit_loss_ratio: number | null;
   trade_count: number;
@@ -21,6 +24,12 @@ export interface BacktestSummary {
   max_trade_loss_pct: number | null;
   max_trade_profit_pct: number | null;
   skipped_count: number;
+  turnover?: number | null;
+  commission?: number | null;
+  stamp_tax?: number | null;
+  slippage_cost?: number | null;
+  total_cost?: number | null;
+  final_equity?: number | null;
 }
 
 export interface EquityPoint {

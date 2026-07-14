@@ -135,3 +135,38 @@ class BacktestRunsLoader:
     def load_config(self, run_id: str) -> dict[str, Any]:
         data = self._load_json(run_id, "config.json")
         return data if isinstance(data, dict) else {}
+
+    def load_optional_json(self, run_id: str, filename: str):
+        """Load optional artifact; missing file returns None instead of hard error."""
+        try:
+            return self._load_json(run_id, filename)
+        except ResultFileMissingError:
+            return None
+
+    def load_orders(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "orders.json")
+        return list(data or [])
+
+    def load_fills(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "fills.json")
+        return list(data or [])
+
+    def load_snapshots(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "snapshots.json")
+        return list(data or [])
+
+    def load_daily_returns(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "daily_returns.json")
+        return list(data or [])
+
+    def load_rolling_performance(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "rolling_performance.json")
+        return list(data or [])
+
+    def load_costs(self, run_id: str):
+        data = self.load_optional_json(run_id, "costs.json")
+        return data if isinstance(data, dict) else None
+
+    def load_diagnostics(self, run_id: str):
+        data = self.load_optional_json(run_id, "diagnostics.json")
+        return data if isinstance(data, dict) else None

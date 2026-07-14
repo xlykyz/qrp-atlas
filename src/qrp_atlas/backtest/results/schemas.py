@@ -33,6 +33,9 @@ class BacktestSummary(BaseModel):
     total_return_pct: Optional[float] = None
     annual_return_pct: Optional[float] = None
     max_drawdown_pct: Optional[float] = None
+    sharpe: Optional[float] = None
+    sortino: Optional[float] = None
+    calmar: Optional[float] = None
     win_rate_pct: Optional[float] = None
     profit_loss_ratio: Optional[float] = None
     trade_count: int = 0
@@ -40,6 +43,12 @@ class BacktestSummary(BaseModel):
     max_trade_loss_pct: Optional[float] = None
     max_trade_profit_pct: Optional[float] = None
     skipped_count: int = 0
+    turnover: Optional[float] = None
+    commission: Optional[float] = None
+    stamp_tax: Optional[float] = None
+    slippage_cost: Optional[float] = None
+    total_cost: Optional[float] = None
+    final_equity: Optional[float] = None
 
 
 class EquityPoint(BaseModel):
@@ -82,3 +91,58 @@ class BacktestConfigSnapshot(BaseModel):
 
     run_id: str
     config: dict[str, Any]
+
+
+class DailyReturnPoint(BaseModel):
+    date: str
+    daily_return: Optional[float] = None
+    equity: Optional[float] = None
+
+
+class CostBreakdown(BaseModel):
+    commission: Optional[float] = None
+    stamp_tax: Optional[float] = None
+    slippage_cost: Optional[float] = None
+    total_cost: Optional[float] = None
+    turnover: Optional[float] = None
+    final_equity: Optional[float] = None
+    total_return_pct: Optional[float] = None
+
+
+class RollingPerformancePoint(BaseModel):
+    date: str
+    drawdown: Optional[float] = None
+    return_w20: Optional[float] = None
+    volatility_w20: Optional[float] = None
+    sharpe_w20: Optional[float] = None
+    drawdown_w20: Optional[float] = None
+    return_w60: Optional[float] = None
+    volatility_w60: Optional[float] = None
+    sharpe_w60: Optional[float] = None
+    drawdown_w60: Optional[float] = None
+
+
+class RunDiagnostics(BaseModel):
+    result_package_version: Optional[str] = None
+    artifact_set: list[str] = []
+    has_orders: bool = False
+    has_fills: bool = False
+    has_snapshots: bool = False
+    has_rolling_performance: bool = False
+    has_daily_returns: bool = False
+    snapshot_count: int = 0
+    order_count: int = 0
+    fill_count: int = 0
+    trade_count: int = 0
+    skipped_count: int = 0
+
+
+class RunCompareRequest(BaseModel):
+    run_ids: list[str]
+
+
+class RunCompareResponse(BaseModel):
+    runs: list[BacktestRunMeta]
+    summaries: list[BacktestSummary]
+    configs: list[BacktestConfigSnapshot]
+    missing: list[str] = []

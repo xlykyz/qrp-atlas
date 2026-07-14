@@ -14,7 +14,12 @@ from .schemas import (
     BacktestRunMeta,
     BacktestSummary,
     BacktestTrade,
+    CostBreakdown,
+    DailyReturnPoint,
     EquityPoint,
+    RollingPerformancePoint,
+    RunCompareResponse,
+    RunDiagnostics,
     SkippedTrade,
 )
 
@@ -82,6 +87,69 @@ def get_config(run_id: str) -> BacktestConfigSnapshot:
     return BacktestConfigSnapshot(run_id=run_id, config=data)
 
 
+def get_orders(run_id: str) -> list[dict]:
+    return get_loader().load_orders(run_id)
+
+
+def get_fills(run_id: str) -> list[dict]:
+    return get_loader().load_fills(run_id)
+
+
+def get_snapshots(run_id: str) -> list[dict]:
+    return get_loader().load_snapshots(run_id)
+
+
+def get_daily_returns(run_id: str) -> list[DailyReturnPoint]:
+    rows = get_loader().load_daily_returns(run_id)
+    return [DailyReturnPoint.model_validate(row) for row in rows]
+
+
+def get_rolling_performance(run_id: str) -> list[RollingPerformancePoint]:
+    rows = get_loader().load_rolling_performance(run_id)
+    return [RollingPerformancePoint.model_validate(row) for row in rows]
+
+
+def get_costs(run_id: str) -> CostBreakdown | None:
+    data = get_loader().load_costs(run_id)
+    if data is None:
+        # derive from summary when older packages lack costs.json
+        summary = get_loader().load_summary(run_id)
+        data = {
+            "commission": summary.get("commission"),
+            "stamp_tax": summary.get("stamp_tax"),
+            "slippage_cost": summary.get("slippage_cost"),
+            "total_cost": summary.get("total_cost"),
+            "turnover": summary.get("turnover"),
+            "final_equity": summary.get("final_equity"),
+            "total_return_pct": summary.get("total_return_pct"),
+        }
+    return CostBreakdown.model_validate(data)
+
+
+def get_diagnostics(run_id: str) -> RunDiagnostics | None:
+    data = get_loader().load_diagnostics(run_id)
+    if data is None:
+        return None
+    return RunDiagnostics.model_validate(data)
+
+
+def compare_runs(run_ids: list[str]) -> RunCompareResponse:
+    """Compare multiple product runs by meta/summary/config snapshots."""
+
+    runs: list[BacktestRunMeta] = []
+    summaries: list[BacktestSummary] = []
+    configs: list[BacktestConfigSnapshot] = []
+    missing: list[str] = []
+    for run_id in run_ids:
+        try:
+            runs.append(get_run_meta(run_id))
+            summaries.append(get_summary(run_id))
+            configs.append(get_config(run_id))
+        except Exception:  # noqa: BLE001
+            missing.append(run_id)
+    return RunCompareResponse(runs=runs, summaries=summaries, configs=configs, missing=missing)
+
+
 __all__ = [
     "RunNotFoundError",
     "ResultFileMissingError",
@@ -92,6 +160,14 @@ __all__ = [
     "get_trades",
     "get_skipped",
     "get_config",
+    "get_orders",
+    "get_fills",
+    "get_snapshots",
+    "get_daily_returns",
+    "get_rolling_performance",
+    "get_costs",
+    "get_diagnostics",
+    "compare_runs",
     "get_loader",
     "set_loader_for_tests",
 ]
