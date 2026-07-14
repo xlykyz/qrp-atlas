@@ -334,6 +334,13 @@ def execute_validated_task(
         request, price_df
     )
 
+    execution_signal_map: dict[tuple[str, str], str] = {}
+    if execution_targets is not None and not execution_targets.empty:
+        for row in execution_targets.itertuples(index=False):
+            execution_signal_map[(str(row.trade_date), str(row.asset_id))] = str(
+                getattr(row, "signal_date", row.trade_date)
+            )
+
     # Guard: all formal result dates must stay inside the request window.
     for snapshot in portfolio_result.snapshots:
         if snapshot.trade_date < request.start_date or snapshot.trade_date > request.end_date:
@@ -394,6 +401,8 @@ def execute_validated_task(
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             overwrite=False,
             config_overlay=config_overlay,
+            execution_signal_map=execution_signal_map,
+            extra_skipped=skipped_signals,
         )
     except Exception as exc:  # noqa: BLE001
         raise BacktestTaskExecutionError(f"failed to persist backtest results: {exc}") from exc

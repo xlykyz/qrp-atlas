@@ -144,6 +144,20 @@ def _request(**overrides):
     return CreateBacktestTaskRequest(**base)
 
 
+def _assert_trade_signal_entry_relation(run_dir: Path, entry_timing: str) -> None:
+    trades = json.loads((run_dir / "trades.json").read_text(encoding="utf-8"))
+    if not trades:
+        return
+    for trade in trades:
+        signal = trade["signal_date"]
+        entry = trade["entry_date"]
+        assert signal and entry
+        if entry_timing in {"next_open", "next_close"}:
+            assert entry > signal, (entry_timing, trade)
+        else:
+            assert entry == signal, (entry_timing, trade)
+
+
 def _assert_dates_in_range(run_dir: Path, start: str, end: str) -> None:
     for filename in ("orders.json", "fills.json", "snapshots.json", "equity.json"):
         payload = json.loads((run_dir / filename).read_text(encoding="utf-8"))
@@ -222,6 +236,7 @@ def test_shift_targets_next_open_and_next_close_differ_from_signal():
     )
     assert skipped == []
     assert list(next_open["trade_date"]) == ["2024-01-03", "2024-01-04"]
+    assert list(next_open["signal_date"]) == ["2024-01-02", "2024-01-03"]
 
     same_close, _ = shift_target_weights_to_execution_dates(
         targets,
@@ -230,6 +245,7 @@ def test_shift_targets_next_open_and_next_close_differ_from_signal():
         end_date="2024-01-04",
     )
     assert list(same_close["trade_date"]) == ["2024-01-02", "2024-01-03"]
+    assert list(same_close["signal_date"]) == ["2024-01-02", "2024-01-03"]
 
 
 def test_shift_targets_end_of_range_is_skipped():
@@ -245,6 +261,7 @@ def test_shift_targets_end_of_range_is_skipped():
     )
     assert shifted.empty
     assert skipped[0]["reason"] == REASON_NO_EXECUTION_DATE_IN_RANGE
+    assert skipped[0]["signal_date"] == "2024-01-03"
 
 
 def test_task_store_persists_status_and_request_snapshot(tmp_path: Path):
@@ -297,10 +314,9 @@ def test_real_dual_sma_next_open_warmup_and_range(tmp_path: Path):
     assert "same_close_warning" in config["execution_semantics"]
 
     _assert_dates_in_range(run_dir, "2024-01-15", "2024-02-28")
+    _assert_trade_signal_entry_relation(run_dir, "next_open")
 
     orders = json.loads((run_dir / "orders.json").read_text(encoding="utf-8"))
-    # If any orders exist, none may land on the first formal signal day only by accident;
-    # more importantly they must not precede requested start.
     assert all(o["trade_date"] >= "2024-01-15" for o in orders)
 
     set_loader_for_tests(BacktestRunsLoader(runs_dir))
@@ -328,6 +344,7 @@ def test_next_close_executes_on_next_session_close(tmp_path: Path):
     assert config["entry_timing"] == "next_close"
     assert config["execution"]["price_field"] == "close"
     _assert_dates_in_range(run_dir, request.start_date, request.end_date)
+    _assert_trade_signal_entry_relation(run_dir, "next_close")
 
 
 def test_product_loader_excludes_fixtures_by_default(tmp_path: Path, monkeypatch):
@@ -426,3 +443,59 @@ def test_product_supported_strategies_smoke(tmp_path: Path, strategy_code, param
     _assert_dates_in_range(run_dir, "2024-01-20", "2024-03-05")
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     assert config["product_request"]["strategy_code"] == strategy_code
+
+
+
+def test_same_close_signal_equals_entry(tmp_path: Path):
+    db_path = _make_price_db(tmp_path)
+    runs_dir = tmp_path / "runs"
+    request = validate_create_request(
+        _request(execution=BacktestExecutionConfigDTO(entry_timing="same_close"))
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="dual_sma_same_close",
+        runs_dir=runs_dir,
+        db_path=db_path,
+    )
+    _assert_trade_signal_entry_relation(run_dir, "same_close")
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["entry_timing"] == "same_close"
+    assert config["execution_semantics"]["same_close_warning"]
+
+
+def test_end_of_range_skipped_signals_enter_skipped_json(tmp_path: Path):
+    """Product-layer NO_EXECUTION_DATE_IN_RANGE must appear in skipped.json/summary."""
+
+    db_path = _make_price_db(tmp_path, periods=25)
+    runs_dir = tmp_path / "runs"
+    # Force a short window so late signals cannot execute under next_open.
+    request = validate_create_request(
+        _request(
+            strategy_params={"fast_window": 2, "slow_window": 3},
+            start_date="2024-01-10",
+            end_date="2024-01-15",
+            execution=BacktestExecutionConfigDTO(entry_timing="next_open"),
+        )
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="dual_sma_end_skip",
+        runs_dir=runs_dir,
+        db_path=db_path,
+    )
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    product_skips = config["execution_semantics"]["skipped_signals"]
+    skipped = json.loads((run_dir / "skipped.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+
+    product_skip_count = sum(
+        1 for item in product_skips if item.get("reason") == REASON_NO_EXECUTION_DATE_IN_RANGE
+    )
+    skipped_product = [
+        item for item in skipped if item.get("reason") == REASON_NO_EXECUTION_DATE_IN_RANGE
+    ]
+    assert product_skip_count == len(skipped_product)
+    assert summary["skipped_count"] >= len(skipped)
+    if product_skip_count:
+        assert any(item.get("signal_date") for item in skipped_product)
