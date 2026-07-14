@@ -18,7 +18,7 @@
 | 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
 | 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
 | 3 | point-in-time 数据底座与查询服务 | contracts / pipeline / data / backtest | ✅ 已完成：03-A/03-B/03-C |
-| 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3；04-A～04-D 已完成，整体 🟡 部分完成 |
+| 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3；04-A～04-E 已完成，整体 ✅ 完成 |
 | 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
 | 6 | 残差相对价值与稳健性验证 | indicators / strategies / backtest / results | 阶段 2-4 |
 | 7 | 策略 API 与前端产品闭环 | api / web | 稳定策略与回测接口 |
@@ -115,7 +115,7 @@
 
 ## 六、阶段 4：横截面与多因子
 
-> 状态：🟡 部分完成（2026-07-14）。04-A 已完成横截面基础算子与历史股票池；04-B 已完成正式因子定义与生成；04-C 已完成行业/市值中性化；04-D 已完成 Top N、目标权重与 long-only 策略；04-E 未开始。
+> 状态：✅ 已完成（2026-07-14）。04-A～04-E 已全部完成：基础算子、正式因子、中性化、Top N/策略，以及 forward return / IC / 分组 / 暴露研究闭环。
 
 ### 目标
 
@@ -132,8 +132,8 @@
 - [x] 定期调仓（04-D）；
 - [x] cross-sectional momentum（04-D）；
 - [x] multifactor long-only（04-D）；
-- 行业、市值和 Beta 暴露；
-- 因子分组和 IC 基础分析（04-E）。
+- [x] 目标行业/市值暴露分析（04-E；Beta 暴露仍未实现）；
+- [x] 因子分组和 IC 基础分析（04-E）。
 
 ### 退出条件
 
