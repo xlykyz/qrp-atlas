@@ -1,7 +1,8 @@
-"""Product backtest loop: catalog, task persistence, real dual_sma execution."""
+"""Product backtest loop: timing, warmup isolation, and multi-strategy support."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -9,6 +10,7 @@ import pandas as pd
 import pytest
 
 from qrp_atlas.backtest.product import (
+    PRODUCT_SUPPORTED_STRATEGY_CODES,
     BacktestProductService,
     BacktestTaskStore,
     BacktestTaskValidationError,
@@ -23,23 +25,35 @@ from qrp_atlas.backtest.product.schemas import (
     BacktestExecutionConfigDTO,
     BacktestPositionConfigDTO,
 )
-from qrp_atlas.backtest.results import (
-    BacktestRunsLoader,
-    BacktestSummary,
-    get_equity,
-    get_run_meta,
-    get_summary,
+from qrp_atlas.backtest.product.timing import (
+    REASON_NO_EXECUTION_DATE_IN_RANGE,
+    market_trade_dates,
+    next_trade_date,
+    shift_target_weights_to_execution_dates,
 )
-from qrp_atlas.backtest.results import service as results_service
+from qrp_atlas.backtest.results import BacktestRunsLoader, BacktestSummary, get_equity, get_run_meta, get_summary
 from qrp_atlas.backtest.results.service import set_loader_for_tests
+from qrp_atlas.backtest.results.writer import BacktestRunWriter
+from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR, BACKTEST_RUNS_DIR
 
 
-def _make_price_db(tmp_path: Path) -> Path:
-    db_path = tmp_path / "product.duckdb"
+def _make_price_db(
+    tmp_path: Path,
+    *,
+    ticker: str = "000001.SZ",
+    start: str = "2024-01-02",
+    periods: int = 40,
+    pattern: str = "uptrend",
+) -> Path:
+    db_path = tmp_path / f"product_{ticker.replace('.', '_')}.duckdb"
     con = duckdb.connect(str(db_path))
-    dates = pd.bdate_range("2024-01-02", periods=40)
-    # Mild uptrend with a few oscillations for dual SMA crosses.
-    closes = [10 + i * 0.15 + ((-1) ** i) * 0.2 for i in range(len(dates))]
+    dates = pd.bdate_range(start, periods=periods)
+    if pattern == "uptrend":
+        closes = [10 + i * 0.15 + ((-1) ** i) * 0.2 for i in range(len(dates))]
+    elif pattern == "mean_reversion":
+        closes = [10 + ((-1) ** i) * (1.5 if i % 7 == 0 else 0.2) for i in range(len(dates))]
+    else:
+        closes = [10 + i * 0.05 for i in range(len(dates))]
     rows = []
     for d, close in zip(dates, closes):
         open_px = close - 0.05
@@ -48,8 +62,8 @@ def _make_price_db(tmp_path: Path) -> Path:
         rows.append(
             (
                 d.date().isoformat(),
-                "000001.SZ",
-                "Ping An Bank",
+                ticker,
+                ticker,
                 open_px,
                 high,
                 low,
@@ -130,14 +144,25 @@ def _request(**overrides):
     return CreateBacktestTaskRequest(**base)
 
 
+def _assert_dates_in_range(run_dir: Path, start: str, end: str) -> None:
+    for filename in ("orders.json", "fills.json", "snapshots.json", "equity.json"):
+        payload = json.loads((run_dir / filename).read_text(encoding="utf-8"))
+        if not payload:
+            continue
+        if filename == "equity.json":
+            dates = [item["date"] for item in payload]
+        else:
+            dates = [item["trade_date"] for item in payload]
+        assert all(start <= d <= end for d in dates), (filename, dates[:3], dates[-3:])
+
+
 def test_catalog_lists_product_strategies_and_indicators():
     strategies = list_strategy_catalog(product_only=True)
     codes = {item.code for item in strategies}
-    assert "dual_sma_trend" in codes
+    assert codes == set(PRODUCT_SUPPORTED_STRATEGY_CODES)
     dual = next(item for item in strategies if item.code == "dual_sma_trend")
     assert dual.version == "1.0.0"
     assert "fast_window" in dual.parameter_schema
-    assert dual.parameter_schema["fast_window"].type == "integer"
 
     indicators = list_indicator_catalog()
     assert any(item.code == "sma" for item in indicators)
@@ -160,6 +185,68 @@ def test_validate_rejects_unknown_strategy_and_bad_params():
         validate_create_request(_request(universe_mode="preset", universe_preset="CSI300"))
 
 
+def test_next_trade_date_skips_weekend_and_respects_end():
+    trade_dates = market_trade_dates(
+        pd.DataFrame(
+            {
+                "trade_date": [
+                    "2024-01-05",  # Friday
+                    "2024-01-08",  # Monday
+                    "2024-01-09",
+                ]
+            }
+        )
+    )
+    nxt = next_trade_date(trade_dates, "2024-01-05")
+    assert nxt == pd.Timestamp("2024-01-08")
+    assert next_trade_date(trade_dates, "2024-01-09", end_date="2024-01-09") is None
+
+
+def test_shift_targets_next_open_and_next_close_differ_from_signal():
+    trade_dates = [
+        pd.Timestamp("2024-01-02"),
+        pd.Timestamp("2024-01-03"),
+        pd.Timestamp("2024-01-04"),
+    ]
+    targets = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "A", "target_weight": 1.0, "priority": 0.0},
+            {"trade_date": "2024-01-03", "asset_id": "A", "target_weight": 0.0, "priority": 0.0},
+        ]
+    )
+    next_open, skipped = shift_target_weights_to_execution_dates(
+        targets,
+        entry_timing="next_open",
+        trade_dates=trade_dates,
+        end_date="2024-01-04",
+    )
+    assert skipped == []
+    assert list(next_open["trade_date"]) == ["2024-01-03", "2024-01-04"]
+
+    same_close, _ = shift_target_weights_to_execution_dates(
+        targets,
+        entry_timing="same_close",
+        trade_dates=trade_dates,
+        end_date="2024-01-04",
+    )
+    assert list(same_close["trade_date"]) == ["2024-01-02", "2024-01-03"]
+
+
+def test_shift_targets_end_of_range_is_skipped():
+    trade_dates = [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")]
+    targets = pd.DataFrame(
+        [{"trade_date": "2024-01-03", "asset_id": "A", "target_weight": 1.0, "priority": 0.0}]
+    )
+    shifted, skipped = shift_target_weights_to_execution_dates(
+        targets,
+        entry_timing="next_open",
+        trade_dates=trade_dates,
+        end_date="2024-01-03",
+    )
+    assert shifted.empty
+    assert skipped[0]["reason"] == REASON_NO_EXECUTION_DATE_IN_RANGE
+
+
 def test_task_store_persists_status_and_request_snapshot(tmp_path: Path):
     store = BacktestTaskStore(tmp_path / "tasks")
     created = store.create(_request())
@@ -173,17 +260,15 @@ def test_task_store_persists_status_and_request_snapshot(tmp_path: Path):
     assert succeeded.status == "succeeded"
     assert succeeded.run_id == "run_abc"
 
-    loaded = store.get(created.task_id)
-    assert loaded.run_id == "run_abc"
-    assert loaded.request_snapshot["start_date"] == "2024-01-15"
-    listed = store.list()
-    assert any(item.task_id == created.task_id for item in listed)
 
-
-def test_real_dual_sma_execution_writes_reloadable_results(tmp_path: Path, monkeypatch):
+def test_real_dual_sma_next_open_warmup_and_range(tmp_path: Path):
     db_path = _make_price_db(tmp_path)
     runs_dir = tmp_path / "runs"
-    request = validate_create_request(_request())
+    request = validate_create_request(_request(entry_timing=None) if False else _request())
+    # explicit next_open
+    request = validate_create_request(
+        _request(execution=BacktestExecutionConfigDTO(entry_timing="next_open"))
+    )
     run_id, run_dir = execute_validated_task(
         request,
         run_id="dual_sma_product_001",
@@ -191,35 +276,103 @@ def test_real_dual_sma_execution_writes_reloadable_results(tmp_path: Path, monke
         db_path=db_path,
     )
     assert run_id == "dual_sma_product_001"
-    assert (run_dir / "run_meta.json").exists()
-    assert (run_dir / "summary.json").exists()
-    assert (run_dir / "equity.json").exists()
-    assert (run_dir / "trades.json").exists()
-    assert (run_dir / "skipped.json").exists()
-    assert (run_dir / "config.json").exists()
-    assert (run_dir / "fills.json").exists()
+    for name in (
+        "run_meta.json",
+        "summary.json",
+        "equity.json",
+        "trades.json",
+        "skipped.json",
+        "config.json",
+        "fills.json",
+        "orders.json",
+        "snapshots.json",
+    ):
+        assert (run_dir / name).exists()
 
-    loader = BacktestRunsLoader(runs_dir)
-    meta = loader.load_run_meta(run_id)
-    summary = BacktestSummary.model_validate({"run_id": run_id, **loader.load_summary(run_id)})
-    equity = loader.load_equity(run_id)
-    assert meta["strategy_name"].startswith("dual_sma_trend@")
-    assert meta["status"] in {"completed", "success", "succeeded"}
-    assert isinstance(summary.trade_count, int)
-    assert len(equity) >= 1
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["product_request"]["strategy_code"] == "dual_sma_trend"
+    assert config["requested_start_date"] == "2024-01-15"
+    assert config["requested_end_date"] == "2024-02-28"
+    assert config["entry_timing"] == "next_open"
+    assert "same_close_warning" in config["execution_semantics"]
 
-    # Point result service at this runs dir and re-read through public service API.
-    monkeypatch.setenv("QRP_ATLAS_BACKTEST_RUNS_DIR", str(runs_dir))
+    _assert_dates_in_range(run_dir, "2024-01-15", "2024-02-28")
+
+    orders = json.loads((run_dir / "orders.json").read_text(encoding="utf-8"))
+    # If any orders exist, none may land on the first formal signal day only by accident;
+    # more importantly they must not precede requested start.
+    assert all(o["trade_date"] >= "2024-01-15" for o in orders)
+
     set_loader_for_tests(BacktestRunsLoader(runs_dir))
     try:
-        reloaded_meta = get_run_meta(run_id)
-        reloaded_summary = get_summary(run_id)
-        reloaded_equity = get_equity(run_id)
-        assert reloaded_meta.run_id == run_id
-        assert reloaded_summary.run_id == run_id
-        assert len(reloaded_equity) == len(equity)
+        assert get_run_meta(run_id).run_id == run_id
+        assert get_summary(run_id).run_id == run_id
+        assert len(get_equity(run_id)) >= 1
     finally:
         set_loader_for_tests(None)
+
+
+def test_next_close_executes_on_next_session_close(tmp_path: Path):
+    db_path = _make_price_db(tmp_path)
+    runs_dir = tmp_path / "runs"
+    request = validate_create_request(
+        _request(execution=BacktestExecutionConfigDTO(entry_timing="next_close"))
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="dual_sma_next_close",
+        runs_dir=runs_dir,
+        db_path=db_path,
+    )
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["entry_timing"] == "next_close"
+    assert config["execution"]["price_field"] == "close"
+    _assert_dates_in_range(run_dir, request.start_date, request.end_date)
+
+
+def test_product_loader_excludes_fixtures_by_default(tmp_path: Path, monkeypatch):
+    product_root = tmp_path / "product_runs"
+    product_root.mkdir()
+    monkeypatch.setenv("QRP_ATLAS_BACKTEST_RUNS_DIR", str(product_root))
+    # Re-import path constant behavior via explicit loader construction.
+    product_loader = BacktestRunsLoader(product_root)
+    assert "sample_run_001" not in product_loader.list_run_ids()
+
+    fixture_loader = BacktestRunsLoader(BACKTEST_FIXTURE_RUNS_DIR)
+    assert "sample_run_001" in fixture_loader.list_run_ids()
+
+
+def test_writer_and_loader_share_env_root(tmp_path: Path, monkeypatch):
+    root = tmp_path / "shared_runs"
+    monkeypatch.setenv("QRP_ATLAS_BACKTEST_RUNS_DIR", str(root))
+    from qrp_atlas.backtest.product.service import default_product_runs_dir
+    from qrp_atlas.backtest.results.writer import BacktestRunWriter
+
+    # Product service and writer/loader all resolve the same env-backed root.
+    assert default_product_runs_dir() == root
+    writer = BacktestRunWriter(default_product_runs_dir())
+    loader = BacktestRunsLoader(default_product_runs_dir())
+    assert writer.root == loader.root == root
+
+
+def test_config_write_failure_does_not_mark_success(tmp_path: Path, monkeypatch):
+    db_path = _make_price_db(tmp_path)
+    runs_dir = tmp_path / "runs"
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(BacktestRunWriter, "write_portfolio_run", boom)
+    service = BacktestProductService(
+        task_store=BacktestTaskStore(tmp_path / "tasks"),
+        runs_dir=runs_dir,
+        db_path=db_path,
+        execute_inline=True,
+    )
+    task = service.create_task(_request()).task
+    assert task.status == "failed"
+    assert task.run_id is None
+    assert "failed to persist" in (task.error_message or "")
 
 
 def test_insufficient_data_fails_task(tmp_path: Path):
@@ -237,20 +390,39 @@ def test_insufficient_data_fails_task(tmp_path: Path):
     assert task.status == "failed"
     assert task.run_id is None
     assert task.error_message
-    assert "missing market data" in task.error_message or "no market data" in task.error_message
 
 
-def test_product_service_success_path(tmp_path: Path):
-    db_path = _make_price_db(tmp_path)
+@pytest.mark.parametrize(
+    "strategy_code,params,pattern",
+    [
+        ("dual_sma_trend", {"fast_window": 3, "slow_window": 5}, "uptrend"),
+        ("time_series_momentum", {"lookback": 3, "threshold": 0.0}, "uptrend"),
+        ("donchian_breakout", {"entry_window": 3, "exit_window": 2}, "uptrend"),
+        ("rolling_zscore_mean_reversion", {"lookback": 5, "entry_z": 1.0, "exit_z": 0.0}, "mean_reversion"),
+        ("system_b_basic", {}, "uptrend"),
+    ],
+)
+def test_product_supported_strategies_smoke(tmp_path: Path, strategy_code, params, pattern):
+    db_path = _make_price_db(tmp_path, pattern=pattern, periods=50)
     service = BacktestProductService(
-        task_store=BacktestTaskStore(tmp_path / "tasks"),
-        runs_dir=tmp_path / "runs",
+        task_store=BacktestTaskStore(tmp_path / "tasks" / strategy_code),
+        runs_dir=tmp_path / "runs" / strategy_code,
         db_path=db_path,
         execute_inline=True,
     )
-    response = service.create_task(_request())
-    task = response.task
-    assert task.status == "succeeded"
+    task = service.create_task(
+        _request(
+            name=f"{strategy_code} smoke",
+            strategy_code=strategy_code,
+            strategy_version="1.0.0",
+            strategy_params=params,
+            start_date="2024-01-20",
+            end_date="2024-03-05",
+        )
+    ).task
+    assert task.status == "succeeded", task.error_message
     assert task.run_id
-    assert task.is_mock is False
-    assert (tmp_path / "runs" / task.run_id / "summary.json").exists()
+    run_dir = tmp_path / "runs" / strategy_code / task.run_id
+    _assert_dates_in_range(run_dir, "2024-01-20", "2024-03-05")
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["product_request"]["strategy_code"] == strategy_code

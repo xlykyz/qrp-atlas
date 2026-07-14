@@ -17,12 +17,11 @@ run_id 仅允许 [A-Za-z0-9_-]+，避免路径穿越。
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR, PROJECT_ROOT
+from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR, PROJECT_ROOT
 
 
 class RunNotFoundError(Exception):
@@ -52,46 +51,41 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
-def _default_search_roots() -> list[Path]:
-    """Resolve result roots: explicit env first, then product + fixture defaults."""
+def _product_runs_dir() -> Path:
+    import os
 
-    roots: list[Path] = []
     env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
     if env:
-        roots.append(Path(env))
-    product = PROJECT_ROOT / "data" / "backtest_runs"
-    if product not in roots:
-        roots.append(product)
-    if BACKTEST_RUNS_DIR not in roots:
-        roots.append(BACKTEST_RUNS_DIR)
-    # Deduplicate while preserving order.
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = str(root.resolve()) if root.exists() else str(root)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(root)
-    return unique
+        return Path(env)
+    return PROJECT_ROOT / "data" / "backtest_runs"
 
 
 class BacktestRunsLoader:
     """从本地 JSON 文件读取回测结果。
 
-    Supports one or more search roots so product runs under data/backtest_runs
-    and fixture runs under tests/fixtures/backtest_runs can coexist.
+    Default product mode only searches BACKTEST_RUNS_DIR (env-overridable).
+    Fixture runs must be requested explicitly via root=BACKTEST_FIXTURE_RUNS_DIR
+    or include_fixtures=True for dedicated mock/tests.
     """
 
-    def __init__(self, root: Path | Iterable[Path] | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | Iterable[Path] | None = None,
+        *,
+        include_fixtures: bool = False,
+    ) -> None:
         if root is None:
-            self.roots = _default_search_roots()
+            roots = [_product_runs_dir()]
+            if include_fixtures:
+                roots.append(BACKTEST_FIXTURE_RUNS_DIR)
+            self.roots = roots
         elif isinstance(root, (str, Path)):
             self.roots = [Path(root)]
         else:
             self.roots = [Path(item) for item in root]
         # Backward-compatible single-root attribute used by existing tests.
         self.root = self.roots[0]
+        self.include_fixtures = include_fixtures
 
     def _run_dir(self, run_id: str) -> Path:
         _validate_run_id(run_id)
@@ -102,13 +96,13 @@ class BacktestRunsLoader:
         raise RunNotFoundError(run_id)
 
     def list_run_ids(self) -> list[str]:
-        """列出所有 run_id，按字母序。Product roots take precedence for duplicates."""
+        """列出所有 run_id，按字母序。"""
         ids: set[str] = set()
         for root in self.roots:
             if not root.is_dir():
                 continue
             for path in root.iterdir():
-                if path.is_dir() and _RUN_ID_PATTERN.match(path.name):
+                if path.is_dir() and _RUN_ID_PATTERN.match(path.name) and not path.name.startswith("."):
                     ids.add(path.name)
         return sorted(ids)
 

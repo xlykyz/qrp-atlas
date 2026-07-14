@@ -34,7 +34,7 @@ export const UNIVERSE_PRESETS = [
 
 export const ENTRY_TIMING_OPTIONS: { value: EntryTiming; label: string }[] = [
   { value: 'next_open', label: '次日开盘' },
-  { value: 'same_close', label: '当日收盘（演示）' },
+  { value: 'same_close', label: '当日收盘（同 bar，非严格 PIT）' },
   { value: 'next_close', label: '次日收盘' },
 ];
 

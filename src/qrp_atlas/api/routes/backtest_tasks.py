@@ -8,11 +8,11 @@ from fastapi import APIRouter, HTTPException
 
 from qrp_atlas.backtest.product import (
     BacktestTaskRecord,
-    BacktestTaskValidationError,
     CreateBacktestTaskRequest,
     CreateBacktestTaskResponse,
     get_product_service,
 )
+from qrp_atlas.backtest.product import service as product_service
 
 router = APIRouter(prefix="/api/backtest", tags=["回测任务"])
 
@@ -23,7 +23,7 @@ def api_create_task(request: CreateBacktestTaskRequest):
     service = get_product_service()
     try:
         return service.create_task(request)
-    except BacktestTaskValidationError as exc:
+    except product_service.BacktestTaskValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

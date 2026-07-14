@@ -23,6 +23,7 @@ from .service import (
     validate_create_request,
 )
 from .task_store import BacktestTaskStore
+from .timing import REASON_NO_EXECUTION_DATE_IN_RANGE
 
 __all__ = [
     "PRODUCT_SUPPORTED_STRATEGY_CODES",
@@ -42,4 +43,5 @@ __all__ = [
     "execute_validated_task",
     "get_product_service",
     "reset_product_service_for_tests",
+    "REASON_NO_EXECUTION_DATE_IN_RANGE",
 ]

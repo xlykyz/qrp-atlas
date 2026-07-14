@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR
+from qrp_atlas.config.paths import PROJECT_ROOT
 
 from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
 
@@ -206,11 +206,20 @@ def _skipped_payload(result: PortfolioBacktestResult) -> list[dict[str, Any]]:
     ]
 
 
+def _default_runs_dir() -> Path:
+    import os
+
+    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
+    if env:
+        return Path(env)
+    return PROJECT_ROOT / "data" / "backtest_runs"
+
+
 class BacktestRunWriter:
     """Write portfolio output through a temporary result directory."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else BACKTEST_RUNS_DIR
+        self.root = Path(root) if root is not None else _default_runs_dir()
 
     def write_portfolio_run(
         self,
@@ -222,6 +231,7 @@ class BacktestRunWriter:
         name: str | None = None,
         created_at: str | None = None,
         overwrite: bool = False,
+        config_overlay: dict[str, Any] | None = None,
     ) -> Path:
         _validate_run_id(run_id)
         run_dir = self.root / run_id
@@ -255,7 +265,10 @@ class BacktestRunWriter:
                 "equity.json": list(result.equity_curve),
                 "trades.json": trades,
                 "skipped.json": _skipped_payload(result),
-                "config.json": asdict(result.config),
+                "config.json": {
+                    **asdict(result.config),
+                    **(config_overlay or {}),
+                },
                 "orders.json": [order.to_dict() for order in result.orders],
                 "fills.json": [fill.to_dict() for fill in result.fills],
                 "snapshots.json": [snapshot.to_dict() for snapshot in result.snapshots],

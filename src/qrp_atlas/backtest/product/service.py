@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 import uuid
@@ -15,10 +14,11 @@ import pandas as pd
 from qrp_atlas.backtest.data import load_stock_prices
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import PortfolioBacktestConfig, PortfolioExecutionRule
-from qrp_atlas.backtest.portfolio.strategy import run_strategy_portfolio_backtest
+from qrp_atlas.backtest.portfolio.strategy import strategy_decisions_to_target_weights
+from qrp_atlas.backtest.portfolio.engine import PortfolioBacktestEngine
 from qrp_atlas.backtest.results import BacktestRunWriter
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR, PROJECT_ROOT
-from qrp_atlas.strategies import get_strategy
+from qrp_atlas.backtest.runtime.strategy import prepare_strategy_data
+from qrp_atlas.strategies import StrategyInput, get_strategy
 from qrp_atlas.strategies.registry import StrategyNotFoundError
 from qrp_atlas.strategies.validation import StrategyValidationError, resolve_parameters
 
@@ -29,10 +29,14 @@ from .schemas import (
     CreateBacktestTaskResponse,
 )
 from .task_store import BacktestTaskStore
+from .timing import (
+    REASON_NO_EXECUTION_DATE_IN_RANGE,
+    market_trade_dates,
+    shift_target_weights_to_execution_dates,
+)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ENTRY_TIMING = frozenset({"next_open", "same_close", "next_close"})
-_PRODUCT_RUNS_ENV = "QRP_ATLAS_PRODUCT_BACKTEST_RUNS_DIR"
 
 
 class BacktestTaskValidationError(ValueError):
@@ -44,7 +48,12 @@ class BacktestTaskExecutionError(RuntimeError):
 
 
 def default_product_runs_dir() -> Path:
-    env = os.getenv(_PRODUCT_RUNS_ENV)
+    """Product and result API share one SSOT: QRP_ATLAS_BACKTEST_RUNS_DIR."""
+
+    import os
+    from qrp_atlas.config.paths import PROJECT_ROOT
+
+    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
     if env:
         return Path(env)
     return PROJECT_ROOT / "data" / "backtest_runs"
@@ -96,7 +105,6 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
     except StrategyValidationError as exc:
         raise BacktestTaskValidationError(str(exc)) from exc
 
-    # Surface strategy-specific cross-parameter rules before enqueue/execution.
     validate_relationships = getattr(strategy, "_validate_relationships", None)
     if callable(validate_relationships):
         try:
@@ -120,8 +128,6 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
             raise BacktestTaskValidationError("tickers required when universe_mode is tickers")
         universe_preset = None
     else:
-        # 07-A product path only executes explicit ticker lists.
-        # Preset modes remain schema-compatible but are rejected until 07-B.
         raise BacktestTaskValidationError(
             "universe_mode=preset is not supported in 07-A; provide tickers"
         )
@@ -165,8 +171,7 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
 
 
 def _execution_rule(entry_timing: str) -> PortfolioExecutionRule:
-    # Portfolio engine currently executes/mark-to-market on the decision date bar.
-    # next_open uses open as execution price; close timings use close.
+    # Execution price field only; calendar shift is handled before the engine.
     if entry_timing == "next_open":
         return PortfolioExecutionRule(price_field="open", mark_price_field="close")
     return PortfolioExecutionRule(price_field="close", mark_price_field="close")
@@ -201,7 +206,7 @@ def _load_prices(request: CreateBacktestTaskRequest, *, db_path: Path | None = N
         load_kwargs["db_path"] = db_path
     try:
         price_df = load_stock_prices(**load_kwargs)
-    except Exception as exc:  # noqa: BLE001 - surface data readiness cleanly
+    except Exception as exc:  # noqa: BLE001
         raise BacktestTaskExecutionError(f"failed to load market data: {exc}") from exc
 
     if price_df is None or price_df.empty:
@@ -209,7 +214,8 @@ def _load_prices(request: CreateBacktestTaskRequest, *, db_path: Path | None = N
             "no market data found for requested tickers and date range"
         )
 
-    # Keep indicator warmup history, but require some bars inside the requested window.
+    price_df = price_df.copy()
+    price_df["trade_date"] = pd.to_datetime(price_df["trade_date"])
     in_window = price_df[
         (price_df["trade_date"] >= pd.Timestamp(request.start_date))
         & (price_df["trade_date"] <= pd.Timestamp(request.end_date))
@@ -227,17 +233,48 @@ def _load_prices(request: CreateBacktestTaskRequest, *, db_path: Path | None = N
     return price_df
 
 
-def execute_validated_task(
+def _formal_price_frame(price_df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    mask = (
+        (price_df["trade_date"] >= pd.Timestamp(start_date))
+        & (price_df["trade_date"] <= pd.Timestamp(end_date))
+    )
+    formal = price_df.loc[mask].copy()
+    if formal.empty:
+        raise BacktestTaskExecutionError(
+            "insufficient market data inside the requested date range"
+        )
+    return formal.reset_index(drop=True)
+
+
+def _run_product_portfolio(
     request: CreateBacktestTaskRequest,
-    *,
-    run_id: str | None = None,
-    runs_dir: Path | None = None,
-    db_path: Path | None = None,
-) -> tuple[str, Path]:
-    """Run strategy + portfolio engine and persist a standard results package."""
+    price_df: pd.DataFrame,
+) -> tuple[Any, pd.DataFrame, Any, list[dict[str, str]]]:
+    """Prepare warmup-isolated decisions and execute on formal range only."""
 
     strategy = get_strategy(request.strategy_code, request.strategy_version)
-    price_df = _load_prices(request, db_path=db_path)
+    resolved = dict(request.strategy_params)
+    prepared_full = prepare_strategy_data(price_df, strategy.definition, resolved)
+
+    formal_start = pd.Timestamp(request.start_date)
+    formal_end = pd.Timestamp(request.end_date)
+    prepared_formal = prepared_full[
+        (pd.to_datetime(prepared_full["trade_date"]) >= formal_start)
+        & (pd.to_datetime(prepared_full["trade_date"]) <= formal_end)
+    ].copy()
+    if prepared_formal.empty:
+        raise BacktestTaskExecutionError(
+            "no prepared strategy bars inside the requested date range"
+        )
+
+    strategy_result = strategy.run(
+        StrategyInput(
+            prepared_data=prepared_formal.reset_index(drop=True),
+            parameters=resolved,
+            initial_positions={},
+            runtime_context={},
+        )
+    )
 
     config = PortfolioBacktestConfig(
         name=request.name or f"{request.strategy_code}@{request.strategy_version}",
@@ -252,45 +289,114 @@ def execute_validated_task(
         execution=_execution_rule(request.execution.entry_timing),
     )
 
-    try:
-        run = run_strategy_portfolio_backtest(
-            request.strategy_code,
-            price_df,
-            config,
-            parameters=request.strategy_params,
-            version=request.strategy_version,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise BacktestTaskExecutionError(f"strategy/portfolio execution failed: {exc}") from exc
+    emit_unchanged_snapshots = strategy.definition.code in {
+        "cross_sectional_momentum_long_only",
+        "multifactor_long_only",
+    }
+    signal_targets = strategy_decisions_to_target_weights(
+        strategy_result,
+        max_positions=config.max_positions,
+        max_weight_per_asset=config.max_weight_per_asset,
+        default_weight=None,
+        cash_buffer=0.0,
+        emit_unchanged_snapshots=emit_unchanged_snapshots,
+    )
+
+    formal_prices = _formal_price_frame(price_df, request.start_date, request.end_date)
+    trade_dates = market_trade_dates(formal_prices)
+    execution_targets, skipped_signals = shift_target_weights_to_execution_dates(
+        signal_targets,
+        entry_timing=request.execution.entry_timing,
+        trade_dates=trade_dates,
+        end_date=request.end_date,
+    )
+
+    portfolio_result = PortfolioBacktestEngine().run(
+        formal_prices,
+        execution_targets,
+        config,
+    )
+    return strategy_result, execution_targets, portfolio_result, skipped_signals
+
+
+def execute_validated_task(
+    request: CreateBacktestTaskRequest,
+    *,
+    run_id: str | None = None,
+    runs_dir: Path | None = None,
+    db_path: Path | None = None,
+) -> tuple[str, Path]:
+    """Run strategy + portfolio engine and persist a standard results package."""
+
+    strategy = get_strategy(request.strategy_code, request.strategy_version)
+    price_df = _load_prices(request, db_path=db_path)
+    strategy_result, execution_targets, portfolio_result, skipped_signals = _run_product_portfolio(
+        request, price_df
+    )
+
+    # Guard: all formal result dates must stay inside the request window.
+    for snapshot in portfolio_result.snapshots:
+        if snapshot.trade_date < request.start_date or snapshot.trade_date > request.end_date:
+            raise BacktestTaskExecutionError(
+                f"result date outside request range: {snapshot.trade_date}"
+            )
+    for order in portfolio_result.orders:
+        if order.trade_date < request.start_date or order.trade_date > request.end_date:
+            raise BacktestTaskExecutionError(
+                f"order date outside request range: {order.trade_date}"
+            )
+    for fill in portfolio_result.fills:
+        if fill.trade_date < request.start_date or fill.trade_date > request.end_date:
+            raise BacktestTaskExecutionError(
+                f"fill date outside request range: {fill.trade_date}"
+            )
 
     resolved_run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
     writer_root = Path(runs_dir) if runs_dir is not None else default_product_runs_dir()
     writer = BacktestRunWriter(writer_root)
-    run_dir = writer.write_portfolio_run(
-        run.portfolio_result,
-        run_id=resolved_run_id,
-        strategy_name=f"{strategy.definition.code}@{strategy.definition.version}",
-        universe=_universe_label(request),
-        name=config.name,
-        created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        overwrite=False,
-    )
 
-    # Augment config.json with product request snapshot for re-openability.
-    config_path = run_dir / "config.json"
+    config_overlay = {
+        "product_request": request.model_dump(mode="json"),
+        "entry_timing": request.execution.entry_timing,
+        "strategy_params": dict(request.strategy_params),
+        "requested_start_date": request.start_date,
+        "requested_end_date": request.end_date,
+        "effective_start_date": (
+            portfolio_result.snapshots[0].trade_date if portfolio_result.snapshots else request.start_date
+        ),
+        "effective_end_date": (
+            portfolio_result.snapshots[-1].trade_date if portfolio_result.snapshots else request.end_date
+        ),
+        "execution_semantics": {
+            "signal_date": "strategy decision date after warmup-isolated prepared data",
+            "entry_timing": request.execution.entry_timing,
+            "same_close_warning": (
+                "same_close executes on the signal bar close and is not strict point-in-time safe"
+                if request.execution.entry_timing == "same_close"
+                else None
+            ),
+            "skipped_signals": skipped_signals,
+            "no_execution_date_reason": REASON_NO_EXECUTION_DATE_IN_RANGE,
+        },
+        "strategy_code": strategy.definition.code,
+        "strategy_version": strategy.definition.version,
+        "decision_count": len(strategy_result.decisions),
+        "execution_target_rows": int(len(execution_targets)),
+    }
+
     try:
-        import json
-
-        existing = json.loads(config_path.read_text(encoding="utf-8"))
-        existing["product_request"] = request.model_dump(mode="json")
-        existing["entry_timing"] = request.execution.entry_timing
-        existing["strategy_params"] = dict(request.strategy_params)
-        config_path.write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
+        run_dir = writer.write_portfolio_run(
+            portfolio_result,
+            run_id=resolved_run_id,
+            strategy_name=f"{strategy.definition.code}@{strategy.definition.version}",
+            universe=_universe_label(request),
+            name=portfolio_result.config.name,
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            overwrite=False,
+            config_overlay=config_overlay,
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        raise BacktestTaskExecutionError(f"failed to persist backtest results: {exc}") from exc
 
     return resolved_run_id, run_dir
 
