@@ -1,5 +1,53 @@
-"""个股层复合指标：趋势。"""
+"""个股层复合指标：趋势与残差相对价值。"""
 
+from qrp_atlas.indicators.stock.residual import (
+    ASSET_RETURN,
+    BENCHMARK_ID,
+    BENCHMARK_RETURN,
+    CALCULATION_VERSION as RESIDUAL_CALCULATION_VERSION,
+    DIAGNOSTIC_CODE,
+    REASON_INSUFFICIENT_HISTORY,
+    REASON_MISSING_BENCHMARK,
+    REASON_MISSING_CURRENT_RETURN,
+    REASON_NON_FINITE_INPUT,
+    REASON_OK,
+    REASON_RANK_DEFICIENT,
+    REASON_ZERO_BENCHMARK_VARIANCE,
+    RESIDUAL_OUTPUT_COLUMNS,
+    RESIDUAL_RETURN,
+    RESIDUAL_ZSCORE,
+    ROLLING_ALPHA,
+    ROLLING_BETA,
+    ROLLING_R2,
+    ResidualIndicatorError,
+    ResidualIndicatorResult,
+    calculate_market_residuals,
+    market_residual_calculator,
+)
 from qrp_atlas.indicators.stock.trend import calculate_stock_trend
 
-__all__ = ["calculate_stock_trend"]
+__all__ = [
+    "ASSET_RETURN",
+    "BENCHMARK_ID",
+    "BENCHMARK_RETURN",
+    "DIAGNOSTIC_CODE",
+    "REASON_INSUFFICIENT_HISTORY",
+    "REASON_MISSING_BENCHMARK",
+    "REASON_MISSING_CURRENT_RETURN",
+    "REASON_NON_FINITE_INPUT",
+    "REASON_OK",
+    "REASON_RANK_DEFICIENT",
+    "REASON_ZERO_BENCHMARK_VARIANCE",
+    "RESIDUAL_CALCULATION_VERSION",
+    "RESIDUAL_OUTPUT_COLUMNS",
+    "RESIDUAL_RETURN",
+    "RESIDUAL_ZSCORE",
+    "ROLLING_ALPHA",
+    "ROLLING_BETA",
+    "ROLLING_R2",
+    "ResidualIndicatorError",
+    "ResidualIndicatorResult",
+    "calculate_market_residuals",
+    "calculate_stock_trend",
+    "market_residual_calculator",
+]

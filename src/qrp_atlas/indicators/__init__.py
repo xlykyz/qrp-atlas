@@ -42,7 +42,23 @@ from qrp_atlas.indicators.parameterized import (
 
 # 市场复合指标计算
 from qrp_atlas.indicators.market import calculate_market_breadth, calculate_market_risk
-from qrp_atlas.indicators.stock import calculate_stock_trend
+from qrp_atlas.indicators.stock import (
+    ASSET_RETURN,
+    BENCHMARK_ID,
+    BENCHMARK_RETURN,
+    DIAGNOSTIC_CODE,
+    RESIDUAL_CALCULATION_VERSION,
+    RESIDUAL_OUTPUT_COLUMNS,
+    RESIDUAL_RETURN,
+    RESIDUAL_ZSCORE,
+    ROLLING_ALPHA,
+    ROLLING_BETA,
+    ROLLING_R2,
+    ResidualIndicatorError,
+    ResidualIndicatorResult,
+    calculate_market_residuals,
+    calculate_stock_trend,
+)
 from qrp_atlas.indicators.system_b import (
     detect_system_b_basic_state,
     detect_system_b_basic_state_from_prices,
@@ -115,6 +131,20 @@ __all__ = [
     "calculate_market_breadth",
     "calculate_market_risk",
     "calculate_stock_trend",
+    "calculate_market_residuals",
+    "ResidualIndicatorError",
+    "ResidualIndicatorResult",
+    "RESIDUAL_OUTPUT_COLUMNS",
+    "ROLLING_ALPHA",
+    "ROLLING_BETA",
+    "ROLLING_R2",
+    "RESIDUAL_RETURN",
+    "RESIDUAL_ZSCORE",
+    "ASSET_RETURN",
+    "BENCHMARK_RETURN",
+    "BENCHMARK_ID",
+    "DIAGNOSTIC_CODE",
+    "RESIDUAL_CALCULATION_VERSION",
     "detect_system_b_basic_state",
     "detect_system_b_basic_state_from_prices",
     "calculate_daily_market_snapshot",

@@ -35,6 +35,13 @@ from .pipeline import (
     CrossSectionResearchResult,
     run_cross_section_research,
 )
+from .residual import (
+    ResidualResearchError,
+    ResidualResearchResult,
+    ResidualStrategyBacktestRun,
+    run_market_residual_mean_reversion_backtest,
+    run_residual_research,
+)
 
 __all__ = [
     "DEFAULT_FORWARD_HORIZONS",
@@ -43,6 +50,9 @@ __all__ = [
     "ForwardReturnError",
     "GroupReturnResult",
     "ICSummaryResult",
+    "ResidualResearchError",
+    "ResidualResearchResult",
+    "ResidualStrategyBacktestRun",
     "TargetExposureResult",
     "analyze_target_exposures",
     "assign_factor_groups",
@@ -51,5 +61,7 @@ __all__ = [
     "compute_information_coefficient",
     "forward_return_column",
     "run_cross_section_research",
+    "run_market_residual_mean_reversion_backtest",
+    "run_residual_research",
     "summarize_information_coefficient",
 ]
