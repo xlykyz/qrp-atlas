@@ -32,25 +32,33 @@ export function DeclarativeEditorPanel() {
   const [description, setDescription] = useState('受控规则编辑器生成的声明式策略');
   const [entry, setEntry] = useState<SimpleRule>({ field: 'close', op: 'gt', value: 10 });
   const [exitRule, setExitRule] = useState<SimpleRule>({ field: 'close', op: 'lt', value: 9 });
+  const [holdEnabled, setHoldEnabled] = useState(false);
+  const [holdRule, setHoldRule] = useState<SimpleRule>({ field: 'close', op: 'gt', value: 8 });
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const definition = useMemo(
-    () => ({
+  const definition = useMemo(() => {
+    const fields = new Set([entry.field, exitRule.field, 'close']);
+    if (holdEnabled) fields.add(holdRule.field);
+    const payload: Record<string, unknown> = {
       code,
       name,
       version,
       description,
       strategy_type: 'declarative',
-      required_fields: Array.from(new Set([entry.field, exitRule.field, 'close'])),
+      required_fields: Array.from(fields),
       required_indicators: [],
+      indicator_requests: [],
       parameters: {},
       entry: ruleToCondition(entry),
       exit: ruleToCondition(exitRule),
-    }),
-    [code, name, version, description, entry, exitRule],
-  );
+    };
+    if (holdEnabled) {
+      payload.hold = ruleToCondition(holdRule);
+    }
+    return payload;
+  }, [code, name, version, description, entry, exitRule, holdEnabled, holdRule]);
 
   async function onValidate() {
     setBusy(true);
@@ -117,6 +125,21 @@ export function DeclarativeEditorPanel() {
       <div className="grid gap-3 sm:grid-cols-2">
         <RuleEditor title="ENTER 条件" rule={entry} onChange={setEntry} disabled={busy} />
         <RuleEditor title="EXIT 条件" rule={exitRule} onChange={setExitRule} disabled={busy} />
+      </div>
+
+      <div className="space-y-2 rounded-md border border-slate-200 p-3 dark:border-slate-700">
+        <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+          <input
+            type="checkbox"
+            checked={holdEnabled}
+            disabled={busy}
+            onChange={(e) => setHoldEnabled(e.target.checked)}
+          />
+          启用可选 HOLD 条件（不满足则退出）
+        </label>
+        {holdEnabled ? (
+          <RuleEditor title="HOLD 条件" rule={holdRule} onChange={setHoldRule} disabled={busy} />
+        ) : null}
       </div>
 
       <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600 dark:bg-slate-950/50 dark:text-slate-300">

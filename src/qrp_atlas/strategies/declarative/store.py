@@ -151,6 +151,13 @@ class DeclarativeStrategyStore:
         owner_user_id: str | UUID,
         allow_overwrite: bool = False,
     ) -> DeclarativeStrategyRecord:
+        """Create a versioned definition.
+
+        Versions are immutable once referenced by runs. Unreferenced versions may only
+        be rewritten when ``allow_overwrite=True``; public create/new-version APIs keep
+        this False so product writes always go through explicit new versions.
+        """
+
         owner = str(owner_user_id)
         spec = validate_declarative_payload(payload)
         definition = spec.to_dict()
@@ -171,6 +178,8 @@ class DeclarativeStrategyStore:
                 existing = DeclarativeStrategyRecord.from_dict(
                     json.loads(path.read_text(encoding="utf-8"))
                 )
+                if existing.owner_user_id != owner:
+                    raise DeclarativeStoreError("owner mismatch")
                 if existing.referenced_by_runs:
                     raise DeclarativeStoreError(
                         f"version already referenced by runs and cannot be overwritten: "
@@ -180,6 +189,19 @@ class DeclarativeStrategyStore:
                     raise DeclarativeStoreError(
                         f"version already exists: {record.code}@{record.version}"
                     )
+                # preserve identity metadata; never mutate referenced history (guarded above)
+                record = DeclarativeStrategyRecord(
+                    code=existing.code,
+                    version=existing.version,
+                    owner_user_id=existing.owner_user_id,
+                    name=spec.definition.name,
+                    description=spec.definition.description,
+                    status=existing.status if existing.status == "active" else "active",
+                    definition=definition,
+                    created_at=existing.created_at,
+                    archived_at=None,
+                    referenced_by_runs=False,
+                )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(record.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)

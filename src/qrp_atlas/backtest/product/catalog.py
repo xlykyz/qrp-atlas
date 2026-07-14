@@ -283,6 +283,25 @@ def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogI
 def get_strategy_catalog_item(code: str, version: str | None = None) -> StrategyCatalogItem:
     try:
         strategy = get_strategy(code, version)
+        return _strategy_to_catalog_item(strategy.definition)
     except StrategyNotFoundError as exc:
-        raise KeyError(str(exc)) from exc
-    return _strategy_to_catalog_item(strategy.definition)
+        from qrp_atlas.strategies.declarative.store import DeclarativeStoreError, get_declarative_store
+
+        store = get_declarative_store()
+        try:
+            if version:
+                record = store.get(code, version)
+            else:
+                records = [
+                    r
+                    for r in store.list(include_archived=False)
+                    if r.code == code and r.status == "active"
+                ]
+                if not records:
+                    raise KeyError(str(exc)) from exc
+                record = sorted(records, key=lambda r: r.version)[-1]
+        except DeclarativeStoreError as store_exc:
+            raise KeyError(str(store_exc)) from store_exc
+        if record.status in {"archived", "disabled"}:
+            raise KeyError(f"declarative strategy not active: {code}@{record.version}")
+        return _declarative_to_catalog_item(record)

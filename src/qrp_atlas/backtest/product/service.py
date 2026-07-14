@@ -482,6 +482,29 @@ def execute_validated_task(
     writer_root = Path(runs_dir) if runs_dir is not None else default_product_runs_dir()
     writer = BacktestRunWriter(writer_root)
 
+    strategy_definition_snapshot = strategy.definition.to_dict()
+    declarative_record_snapshot = None
+    try:
+        from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        if isinstance(strategy, DeclarativeStrategy):
+            rec = get_declarative_store().get(
+                strategy.definition.code, strategy.definition.version
+            )
+            declarative_record_snapshot = {
+                "code": rec.code,
+                "version": rec.version,
+                "owner_user_id": rec.owner_user_id,
+                "status": rec.status,
+                "created_at": rec.created_at,
+                "referenced_by_runs": rec.referenced_by_runs,
+                "definition": rec.definition,
+            }
+            strategy_definition_snapshot = dict(rec.definition)
+    except Exception:  # noqa: BLE001
+        declarative_record_snapshot = None
+
     config_overlay = {
         "product_request": request.model_dump(mode="json"),
         "entry_timing": request.execution.entry_timing,
@@ -507,6 +530,8 @@ def execute_validated_task(
         },
         "strategy_code": strategy.definition.code,
         "strategy_version": strategy.definition.version,
+        "strategy_definition_snapshot": strategy_definition_snapshot,
+        "declarative_strategy_snapshot": declarative_record_snapshot,
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
         "cross_section": cross_section_meta or None,

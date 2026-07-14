@@ -204,3 +204,98 @@ def test_product_catalog_and_task_for_declarative(tmp_path: Path):
             store.create(_definition(), owner_user_id="local-user", allow_overwrite=True)
     finally:
         reset_declarative_store_for_tests(None)
+
+
+def test_referenced_version_cannot_be_overwritten_even_with_flag(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path)
+    store.create(_definition(), owner_user_id="user-a")
+    store.mark_referenced("demo_decl_trend", "1.0.0", owner_user_id="user-a")
+    with pytest.raises(DeclarativeStoreError, match="referenced by runs"):
+        store.create(
+            _definition(name="mutated"),
+            owner_user_id="user-a",
+            allow_overwrite=True,
+        )
+    old = store.get("demo_decl_trend", "1.0.0", owner_user_id="user-a")
+    assert old.name == "Demo Declarative"
+    assert old.referenced_by_runs is True
+
+
+def test_unreferenced_overwrite_requires_explicit_flag(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path)
+    store.create(_definition(), owner_user_id="user-a")
+    with pytest.raises(DeclarativeStoreError, match="already exists"):
+        store.create(_definition(name="mutated"), owner_user_id="user-a")
+    updated = store.create(
+        _definition(name="mutated"),
+        owner_user_id="user-a",
+        allow_overwrite=True,
+    )
+    assert updated.name == "mutated"
+    assert updated.version == "1.0.0"
+    assert updated.referenced_by_runs is False
+
+
+def test_product_run_locks_definition_snapshot(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path / "decl")
+    reset_declarative_store_for_tests(store)
+    try:
+        store.create(_definition(), owner_user_id="local-user")
+        req = CreateBacktestTaskRequest(
+            name="decl-snapshot",
+            strategy_code="demo_decl_trend",
+            strategy_version="1.0.0",
+            strategy_params={"threshold": 10.0},
+            universe_mode="tickers",
+            tickers=["600519.SH"],
+            start_date="2024-01-10",
+            end_date="2024-02-05",
+            position=BacktestPositionConfigDTO(
+                initial_cash=1_000_000, max_positions=1, max_weight_per_symbol=1.0
+            ),
+            cost=BacktestCostConfigDTO(),
+            execution=BacktestExecutionConfigDTO(entry_timing="next_open"),
+        )
+        service = BacktestProductService(
+            task_store=BacktestTaskStore(tmp_path / "tasks"),
+            runs_dir=tmp_path / "runs",
+            db_path=_price_db(tmp_path),
+            execute_inline=True,
+        )
+        task = service.create_task(req).task
+        assert task.status == "succeeded", task.error_message
+        import json
+
+        config = json.loads((tmp_path / "runs" / task.run_id / "config.json").read_text(encoding="utf-8"))
+        assert config["strategy_code"] == "demo_decl_trend"
+        assert config["strategy_version"] == "1.0.0"
+        assert config["strategy_definition_snapshot"]["code"] == "demo_decl_trend"
+        assert config["declarative_strategy_snapshot"]["definition"]["version"] == "1.0.0"
+        # mutate current store definition via new version only; old run stays locked
+        store.create_new_version(
+            "demo_decl_trend",
+            _definition(version="1.0.1", name="later"),
+            owner_user_id="local-user",
+        )
+        config2 = json.loads((tmp_path / "runs" / task.run_id / "config.json").read_text(encoding="utf-8"))
+        assert config2["strategy_definition_snapshot"]["name"] == "Demo Declarative"
+        item = next(
+            i
+            for i in list_strategy_catalog(product_only=True)
+            if i.code == "demo_decl_trend" and i.version == "1.0.0"
+        )
+        assert item.strategy_type == "declarative"
+    finally:
+        reset_declarative_store_for_tests(None)
+
+
+def test_rejects_duplicate_indicator_aliases():
+    payload = _definition(
+        required_indicators=["sma"],
+        indicator_requests=[
+            {"code": "sma", "parameters": {"window": 5}, "alias": "x"},
+            {"code": "sma", "parameters": {"window": 10}, "alias": "x"},
+        ],
+    )
+    with pytest.raises(DeclarativeStoreError):
+        validate_declarative_payload(payload)

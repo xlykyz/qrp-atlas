@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from qrp_atlas.indicators import IndicatorRequest
+
 from ..models import ParameterSpec, StrategyDefinition, StrategyType
 
 
@@ -106,6 +108,7 @@ class DeclarativeStrategySpec:
     definition: StrategyDefinition
     entry: Condition
     exit: Condition
+    hold: Condition | None = None
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "DeclarativeStrategySpec":
@@ -126,6 +129,40 @@ class DeclarativeStrategySpec:
         }
         if len(parameter_schema) != len(parameters_payload):
             raise ValueError("every parameter specification must be an object")
+        indicator_requests_payload = payload.get("indicator_requests", ())
+        if not isinstance(indicator_requests_payload, (list, tuple)):
+            raise ValueError("indicator_requests must be a list")
+        indicator_requests_list: list[IndicatorRequest] = []
+        for item in indicator_requests_payload:
+            if isinstance(item, IndicatorRequest):
+                indicator_requests_list.append(item)
+                continue
+            if not isinstance(item, Mapping):
+                raise ValueError("each indicator_request must be an object")
+            code = str(item.get("code") or "").strip()
+            if not code:
+                raise ValueError("indicator_request.code is required")
+            params = item.get("parameters") or {}
+            if not isinstance(params, Mapping):
+                raise ValueError("indicator_request.parameters must be an object")
+            alias = item.get("alias")
+            if alias is not None:
+                alias = str(alias).strip() or None
+            output_fields = item.get("output_fields") or {}
+            if not isinstance(output_fields, Mapping):
+                raise ValueError("indicator_request.output_fields must be an object")
+            indicator_requests_list.append(
+                IndicatorRequest(
+                    code=code,
+                    parameters=dict(params),
+                    alias=alias,
+                    output_fields={str(k): str(v) for k, v in output_fields.items()},
+                )
+            )
+        indicator_requests = tuple(indicator_requests_list)
+        aliases = [req.alias for req in indicator_requests if getattr(req, "alias", None)]
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("indicator request aliases must be unique")
         definition = StrategyDefinition(
             code=str(payload["code"]),
             name=str(payload["name"]),
@@ -135,13 +172,17 @@ class DeclarativeStrategySpec:
             required_fields=tuple(payload.get("required_fields", ())),
             required_indicators=tuple(payload.get("required_indicators", ())),
             parameter_schema=parameter_schema,
+            indicator_requests=indicator_requests,
         )
         if definition.strategy_type is not StrategyType.DECLARATIVE:
             raise ValueError("declarative spec must have strategy_type='declarative'")
+        hold_payload = payload.get("hold")
+        hold = parse_condition(hold_payload) if isinstance(hold_payload, Mapping) else None
         return cls(
             definition=definition,
             entry=parse_condition(payload["entry"]),
             exit=parse_condition(payload["exit"]),
+            hold=hold,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -149,4 +190,6 @@ class DeclarativeStrategySpec:
         payload["parameters"] = payload.pop("parameter_schema")
         payload["entry"] = condition_to_dict(self.entry)
         payload["exit"] = condition_to_dict(self.exit)
+        if self.hold is not None:
+            payload["hold"] = condition_to_dict(self.hold)
         return payload

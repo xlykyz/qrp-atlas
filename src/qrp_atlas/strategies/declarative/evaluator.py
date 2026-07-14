@@ -33,6 +33,8 @@ class DeclarativeStrategy:
         validate_definition(self.definition)
         self._validate_condition(spec.entry)
         self._validate_condition(spec.exit)
+        if spec.hold is not None:
+            self._validate_condition(spec.hold)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "DeclarativeStrategy":
@@ -90,7 +92,11 @@ class DeclarativeStrategy:
                 action, reason = StrategyAction.EXIT, "DECLARATIVE_EXIT_MATCH"
                 positions[asset_id] = False
             elif held:
-                action, reason = StrategyAction.HOLD, "DECLARATIVE_POSITION_CONTINUES"
+                if self.spec.hold is not None and not self._evaluate(self.spec.hold, row, parameters):
+                    action, reason = StrategyAction.EXIT, "DECLARATIVE_HOLD_NOT_MET"
+                    positions[asset_id] = False
+                else:
+                    action, reason = StrategyAction.HOLD, "DECLARATIVE_POSITION_CONTINUES"
             elif entry_match:
                 action, reason = StrategyAction.ENTER, "DECLARATIVE_ENTRY_MATCH"
                 positions[asset_id] = True
