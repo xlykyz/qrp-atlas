@@ -333,15 +333,29 @@ def run_event_drift_portfolio_backtest(
     EventFrame prepared by 05-A as_of queries / EventFrame projection, then the
     registered strategy and portfolio engine.
 
+    Contracts enforced by this runner:
+    - execution price must be open (entry and exit at open)
+    - ``config.max_positions`` is injected into strategy runtime_context so
+      capacity is applied at entry after same-day exits (no delayed entry /
+      early displacement backlog)
+
     Capacity ownership:
-    - strategy: selection + hold window
-    - ``config.max_positions`` / ``config.max_weight_per_asset``: portfolio capacity
-    - target adapter: concurrent equal-weight within capacity
+    - strategy: selection + hold window + entry-time max_positions gate
+    - ``config.max_weight_per_asset`` + adapter: concurrent equal-weight
     """
     if events is None or not isinstance(events, pd.DataFrame):
         raise ValueError("events must be a pandas DataFrame")
     if price_df is None or not isinstance(price_df, pd.DataFrame):
         raise ValueError("price_df must be a pandas DataFrame")
+
+    price_field = str(getattr(config.execution, "price_field", "") or "").strip().lower()
+    if price_field != "open":
+        raise ValueError(
+            "run_event_drift_portfolio_backtest requires "
+            "config.execution.price_field == 'open' "
+            f"(got {config.execution.price_field!r}); "
+            "event entry/exit are defined at open"
+        )
 
     strategy = get_strategy(strategy_code, version)
     resolved_parameters = resolve_parameters(strategy.definition, parameters or {})
@@ -359,7 +373,12 @@ def run_event_drift_portfolio_backtest(
             prepared_data=events.copy(),
             parameters=resolved_parameters,
             initial_positions={},
-            runtime_context={"open_dates": open_dates, "trading_days": open_dates},
+            runtime_context={
+                "open_dates": open_dates,
+                "trading_days": open_dates,
+                # Single source of truth: portfolio config capacity.
+                "max_positions": int(config.max_positions),
+            },
         )
     )
     target_weights = strategy_decisions_to_target_weights(

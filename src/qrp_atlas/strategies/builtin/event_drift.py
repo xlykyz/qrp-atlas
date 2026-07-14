@@ -30,6 +30,14 @@ from ..validation import (
 )
 
 
+_ACTION_ORDER = {
+    StrategyAction.EXIT: 0,
+    StrategyAction.ENTER: 1,
+    StrategyAction.HOLD: 2,
+    StrategyAction.NO_ACTION: 3,
+}
+
+
 def _number(default: float, minimum: float = -1e6, maximum: float = 1e6) -> ParameterSpec:
     return ParameterSpec(
         "number",
@@ -69,6 +77,28 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _resolve_max_positions(runtime_context: Mapping[str, Any] | None) -> int | None:
+    """Optional capacity from portfolio config via runtime_context.
+
+    When provided, the strategy only emits ENTER for events that fit remaining
+    capacity after same-day exits. This prevents delayed entry and early
+    displacement that would otherwise occur if the adapter re-ranked a backlog
+    of ENTER decisions later.
+    """
+    if not runtime_context:
+        return None
+    raw = runtime_context.get("max_positions")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise StrategyValidationError(f"max_positions must be a positive integer: {raw!r}") from exc
+    if value <= 0:
+        raise StrategyValidationError("max_positions must be positive")
+    return value
+
+
 class EventDriftBasicStrategy:
     """Long-only drift on positive earnings-forecast events.
 
@@ -81,9 +111,13 @@ class EventDriftBasicStrategy:
       ``exit_index = entry_index + hold_days``
 
     Capacity / weights:
-    - This strategy only selects names and hold periods.
-    - ``max_positions`` / ``max_weight_per_asset`` / concurrent equal-weight are owned
-      by ``PortfolioBacktestConfig`` + ``strategy_decisions_to_target_weights``.
+    - Selection and hold windows are owned by this strategy.
+    - When ``runtime_context["max_positions"]`` is provided (public runner injects
+      ``PortfolioBacktestConfig.max_positions``), capacity is enforced at entry
+      after same-day exits. Rejected events are diagnostics only and never enter
+      the active book (no delayed entry, no early displacement of unexpired holds).
+    - Concurrent equal-weight and ``max_weight_per_asset`` remain owned by
+      ``strategy_decisions_to_target_weights`` / portfolio config.
     - ENTER weights are left unset so the portfolio adapter can equal-weight the
       full concurrent book.
     """
@@ -91,11 +125,12 @@ class EventDriftBasicStrategy:
     definition = StrategyDefinition(
         code="event_drift_basic",
         name="Earnings Forecast Event Drift Basic",
-        version="1.0.1",
+        version="1.0.2",
         description=(
             "Long-only positive earnings-forecast drift. Enters on available_trade_date "
-            "open, holds hold_days trading days, then exits on the next open. Selection "
-            "only; portfolio config owns capacity and equal-weighting."
+            "open, holds hold_days trading days, then exits on the next open. Enforces "
+            "optional max_positions at entry (from portfolio config runtime_context); "
+            "adapter owns equal-weight and max_weight_per_asset."
         ),
         strategy_type=StrategyType.BUILTIN,
         required_fields=(
@@ -125,6 +160,7 @@ class EventDriftBasicStrategy:
         parameters = resolve_parameters(self.definition, strategy_input.parameters)
         hold_days = int(parameters["hold_days"])
         min_mid = float(parameters["min_profit_change_midpoint"])
+        max_positions = _resolve_max_positions(strategy_input.runtime_context)
 
         prepared = strategy_input.prepared_data
         if prepared is None or not isinstance(prepared, pd.DataFrame):
@@ -178,7 +214,7 @@ class EventDriftBasicStrategy:
         active: dict[str, dict[str, Any]] = {}
 
         for day in timeline:
-            # exits first
+            # exits first — free capacity before same-day entries
             to_exit = [
                 asset
                 for asset, state in active.items()
@@ -211,6 +247,12 @@ class EventDriftBasicStrategy:
 
             day_entries = by_entry.get(day)
             if day_entries is not None and not day_entries.empty:
+                remaining: int | None
+                if max_positions is None:
+                    remaining = None
+                else:
+                    remaining = max(0, max_positions - len(active))
+
                 for _, row in day_entries.iterrows():
                     asset = str(row["ticker"])
                     score = _finite(row[PROFIT_CHANGE_MIDPOINT])
@@ -223,6 +265,12 @@ class EventDriftBasicStrategy:
                     if asset in active:
                         # Already held from an earlier entry; keep existing hold window.
                         continue
+                    if remaining is not None and remaining <= 0:
+                        diagnostics.append(
+                            f"rejected_entry_max_positions:{asset}:{day}:score={score}"
+                        )
+                        continue
+
                     exit_date = self._exit_date(day, hold_days, open_dates)
                     active[asset] = {
                         "entry_date": day,
@@ -232,6 +280,8 @@ class EventDriftBasicStrategy:
                         "event_series_id": row.get("event_series_id"),
                         "source_record_id": row.get("source_record_id"),
                     }
+                    if remaining is not None:
+                        remaining -= 1
                     decisions.append(
                         StrategyDecision(
                             trade_date=day,
@@ -283,15 +333,26 @@ class EventDriftBasicStrategy:
                     )
                 )
 
-        decisions.sort(key=lambda d: (d.trade_date, d.asset_id, d.action.value))
+        # Explicit action priority so same-day EXIT free capacity before ENTER
+        # for the same asset (enum value order is ENTER < HOLD < EXIT).
+        decisions.sort(
+            key=lambda d: (
+                d.trade_date,
+                d.asset_id,
+                _ACTION_ORDER.get(d.action, 9),
+            )
+        )
         selected_entries = sum(1 for d in decisions if d.action is StrategyAction.ENTER)
         diagnostics.append(f"selected_entries={selected_entries}")
+        if max_positions is not None:
+            diagnostics.append(f"max_positions={max_positions}")
         diagnostics.append(
             "time_semantics:announcement_date=evidence;"
             "available_trade_date=entry;"
             "exit=next_open_after_hold_days;"
             "no_extra_next_open_on_entry;"
-            "capacity_owned_by_portfolio_config"
+            "capacity_enforced_at_entry_when_runtime_max_positions;"
+            "equal_weight_owned_by_portfolio_adapter"
         )
         return StrategyRunResult(
             definition=self.definition,

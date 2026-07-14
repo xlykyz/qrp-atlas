@@ -377,3 +377,198 @@ def test_public_runner_reweights_full_concurrent_book():
     assert set(active1.asset_id) == {"000001.SZ", "300750.SZ"}
     assert abs(float(active1.target_weight.sum()) - 1.0) < 1e-9
     assert all(abs(float(w) - 0.5) < 1e-9 for w in active1.target_weight.tolist())
+
+
+def _positive_event(
+    ticker: str,
+    *,
+    available: str,
+    announcement: str,
+    mid_min: float,
+    mid_max: float,
+    series: str,
+    source: str,
+) -> dict:
+    return {
+        "ticker": ticker,
+        "event_type": "earnings_forecast",
+        "event_series_id": series,
+        "report_period": "2023-12-31",
+        "announcement_date": announcement,
+        "available_trade_date": available,
+        "forecast_type": "预增",
+        "profit_change_min": mid_min,
+        "profit_change_max": mid_max,
+        "net_profit_min": 100,
+        "net_profit_max": 120,
+        "source_record_id": source,
+        "revision_id": source,
+    }
+
+
+def test_capacity_full_rejects_without_delayed_entry():
+    """When capacity is full, lower-score events must not enter later after exit frees a slot."""
+    days = _open_dates()
+    events = pd.DataFrame(
+        [
+            _positive_event(
+                "000001.SZ",
+                available=days[0],
+                announcement="2024-03-15",
+                mid_min=40,
+                mid_max=50,
+                series="sA",
+                source="rA",
+            ),
+            _positive_event(
+                "300750.SZ",
+                available=days[0],
+                announcement="2024-03-15",
+                mid_min=5,
+                mid_max=15,
+                series="sB",
+                source="rB",
+            ),
+        ]
+    )
+    run = run_event_drift_portfolio_backtest(
+        events,
+        _prices(),
+        _config(max_positions=1, max_weight_per_asset=1.0),
+        trading_days=days,
+        parameters={"hold_days": 2},
+    )
+    enters = [d for d in run.strategy_result.decisions if d.action is StrategyAction.ENTER]
+    exits = [d for d in run.strategy_result.decisions if d.action is StrategyAction.EXIT]
+    assert [d.asset_id for d in enters] == ["000001.SZ"]
+    assert any("rejected_entry_max_positions:300750.SZ" in x for x in run.strategy_result.diagnostics)
+    # After A exits, B must still not appear (no delayed entry backlog).
+    assert all(d.asset_id != "300750.SZ" for d in enters)
+    assert all(d.asset_id != "300750.SZ" for d in exits)
+    exit_dates = {d.trade_date for d in exits if d.asset_id == "000001.SZ"}
+    assert days[2] in exit_dates
+    post_exit = run.target_weights[run.target_weights.trade_date > days[2]]
+    if not post_exit.empty:
+        assert (post_exit["target_weight"] == 0).all() or not (
+            (post_exit["asset_id"] == "300750.SZ") & (post_exit["target_weight"] > 0)
+        ).any()
+
+
+def test_capacity_full_does_not_displace_unexpired_hold():
+    """Higher-score new event cannot force early exit of an unexpired position."""
+    days = _open_dates()
+    events = pd.DataFrame(
+        [
+            _positive_event(
+                "000001.SZ",
+                available=days[0],
+                announcement="2024-03-15",
+                mid_min=10,
+                mid_max=20,
+                series="sA",
+                source="rA",
+            ),
+            _positive_event(
+                "300750.SZ",
+                available=days[1],
+                announcement=days[0],
+                mid_min=80,
+                mid_max=100,
+                series="sB",
+                source="rB",
+            ),
+        ]
+    )
+    run = run_event_drift_portfolio_backtest(
+        events,
+        _prices(),
+        _config(max_positions=1, max_weight_per_asset=1.0),
+        trading_days=days,
+        parameters={"hold_days": 5},
+    )
+    enters = [d for d in run.strategy_result.decisions if d.action is StrategyAction.ENTER]
+    exits = [d for d in run.strategy_result.decisions if d.action is StrategyAction.EXIT]
+    assert [d.asset_id for d in enters] == ["000001.SZ"]
+    assert any("rejected_entry_max_positions:300750.SZ" in x for x in run.strategy_result.diagnostics)
+    # A stays until scheduled exit; never early-exited for B.
+    a_exits = [d for d in exits if d.asset_id == "000001.SZ"]
+    assert a_exits
+    assert a_exits[0].trade_date == days[5]
+    day1 = run.target_weights[run.target_weights.trade_date == days[1]]
+    active1 = day1[day1.target_weight > 0]
+    assert set(active1.asset_id) == {"000001.SZ"}
+    assert "300750.SZ" not in set(active1.asset_id)
+
+
+def test_runner_rejects_non_open_execution_price():
+    with pytest.raises(ValueError, match="price_field == 'open'"):
+        run_event_drift_portfolio_backtest(
+            _events(),
+            _prices(),
+            _config(
+                execution=PortfolioExecutionRule(
+                    price_field="close",
+                    mark_price_field="close",
+                    enforce_t_plus_one=True,
+                    enforce_price_limits=False,
+                    enforce_suspension=False,
+                    lot_size=100,
+                    minimum_commission=5.0,
+                )
+            ),
+            trading_days=_open_dates(),
+            parameters={"hold_days": 2},
+        )
+
+
+def test_same_day_exit_then_enter_same_asset():
+    """On scheduled exit day, a new event for the same asset may re-enter after EXIT."""
+    days = _open_dates()
+    events = pd.DataFrame(
+        [
+            _positive_event(
+                "000001.SZ",
+                available=days[0],
+                announcement="2024-03-15",
+                mid_min=10,
+                mid_max=20,
+                series="s1",
+                source="r1",
+            ),
+            _positive_event(
+                "000001.SZ",
+                available=days[2],  # exit of hold_days=2 is days[2]
+                announcement=days[1],
+                mid_min=30,
+                mid_max=40,
+                series="s1b",
+                source="r2",
+            ),
+        ]
+    )
+    strategy = get_strategy("event_drift_basic")
+    result = strategy.run(
+        StrategyInput(
+            prepared_data=events,
+            parameters={"hold_days": 2},
+            runtime_context={"open_dates": days, "max_positions": 1},
+        )
+    )
+    day = days[2]
+    same_day = [d for d in result.decisions if d.trade_date == day and d.asset_id == "000001.SZ"]
+    actions = [d.action for d in same_day]
+    assert StrategyAction.EXIT in actions
+    assert StrategyAction.ENTER in actions
+    assert actions.index(StrategyAction.EXIT) < actions.index(StrategyAction.ENTER)
+
+    run = run_event_drift_portfolio_backtest(
+        events,
+        _prices(),
+        _config(max_positions=1, max_weight_per_asset=1.0),
+        trading_days=days,
+        parameters={"hold_days": 2},
+    )
+    day_targets = run.target_weights[run.target_weights.trade_date == day]
+    active = day_targets[day_targets.target_weight > 0]
+    assert set(active.asset_id) == {"000001.SZ"}
+    assert abs(float(active.target_weight.iloc[0]) - 1.0) < 1e-9
