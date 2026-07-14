@@ -23,6 +23,7 @@ from .service import (
     list_runs,
 )
 from .writer import BacktestRunWriter, portfolio_fills_to_trades
+from .robustness_writer import ResidualRobustnessWriter
 
 __all__ = [
     "BacktestRunsLoader",
@@ -35,6 +36,7 @@ __all__ = [
     "SkippedTrade",
     "BacktestConfigSnapshot",
     "BacktestRunWriter",
+    "ResidualRobustnessWriter",
     "portfolio_fills_to_trades",
     "list_runs",
     "get_run_meta",
