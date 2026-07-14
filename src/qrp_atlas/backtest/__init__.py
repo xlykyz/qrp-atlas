@@ -48,6 +48,10 @@ from .research import (
     compute_information_coefficient,
     run_cross_section_research,
     summarize_information_coefficient,
+    EarningsForecastEventStudyResult,
+    EventStudyError,
+    compute_event_forward_returns,
+    run_earnings_forecast_event_study,
 )
 
 __all__ = [
@@ -95,4 +99,8 @@ __all__ = [
     "compute_information_coefficient",
     "run_cross_section_research",
     "summarize_information_coefficient",
+    "EarningsForecastEventStudyResult",
+    "EventStudyError",
+    "compute_event_forward_returns",
+    "run_earnings_forecast_event_study",
 ]

@@ -17,6 +17,15 @@ from qrp_atlas.indicators.system_b.detector import (
     SYSTEM_B_EXIT_TRIGGERED,
     SYSTEM_B_TREND_VALID,
 )
+from qrp_atlas.indicators.events.earnings_forecast import (
+    DIRECTION_SCORE,
+    EVENT_AGE,
+    EVENT_WINDOW,
+    NET_PROFIT_MIDPOINT,
+    NET_PROFIT_RANGE,
+    PROFIT_CHANGE_MIDPOINT,
+    PROFIT_CHANGE_RANGE,
+)
 
 
 ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
@@ -27,6 +36,13 @@ ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
     IndicatorDefinition(CLOSE_BELOW_MA5_DAYS, "Consecutive closes below MA5", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Consecutive sessions with close below MA5."),
     IndicatorDefinition(SYSTEM_B_TREND_VALID, "System B trend valid", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close at or above MA5."),
     IndicatorDefinition(SYSTEM_B_EXIT_TRIGGERED, "System B exit triggered", IndicatorLayer.SYSTEM_B, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Two consecutive sessions with close below MA5."),
+    IndicatorDefinition(PROFIT_CHANGE_MIDPOINT, "Profit change midpoint", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Midpoint of earnings-forecast profit change range.", unit="percent"),
+    IndicatorDefinition(PROFIT_CHANGE_RANGE, "Profit change range", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Width of earnings-forecast profit change range.", unit="percent"),
+    IndicatorDefinition(NET_PROFIT_MIDPOINT, "Net profit midpoint", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Midpoint of earnings-forecast net profit range.", unit="万元"),
+    IndicatorDefinition(NET_PROFIT_RANGE, "Net profit range", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Width of earnings-forecast net profit range.", unit="万元"),
+    IndicatorDefinition(DIRECTION_SCORE, "Earnings forecast direction score", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Mapped direction of earnings-forecast type: +1/0/-1."),
+    IndicatorDefinition(EVENT_AGE, "Event age", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Open trading days since available_trade_date (0 on availability day).", unit="trading_days"),
+    IndicatorDefinition(EVENT_WINDOW, "Event window flag", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Whether 0 <= event_age < window_days."),
 )
 
 
