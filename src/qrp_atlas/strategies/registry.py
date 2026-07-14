@@ -67,6 +67,10 @@ def _build_default_registry() -> StrategyRegistry:
         RollingZscoreMeanReversionStrategy,
         TimeSeriesMomentumStrategy,
     )
+    from .builtin.cross_section import (
+        CrossSectionalMomentumLongOnlyStrategy,
+        MultifactorLongOnlyStrategy,
+    )
     from .builtin.system_b_basic import SystemBBasicStrategy
 
     registry = StrategyRegistry()
@@ -75,6 +79,8 @@ def _build_default_registry() -> StrategyRegistry:
     registry.register(DualSmaTrendStrategy())
     registry.register(DonchianBreakoutStrategy())
     registry.register(RollingZscoreMeanReversionStrategy())
+    registry.register(CrossSectionalMomentumLongOnlyStrategy())
+    registry.register(MultifactorLongOnlyStrategy())
     return registry
 
 

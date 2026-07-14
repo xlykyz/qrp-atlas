@@ -38,8 +38,10 @@ def test_definition_is_serializable_and_builtin_is_registered() -> None:
     assert payload["code"] == "system_b_basic"
     assert payload["strategy_type"] == "builtin"
     assert [item.code for item in list_strategies()] == [
+        "cross_sectional_momentum_long_only",
         "donchian_breakout",
         "dual_sma_trend",
+        "multifactor_long_only",
         "rolling_zscore_mean_reversion",
         "system_b_basic",
         "time_series_momentum",

@@ -1,10 +1,10 @@
 """Cross-sectional research foundation: conventions, operators, universes, factors.
 
 This package sits under ``qrp_atlas.indicators`` and provides reusable
-cross-sectional transforms, historical universe helpers, and formal raw-factor
-generation (task 04-B) and industry/size neutralization (task 04-C). It
-deliberately stops short of Top-N selection, multifactor combination and
-strategy logic (tasks 04-D through 04-E).
+cross-sectional transforms, historical universe helpers, formal raw-factor
+generation (task 04-B) and industry/size neutralization (task 04-C). Top-N
+selection, target weights and long-only strategy logic live in
+``qrp_atlas.strategies`` (task 04-D); factor research analytics remain task 04-E.
 """
 
 from __future__ import annotations

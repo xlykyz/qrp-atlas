@@ -20,6 +20,18 @@ from .registry import (
     run_strategy,
 )
 from .validation import StrategyValidationError
+from .selection import (
+    EligibilityError,
+    RebalanceScheduleError,
+    SelectionError,
+    WeightConstructionError,
+    apply_eligibility,
+    build_rebalance_schedule,
+    equal_weight_targets,
+    select_top_n,
+    selection_to_target_weights,
+)
+from .builtin.cross_section import compute_composite_score
 
 __all__ = [
     "DEFAULT_REGISTRY",
@@ -38,4 +50,14 @@ __all__ = [
     "get_strategy",
     "list_strategies",
     "run_strategy",
+    "EligibilityError",
+    "RebalanceScheduleError",
+    "SelectionError",
+    "WeightConstructionError",
+    "apply_eligibility",
+    "build_rebalance_schedule",
+    "compute_composite_score",
+    "equal_weight_targets",
+    "select_top_n",
+    "selection_to_target_weights",
 ]
