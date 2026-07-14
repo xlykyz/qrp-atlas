@@ -67,6 +67,19 @@ def _build_default_registry() -> StrategyRegistry:
         RollingZscoreMeanReversionStrategy,
         TimeSeriesMomentumStrategy,
     )
+    from .builtin.technical import (
+        AdxDirectionalTrendStrategy,
+        AtrVolatilityBreakoutStrategy,
+        BollingerMeanReversionStrategy,
+        DualEmaTrendStrategy,
+        KeltnerBreakoutStrategy,
+        LinearRegressionTrendStrategy,
+        MacdTrendStrategy,
+        RsiMeanReversionStrategy,
+        StochasticMeanReversionStrategy,
+        VolatilityAdjustedMomentumStrategy,
+        VolumeConfirmedEmaTrendStrategy,
+    )
     from .builtin.residual import MarketResidualMeanReversionStrategy
     from .builtin.cross_section import (
         CrossSectionalMomentumLongOnlyStrategy,
@@ -81,6 +94,17 @@ def _build_default_registry() -> StrategyRegistry:
     registry.register(DualSmaTrendStrategy())
     registry.register(DonchianBreakoutStrategy())
     registry.register(RollingZscoreMeanReversionStrategy())
+    registry.register(DualEmaTrendStrategy())
+    registry.register(MacdTrendStrategy())
+    registry.register(RsiMeanReversionStrategy())
+    registry.register(BollingerMeanReversionStrategy())
+    registry.register(StochasticMeanReversionStrategy())
+    registry.register(AdxDirectionalTrendStrategy())
+    registry.register(KeltnerBreakoutStrategy())
+    registry.register(AtrVolatilityBreakoutStrategy())
+    registry.register(LinearRegressionTrendStrategy())
+    registry.register(VolatilityAdjustedMomentumStrategy())
+    registry.register(VolumeConfirmedEmaTrendStrategy())
     registry.register(MarketResidualMeanReversionStrategy())
     registry.register(CrossSectionalMomentumLongOnlyStrategy())
     registry.register(MultifactorLongOnlyStrategy())
