@@ -11,6 +11,7 @@ from .models import (
     Skipped,
     Trade,
 )
+from .exposure_data import prepare_cross_section_exposure_panel
 from .factor_data import prepare_financial_factor_panel
 from .point_in_time import select_latest_available_records
 from .pit_queries import (
@@ -34,6 +35,18 @@ from .portfolio import (
     strategy_decisions_to_target_weights,
 )
 from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strategy_data, run_strategy_backtest
+from .research import (
+    CrossSectionResearchError,
+    CrossSectionResearchResult,
+    TargetExposureResult,
+    analyze_target_exposures,
+    assign_factor_groups,
+    compute_forward_returns,
+    compute_group_returns,
+    compute_information_coefficient,
+    run_cross_section_research,
+    summarize_information_coefficient,
+)
 
 __all__ = [
     "BacktestConfig",
@@ -57,6 +70,7 @@ __all__ = [
     "StrategyPortfolioBacktestRun",
     "Trade",
     "IndustryMembershipConflictError",
+    "prepare_cross_section_exposure_panel",
     "prepare_financial_factor_panel",
     "prepare_strategy_data",
     "query_financial_as_of",
@@ -67,4 +81,14 @@ __all__ = [
     "select_latest_available_records",
     "summarize_index_components",
     "strategy_decisions_to_target_weights",
+    "CrossSectionResearchError",
+    "CrossSectionResearchResult",
+    "TargetExposureResult",
+    "analyze_target_exposures",
+    "assign_factor_groups",
+    "compute_forward_returns",
+    "compute_group_returns",
+    "compute_information_coefficient",
+    "run_cross_section_research",
+    "summarize_information_coefficient",
 ]
