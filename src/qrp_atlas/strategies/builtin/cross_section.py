@@ -35,8 +35,19 @@ from ..selection import (
     equal_weight_targets,
     select_top_n,
 )
-from ..selection.eligibility import ELIGIBILITY_REASON_COLUMN, ELIGIBLE_COLUMN
-from ..selection.selection import RANK_COLUMN, SCORE_COLUMN, SELECTED_COLUMN
+from ..selection.eligibility import (
+    ELIGIBILITY_REASON_COLUMN,
+    ELIGIBLE_COLUMN,
+    REASON_INELIGIBLE,
+    REASON_INVALID_SCORE,
+    REASON_MISSING_ELIGIBILITY,
+)
+from ..selection.selection import (
+    RANK_COLUMN,
+    RESERVED_SCORE_COLUMNS,
+    SCORE_COLUMN,
+    SELECTED_COLUMN,
+)
 from ..validation import (
     StrategyValidationError,
     resolve_parameters,
@@ -161,6 +172,34 @@ def _parse_jsonish(value: Any, *, name: str) -> Any:
         except json.JSONDecodeError as exc:
             raise StrategyValidationError(f"{name} must be valid JSON") from exc
     raise StrategyValidationError(f"{name} must be a list/mapping/JSON string")
+
+
+
+
+def _exit_eligibility_reason(row: Any | None) -> str:
+    """Map a same-day selection row into a precise EXIT audit reason."""
+    if row is None:
+        return "MISSING_SIGNAL_ROW"
+    reason = getattr(row, ELIGIBILITY_REASON_COLUMN, None)
+    eligible = bool(getattr(row, ELIGIBLE_COLUMN, False))
+    selected = bool(getattr(row, SELECTED_COLUMN, False))
+    rank = getattr(row, RANK_COLUMN, None)
+    if reason == REASON_INVALID_SCORE:
+        return "INVALID_SCORE"
+    if reason == REASON_MISSING_ELIGIBILITY:
+        return "MISSING_ELIGIBILITY"
+    if reason == REASON_INELIGIBLE or (reason not in (None, "ELIGIBLE", "OK") and not eligible):
+        # Preserve explicit non-eligible panel reasons under INELIGIBLE bucket only
+        # when the panel marked the asset ineligible.
+        if not eligible:
+            return "INELIGIBLE"
+    if not eligible:
+        return "INELIGIBLE"
+    if rank is not None and pd.notna(rank) and not selected:
+        return "NOT_TOP_N"
+    if not selected:
+        return "NOT_TOP_N"
+    return "NOT_TOP_N"
 
 
 class _CrossSectionalLongOnlyBase:
@@ -420,12 +459,14 @@ class _CrossSectionalLongOnlyBase:
                     if action is StrategyAction.HOLD
                     else "CROSS_SECTION_ENTER"
                 )
+                rank_value = None if rank is None or pd.isna(rank) else int(rank)
                 evidence: dict[str, Any] = {
                     "signal_date": signal_date.strftime("%Y-%m-%d"),
                     "execution_trade_date": trade_date.strftime("%Y-%m-%d"),
                     "score_column": display_score_column,
                     "score": None if score is None or pd.isna(score) else float(score),
-                    "rank": None if rank is None or pd.isna(rank) else int(rank),
+                    "rank": rank_value,
+                    "priority": None if rank_value is None else float(-rank_value),
                     "top_n": top_n,
                     "max_positions": max_positions,
                     "cash_buffer": cash_buffer,
@@ -451,20 +492,37 @@ class _CrossSectionalLongOnlyBase:
                     )
                 )
 
+            day_lookup = {
+                str(getattr(item, ASSET_ID)): item
+                for item in day_selection.itertuples(index=False)
+            }
             for asset_id in sorted(previous_selected - current_selected):
+                source = day_lookup.get(asset_id)
+                exit_reason = _exit_eligibility_reason(source)
+                source_score = None
+                source_rank = None
+                source_eligible = False
+                if source is not None:
+                    raw_score = getattr(source, SCORE_COLUMN, None)
+                    if raw_score is not None and pd.notna(raw_score):
+                        source_score = float(raw_score)
+                    raw_rank = getattr(source, RANK_COLUMN, None)
+                    if raw_rank is not None and pd.notna(raw_rank):
+                        source_rank = int(raw_rank)
+                    source_eligible = bool(getattr(source, ELIGIBLE_COLUMN, False))
                 evidence = {
                     "signal_date": signal_date.strftime("%Y-%m-%d"),
                     "execution_trade_date": trade_date.strftime("%Y-%m-%d"),
                     "score_column": display_score_column,
-                    "score": None,
-                    "rank": None,
+                    "score": source_score,
+                    "rank": source_rank,
                     "top_n": top_n,
                     "max_positions": max_positions,
                     "cash_buffer": cash_buffer,
                     "max_weight_per_asset": max_weight_per_asset,
                     "rebalance_frequency": frequency,
-                    "eligible": False,
-                    "eligibility_reason": "NOT_SELECTED",
+                    "eligible": source_eligible,
+                    "eligibility_reason": exit_reason,
                     "ascending": ascending,
                 }
                 evidence.update(dict(evidence_extras))
@@ -477,7 +535,7 @@ class _CrossSectionalLongOnlyBase:
                         strategy_code=self.definition.code,
                         strategy_version=self.definition.version,
                         reason_code="CROSS_SECTION_EXIT",
-                        score=None,
+                        score=source_score,
                         weight=0.0,
                         evidence=evidence,
                     )
@@ -535,6 +593,10 @@ class CrossSectionalMomentumLongOnlyStrategy(_CrossSectionalLongOnlyBase):
         parameters: Mapping[str, Any],
     ) -> tuple[pd.DataFrame, str, dict[str, Any]]:
         score_column = str(parameters.get("score_column") or self.default_score_column)
+        if score_column in RESERVED_SCORE_COLUMNS:
+            raise StrategyValidationError(
+                f"score_column {score_column!r} conflicts with reserved selection fields"
+            )
         if score_column not in prepared.columns:
             raise StrategyValidationError(
                 f"prepared_data missing score column: {score_column!r}"

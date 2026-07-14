@@ -45,31 +45,14 @@ def build_rebalance_schedule(
 ) -> pd.DataFrame:
     """Build a deterministic rebalance schedule from a real trading calendar.
 
-    Parameters
-    ----------
-    trading_days:
-        Caller-provided trading-day sequence. Weekends and holidays are never
-        inferred; only these dates participate.
-    frequency:
-        ``daily``, ``weekly``, ``monthly`` or ``explicit``.
-        Weekly/monthly use the last actual trading day inside each period as
-        the signal date.
-    explicit_dates:
-        Required when ``frequency="explicit"``. Every date must already exist
-        in ``trading_days``; silent drift is rejected.
-    start_date / end_date:
-        Optional inclusive bounds applied to the trading calendar before
-        selecting signal dates. Execution may still fall on the next trading
-        day after ``end_date`` when that day exists in ``trading_days``.
+    Signal dates are always normalized, de-duplicated and sorted ascending
+    before execution mapping, including ``frequency="explicit"``.
 
-    Returns
-    -------
-    DataFrame with columns:
+    Final schedule invariants:
 
-    - ``signal_date``: date on which post-close factor information is used
-    - ``trade_date``: next actual trading day after the signal (execution day)
-
-    A terminal signal with no following trading day does not produce a row.
+    - ``signal_date`` unique and strictly ascending
+    - ``trade_date`` unique and strictly ascending
+    - every ``trade_date`` is strictly greater than its ``signal_date``
     """
     if frequency not in REBALANCE_FREQUENCIES:
         raise RebalanceScheduleError(
@@ -106,6 +89,9 @@ def build_rebalance_schedule(
     else:
         signal_dates = _explicit_signals(calendar, explicit_dates)
 
+    # Canonical order: every frequency ends as unique ascending signal dates.
+    signal_dates = sorted(set(signal_dates))
+
     rows: list[dict[str, pd.Timestamp]] = []
     for signal in signal_dates:
         execution = next_trading_day(full_calendar, signal)
@@ -118,7 +104,40 @@ def build_rebalance_schedule(
     out = pd.DataFrame(rows)
     out["signal_date"] = pd.to_datetime(out["signal_date"])
     out["trade_date"] = pd.to_datetime(out["trade_date"])
-    return out.reset_index(drop=True)
+    out = out.sort_values(["signal_date", "trade_date"], kind="mergesort").reset_index(
+        drop=True
+    )
+    _validate_schedule(out)
+    return out
+
+
+def _validate_schedule(schedule: pd.DataFrame) -> None:
+    if schedule.empty:
+        return
+    signals = list(schedule["signal_date"])
+    trades = list(schedule["trade_date"])
+    if len(signals) != len(set(signals)):
+        raise RebalanceScheduleError("signal_date values must be unique")
+    if len(trades) != len(set(trades)):
+        raise RebalanceScheduleError("trade_date values must be unique")
+    if signals != sorted(signals):
+        raise RebalanceScheduleError("signal_date values must be strictly ascending")
+    if trades != sorted(trades):
+        raise RebalanceScheduleError("trade_date values must be strictly ascending")
+    for signal, trade in zip(signals, trades, strict=True):
+        if not trade > signal:
+            raise RebalanceScheduleError(
+                "trade_date must be strictly after signal_date: "
+                f"{pd.Timestamp(signal).strftime('%Y-%m-%d')} -> "
+                f"{pd.Timestamp(trade).strftime('%Y-%m-%d')}"
+            )
+    # Strict ascending implies uniqueness for total order; still ensure no equals.
+    for left, right in zip(signals, signals[1:], strict=False):
+        if not right > left:
+            raise RebalanceScheduleError("signal_date values must be strictly ascending")
+    for left, right in zip(trades, trades[1:], strict=False):
+        if not right > left:
+            raise RebalanceScheduleError("trade_date values must be strictly ascending")
 
 
 def _empty_schedule() -> pd.DataFrame:
@@ -200,4 +219,5 @@ def _explicit_signals(
             "explicit rebalance dates must exist in the trading calendar; "
             f"missing: {sample}"
         )
-    return list(requested)
+    # Sort ascending after normalize/dedupe so input order never affects output.
+    return sorted(set(requested))

@@ -17,6 +17,7 @@ from .rebalance import (
     next_trading_day,
 )
 from .selection import (
+    RESERVED_SCORE_COLUMNS,
     SCORE_COLUMN,
     SELECTION_COLUMNS,
     SelectionError,
@@ -35,6 +36,7 @@ __all__ = [
     "EligibilityError",
     "REBALANCE_FREQUENCIES",
     "RebalanceScheduleError",
+    "RESERVED_SCORE_COLUMNS",
     "SCORE_COLUMN",
     "SELECTION_COLUMNS",
     "SelectionError",

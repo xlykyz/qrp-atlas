@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
 
 from qrp_atlas.contracts import ASSET_ID, TRADE_DATE
-from qrp_atlas.indicators.cross_section.conventions import (
-    CrossSectionFrameError,
-    ensure_cross_section_frame,
-    sort_cross_section_frame,
-)
 
 from .eligibility import (
     ELIGIBILITY_REASON_COLUMN,
@@ -34,6 +28,21 @@ SELECTION_COLUMNS = (
     SELECTED_COLUMN,
     ELIGIBLE_COLUMN,
     ELIGIBILITY_REASON_COLUMN,
+)
+
+# Columns owned by the selection contract. Callers may use score_column="score"
+# as the canonical score field, but may not point score_column at other reserved
+# helper columns that would be overwritten or ambiguous.
+RESERVED_SCORE_COLUMNS = frozenset(
+    {
+        TRADE_DATE,
+        ASSET_ID,
+        RANK_COLUMN,
+        SELECTED_COLUMN,
+        ELIGIBLE_COLUMN,
+        ELIGIBILITY_REASON_COLUMN,
+        "selection_eligible",
+    }
 )
 
 
@@ -67,6 +76,12 @@ def select_top_n(
         raise SelectionError("n must be a positive integer")
     if score_frame is None or not isinstance(score_frame, pd.DataFrame):
         raise SelectionError("score_frame must be a pandas DataFrame")
+    if not isinstance(score_column, str) or not score_column.strip():
+        raise SelectionError("score_column must be a non-empty string")
+    if score_column in RESERVED_SCORE_COLUMNS:
+        raise SelectionError(
+            f"score_column {score_column!r} conflicts with reserved selection fields"
+        )
     if score_column not in getattr(score_frame, "columns", []):
         raise SelectionError(f"score_frame missing score column: {score_column!r}")
 
@@ -84,14 +99,13 @@ def select_top_n(
         return _empty_selection(score_column)
 
     rows: list[dict[str, Any]] = []
-    for signal_date, group in annotated.groupby(TRADE_DATE, sort=True):
+    for _signal_date, group in annotated.groupby(TRADE_DATE, sort=True):
         day = group.copy()
-        # Stable ranking only among selection-eligible assets.
         eligible_mask = day["selection_eligible"].astype(bool)
         eligible = day.loc[eligible_mask].copy()
         if eligible.empty:
             ordered = day.sort_values([ASSET_ID], kind="mergesort")
-            for position, (_, row) in enumerate(ordered.iterrows(), start=1):
+            for _, row in ordered.iterrows():
                 rows.append(
                     _selection_row(
                         row,
@@ -138,7 +152,6 @@ def select_top_n(
         return _empty_selection(score_column)
 
     out = pd.DataFrame(rows)
-    # Final stable order: date, selected desc, rank asc nulls last, asset_id.
     out["_selected_order"] = (~out[SELECTED_COLUMN]).astype(int)
     out["_rank_order"] = out[RANK_COLUMN].fillna(10**12)
     out = out.sort_values(
@@ -169,7 +182,6 @@ def _selection_row(
         ELIGIBLE_COLUMN: bool(row.get(ELIGIBLE_COLUMN, False)),
         ELIGIBILITY_REASON_COLUMN: row.get(ELIGIBILITY_REASON_COLUMN),
     }
-    # Preserve original score column name when it differs from "score".
     if score_column != SCORE_COLUMN:
         payload[score_column] = score_out
     return payload

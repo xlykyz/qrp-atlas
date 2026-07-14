@@ -35,6 +35,8 @@ class StrategyPortfolioBacktestRun:
 class _Candidate:
     weight: float | None = None
     score: float = 0.0
+    priority: float | None = None
+    rank: int | None = None
 
 
 def _finite_or_none(value: Any) -> float | None:
@@ -47,6 +49,31 @@ def _finite_or_none(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _decision_rank(decision) -> int | None:
+    evidence = decision.evidence or {}
+    raw = evidence.get("rank")
+    if raw is None:
+        return None
+    try:
+        rank = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return rank if rank > 0 else None
+
+
+def _decision_priority(decision, score: float | None) -> float:
+    """Resolve selection priority; rank is authoritative when present."""
+    rank = _decision_rank(decision)
+    if rank is not None:
+        return float(-rank)
+    evidence = decision.evidence or {}
+    raw = evidence.get("priority")
+    parsed = _finite_or_none(raw)
+    if parsed is not None:
+        return parsed
+    return float(score or 0.0)
+
+
 def strategy_decisions_to_target_weights(
     strategy_result: StrategyRunResult,
     *,
@@ -54,14 +81,25 @@ def strategy_decisions_to_target_weights(
     max_weight_per_asset: float,
     default_weight: float | None = None,
     cash_buffer: float = 0.0,
+    emit_unchanged_snapshots: bool = False,
 ) -> pd.DataFrame:
     """Convert long-only ENTER/HOLD/EXIT decisions into full target snapshots.
 
-    Capacity is resolved by latest score, then asset code. Explicit positive
-    ``decision.weight`` wins; otherwise selected assets receive ``default_weight``
-    or equal weight inside ``1 - cash_buffer``. Explicit weights that exceed 1 are
-    scaled down; sub-1 totals preserve residual cash and never re-inflate past
+    Capacity is resolved by rank when available (``priority = -rank``), else by
+    latest score, then asset code. Explicit positive ``decision.weight`` wins;
+    otherwise selected assets receive ``default_weight`` or equal weight inside
+    ``1 - cash_buffer``. Weights above the gross target are scaled down; sub-target
+    totals preserve residual cash and never re-inflate past
     ``max_weight_per_asset``.
+
+    Parameters
+    ----------
+    emit_unchanged_snapshots:
+        When False (default, legacy behavior), dates with no ENTER/EXIT and no
+        score/weight change are skipped. When True, every decision date emits a
+        complete target snapshot even if holdings are unchanged. Cross-sectional
+        strategies should enable this so rebalances can correct drift and retry
+        blocked fills.
     """
 
     if max_positions <= 0:
@@ -90,11 +128,15 @@ def strategy_decisions_to_target_weights(
             weight = _finite_or_none(decision.weight)
             if weight is not None and weight <= 0:
                 weight = None
+            rank = _decision_rank(decision)
+            priority = _decision_priority(decision, score)
 
             if decision.action is StrategyAction.ENTER:
                 active[decision.asset_id] = _Candidate(
                     weight=weight,
                     score=score or 0.0,
+                    priority=priority,
+                    rank=rank,
                 )
                 changed = True
             elif decision.action is StrategyAction.EXIT:
@@ -103,16 +145,37 @@ def strategy_decisions_to_target_weights(
                 candidate = active[decision.asset_id]
                 next_score = candidate.score if score is None else score
                 next_weight = candidate.weight if weight is None else weight
-                if next_score != candidate.score or next_weight != candidate.weight:
-                    active[decision.asset_id] = _Candidate(next_weight, next_score)
+                next_rank = candidate.rank if rank is None else rank
+                next_priority = (
+                    candidate.priority if priority is None else priority
+                )
+                if (
+                    next_score != candidate.score
+                    or next_weight != candidate.weight
+                    or next_rank != candidate.rank
+                    or next_priority != candidate.priority
+                ):
+                    active[decision.asset_id] = _Candidate(
+                        next_weight,
+                        next_score,
+                        next_priority,
+                        next_rank,
+                    )
                     changed = True
 
-        if not changed:
+        if not changed and not emit_unchanged_snapshots:
             continue
 
         selected_items = sorted(
             active.items(),
-            key=lambda item: (-item[1].score, item[0]),
+            key=lambda item: (
+                -(
+                    item[1].priority
+                    if item[1].priority is not None
+                    else item[1].score
+                ),
+                item[0],
+            ),
         )[:max_positions]
         selected = {asset_id for asset_id, _candidate in selected_items}
         weights = _resolve_weights(
@@ -121,8 +184,12 @@ def strategy_decisions_to_target_weights(
             default_weight=default_weight,
             cash_buffer=cash_buffer,
         )
-        priority = {
-            asset_id: candidate.score
+        priority_map = {
+            asset_id: (
+                candidate.priority
+                if candidate.priority is not None
+                else candidate.score
+            )
             for asset_id, candidate in selected_items
         }
         for asset_id in sorted(selected | previous_selected):
@@ -131,7 +198,7 @@ def strategy_decisions_to_target_weights(
                     "trade_date": trade_date,
                     "asset_id": asset_id,
                     "target_weight": weights.get(asset_id, 0.0),
-                    "priority": priority.get(asset_id, 0.0),
+                    "priority": priority_map.get(asset_id, 0.0),
                 }
             )
         previous_selected = selected
@@ -166,10 +233,10 @@ def _resolve_weights(
     if not selected_items:
         return {}
     target_gross = 1.0 - float(cash_buffer)
-    fallback = default_weight or min(
-        target_gross / len(selected_items),
-        max_weight_per_asset,
-    )
+    if default_weight is not None:
+        fallback = min(float(default_weight), max_weight_per_asset, target_gross)
+    else:
+        fallback = min(target_gross / len(selected_items), max_weight_per_asset)
     weights = {
         asset_id: min(
             candidate.weight if candidate.weight is not None else fallback,
@@ -178,9 +245,10 @@ def _resolve_weights(
         for asset_id, candidate in selected_items
     }
     total = sum(weights.values())
-    # Never re-inflate below target_gross; only scale down when over 1.
-    if total > 1.0 + 1e-12:
-        weights = {asset_id: weight / total for asset_id, weight in weights.items()}
+    # Scale down when over the cash-buffered gross target; never re-inflate.
+    if total > target_gross + 1e-12:
+        scale = target_gross / total
+        weights = {asset_id: weight * scale for asset_id, weight in weights.items()}
     return weights
 
 
@@ -194,6 +262,8 @@ def run_strategy_portfolio_backtest(
     initial_positions: Mapping[str, bool] | None = None,
     runtime_context: Mapping[str, Any] | None = None,
     default_weight: float | None = None,
+    cash_buffer: float = 0.0,
+    emit_unchanged_snapshots: bool | None = None,
 ) -> StrategyPortfolioBacktestRun:
     """Run a registered strategy and execute its target-weight portfolio."""
 
@@ -214,11 +284,24 @@ def run_strategy_portfolio_backtest(
             runtime_context=runtime_context or {},
         )
     )
+    # Cross-sectional strategies always emit full rebalance snapshots.
+    if emit_unchanged_snapshots is None:
+        emit_unchanged_snapshots = strategy.definition.code in {
+            "cross_sectional_momentum_long_only",
+            "multifactor_long_only",
+        }
+    if cash_buffer == 0.0 and "cash_buffer" in resolved_parameters:
+        try:
+            cash_buffer = float(resolved_parameters["cash_buffer"] or 0.0)
+        except (TypeError, ValueError):
+            cash_buffer = 0.0
     target_weights = strategy_decisions_to_target_weights(
         strategy_result,
         max_positions=config.max_positions,
         max_weight_per_asset=config.max_weight_per_asset,
         default_weight=default_weight,
+        cash_buffer=cash_buffer,
+        emit_unchanged_snapshots=emit_unchanged_snapshots,
     )
     portfolio_result = PortfolioBacktestEngine().run(
         price_df,
