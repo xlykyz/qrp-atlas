@@ -91,6 +91,27 @@ def _parameter_spec_dto(spec: Any) -> ParameterSpecDTO:
     )
 
 
+def _enum_value(value: Any, *, default: str) -> str:
+    """Serialize enums to their stable string values.
+
+    Prefer ``.value`` for formal enums such as ``UpdateFrequency``. Never emit
+    ``UpdateFrequency.AFTER_CLOSE``-style representations.
+    """
+    if value is None:
+        return default
+    if hasattr(value, "value"):
+        raw = getattr(value, "value")
+        text = str(raw)
+        # Defensive: if a bad object exposes a dotted enum repr as value, strip.
+        if text.startswith("UpdateFrequency."):
+            return text.split(".", 1)[1].lower()
+        return text
+    text = str(value)
+    if text.startswith("UpdateFrequency."):
+        return text.split(".", 1)[1].lower()
+    return text
+
+
 def list_indicator_catalog() -> list[IndicatorCatalogItem]:
     """List indicators + parameterized calculations + formal factors."""
 
@@ -101,19 +122,18 @@ def list_indicator_catalog() -> list[IndicatorCatalogItem]:
         code = getattr(item, "code", None) or getattr(item, "indicator_id", None)
         if not code or code in seen:
             continue
+        # Formal IndicatorDefinition uses ``frequency``; keep limited fallbacks
+        # only for non-definition objects that may expose alternate attrs.
+        frequency_obj = getattr(item, "frequency", None)
+        if frequency_obj is None:
+            frequency_obj = getattr(item, "update_frequency", None)
         items.append(
             IndicatorCatalogItem(
                 code=str(code),
                 name=str(getattr(item, "name", code)),
-                layer=str(getattr(getattr(item, "layer", None), "value", getattr(item, "layer", "basic"))),
-                scope=str(getattr(getattr(item, "scope", None), "value", getattr(item, "scope", "stock"))),
-                frequency=str(
-                    getattr(
-                        getattr(item, "update_frequency", None),
-                        "value",
-                        getattr(item, "frequency", "after_close"),
-                    )
-                ),
+                layer=_enum_value(getattr(item, "layer", None), default="basic"),
+                scope=_enum_value(getattr(item, "scope", None), default="stock"),
+                frequency=_enum_value(frequency_obj, default="after_close"),
                 description=str(getattr(item, "description", "") or ""),
             )
         )

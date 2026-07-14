@@ -436,9 +436,21 @@ def test_end_of_range_signal_skipped(tmp_path: Path):
     product_skips = [
         item for item in skipped if item.get("reason") == REASON_NO_EXECUTION_DATE_IN_RANGE
     ]
-    # Last daily signal has no next open inside range.
-    assert product_skips
+    # Last formal day is a daily signal with next open outside range.
+    assert any(item.get("signal_date") == "2024-01-12" for item in product_skips)
+    assert all(item.get("reason") == REASON_NO_EXECUTION_DATE_IN_RANGE for item in product_skips)
     assert summary["skipped_count"] >= len(skipped)
+    for filename in ("orders.json", "fills.json", "equity.json", "trades.json"):
+        payload = json.loads((run_dir / filename).read_text(encoding="utf-8"))
+        if not payload:
+            continue
+        if filename == "equity.json":
+            dates = [item["date"] for item in payload]
+        else:
+            dates = [item.get("trade_date") or item.get("entry_date") for item in payload if item]
+        for d in dates:
+            if d:
+                assert d <= "2024-01-12"
 
 
 def test_service_create_task_succeeded(tmp_path: Path):
@@ -501,3 +513,202 @@ def test_momentum_not_affected_by_future_prices(tmp_path: Path):
     keys_1 = sorted((t["signal_date"], t.get("asset_id") or t.get("ticker"), t["entry_date"]) for t in trades_1)
     keys_2 = sorted((t["signal_date"], t.get("asset_id") or t.get("ticker"), t["entry_date"]) for t in trades_2)
     assert keys_1 == keys_2
+
+
+def _assert_terminal_skip(run_dir: Path, *, expected_signal: str, end_date: str) -> None:
+    skipped = json.loads((run_dir / "skipped.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    product_skips = [
+        item for item in skipped if item.get("reason") == REASON_NO_EXECUTION_DATE_IN_RANGE
+    ]
+    assert any(item.get("signal_date") == expected_signal for item in product_skips), product_skips
+    assert summary["skipped_count"] >= len(skipped)
+    equity = json.loads((run_dir / "equity.json").read_text(encoding="utf-8"))
+    for point in equity:
+        assert point["date"] <= end_date
+
+
+def test_weekly_terminal_signal_skipped(tmp_path: Path):
+    """Friday weekly signal must map to next Monday and enter skipped when Monday > end_date."""
+    db_path = _make_cs_db(tmp_path)
+    # 2024-01-26 is Friday; next open is 2024-01-29.
+    request = validate_create_request(
+        _cs_request(
+            strategy_params={
+                "top_n": 1,
+                "momentum_lookback": 3,
+                "rebalance_frequency": "weekly",
+            },
+            position=BacktestPositionConfigDTO(
+                initial_cash=1_000_000,
+                max_positions=1,
+                max_weight_per_symbol=1.0,
+            ),
+            start_date="2024-01-15",
+            end_date="2024-01-26",
+        )
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="cs_weekly_end_skip",
+        runs_dir=tmp_path / "runs",
+        db_path=db_path,
+    )
+    _assert_terminal_skip(run_dir, expected_signal="2024-01-26", end_date="2024-01-26")
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["cross_section"]["product_timing_shift"] is False
+    assert config["cross_section"]["mapping_calendar_extra_days"] >= 1
+
+
+def test_monthly_terminal_signal_skipped(tmp_path: Path):
+    """Month-end signal must map to first next-month open and skip when outside range."""
+    db_path = _make_cs_db(tmp_path)
+    # 2024-01-31 is month end Wed; next open 2024-02-01.
+    request = validate_create_request(
+        _cs_request(
+            strategy_params={
+                "top_n": 1,
+                "momentum_lookback": 3,
+                "rebalance_frequency": "monthly",
+            },
+            position=BacktestPositionConfigDTO(
+                initial_cash=1_000_000,
+                max_positions=1,
+                max_weight_per_symbol=1.0,
+            ),
+            start_date="2024-01-02",
+            end_date="2024-01-31",
+        )
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="cs_monthly_end_skip",
+        runs_dir=tmp_path / "runs",
+        db_path=db_path,
+    )
+    _assert_terminal_skip(run_dir, expected_signal="2024-01-31", end_date="2024-01-31")
+
+
+def test_empty_historical_universe_cash_only_no_placeholder(tmp_path: Path):
+    """Empty membership must yield deterministic all-cash result without any asset_id."""
+    db_path = _make_cs_db(tmp_path)
+    # Use an index with no history in the fixture.
+    request = validate_create_request(
+        _cs_request(
+            index_code="399001.SZ",
+            strategy_params={
+                "top_n": 1,
+                "momentum_lookback": 3,
+                "rebalance_frequency": "weekly",
+            },
+            position=BacktestPositionConfigDTO(
+                initial_cash=1_234_567,
+                max_positions=1,
+                max_weight_per_symbol=1.0,
+            ),
+            start_date="2024-01-15",
+            end_date="2024-02-15",
+        )
+    )
+    _, run_dir = execute_validated_task(
+        request,
+        run_id="cs_empty_universe",
+        runs_dir=tmp_path / "runs_empty",
+        db_path=db_path,
+    )
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["cross_section"]["empty_historical_universe"] is True
+    assert config["cross_section"]["cash_only_result"] is True
+    assert all(item["component_count"] == 0 for item in config["cross_section"]["universe_diagnostics"])
+
+    orders = json.loads((run_dir / "orders.json").read_text(encoding="utf-8"))
+    fills = json.loads((run_dir / "fills.json").read_text(encoding="utf-8"))
+    trades = json.loads((run_dir / "trades.json").read_text(encoding="utf-8"))
+    equity = json.loads((run_dir / "equity.json").read_text(encoding="utf-8"))
+    assert orders == []
+    assert fills == []
+    assert trades == []
+    assert equity
+    for point in equity:
+        # equity curve is normalized to 1.0 in cash-only helper; absolute cash checked via snapshots if present
+        assert point["date"] >= "2024-01-15"
+        assert point["date"] <= "2024-02-15"
+        assert abs(float(point["equity"]) - 1.0) < 1e-12
+
+    # No real/placeholder assets appear in any result artifact.
+    blob = (run_dir / "config.json").read_text(encoding="utf-8")
+    for forbidden in ("AAA.SZ", "BBB.SZ", "CCC.SZ", "DDD.SZ", "EEE.SZ", "__CASH_ONLY__"):
+        assert forbidden not in blob
+
+
+def test_empty_universe_independent_of_market_row_order(tmp_path: Path):
+    (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+    db1 = _make_cs_db(tmp_path / "a")
+    db2 = tmp_path / "b" / "cs_product.duckdb"
+    db2.parent.mkdir(parents=True, exist_ok=True)
+    # Rebuild same schema but reverse insert order of market rows.
+    import duckdb
+    from datetime import date, datetime
+    con = duckdb.connect(str(db2))
+    con.execute(
+        """
+        CREATE TABLE daily_market_snapshot (
+            trade_date DATE, ticker VARCHAR, name VARCHAR,
+            open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+            volume DOUBLE, amount DOUBLE, turnover DOUBLE,
+            market_cap DOUBLE, float_cap DOUBLE,
+            is_st BOOLEAN, is_limit_up BOOLEAN, is_limit_down BOOLEAN
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE suspend_d (
+            trade_date DATE, ticker VARCHAR, suspend_timing VARCHAR,
+            suspend_type VARCHAR, created_at TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE index_component_history (
+            index_code VARCHAR, asset_id VARCHAR, snapshot_date DATE, weight DOUBLE,
+            effective_from DATE, effective_to DATE, available_trade_date DATE,
+            source VARCHAR, source_record_id VARCHAR, revision_id VARCHAR, ingested_at TIMESTAMP
+        )
+        """
+    )
+    dates = list(pd.bdate_range("2024-01-02", periods=40))
+    tickers = ["ZZZ.SZ", "YYY.SZ", "XXX.SZ"]
+    rows = []
+    for i, d in enumerate(dates):
+        for j, ticker in enumerate(tickers):
+            close = 20 + i * 0.1 + j
+            rows.append(
+                (
+                    d.date().isoformat(), ticker, ticker, close - 0.05, close + 0.1,
+                    close - 0.1, close, 1e6, 1e6 * close, 0.01, 1e10, 5e9, False, False, False,
+                )
+            )
+    # reverse physical insertion order
+    con.executemany(
+        "INSERT INTO daily_market_snapshot VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        list(reversed(rows)),
+    )
+    con.close()
+
+    req = validate_create_request(
+        _cs_request(
+            index_code="399001.SZ",
+            strategy_params={"top_n": 1, "momentum_lookback": 3, "rebalance_frequency": "weekly"},
+            position=BacktestPositionConfigDTO(initial_cash=500000, max_positions=1, max_weight_per_symbol=1.0),
+            start_date="2024-01-15",
+            end_date="2024-02-10",
+        )
+    )
+    _, run1 = execute_validated_task(req, run_id="empty_order_a", runs_dir=tmp_path / "runs1", db_path=db1)
+    _, run2 = execute_validated_task(req, run_id="empty_order_b", runs_dir=tmp_path / "runs2", db_path=db2)
+    eq1 = json.loads((run1 / "equity.json").read_text(encoding="utf-8"))
+    eq2 = json.loads((run2 / "equity.json").read_text(encoding="utf-8"))
+    assert [p["date"] for p in eq1] == [p["date"] for p in eq2]
+    assert [p["equity"] for p in eq1] == [p["equity"] for p in eq2]

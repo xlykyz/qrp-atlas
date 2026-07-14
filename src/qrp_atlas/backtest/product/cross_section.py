@@ -14,8 +14,10 @@ request
 Date-mapping ownership:
 - Cross-sectional strategies already embed next-trading-day execution dates in
   decisions.trade_date. Product timing must NOT apply a second next_open shift.
-- End-of-range signals without an execution date inside [start, end] are
-  filtered here and recorded as NO_EXECUTION_DATE_IN_RANGE skips.
+- Signal calendar is limited to [start_date, end_date].
+- Execution-mapping calendar may include the first trade day after end_date so
+  terminal weekly/monthly signals map to an out-of-range next open and enter
+  standard skipped records instead of disappearing.
 """
 
 from __future__ import annotations
@@ -29,7 +31,9 @@ from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import (
     PortfolioBacktestConfig,
     PortfolioBacktestEngine,
+    PortfolioBacktestResult,
     PortfolioExecutionRule,
+    PortfolioSnapshot,
     StrategyPortfolioBacktestRun,
     strategy_decisions_to_target_weights,
 )
@@ -42,6 +46,7 @@ from qrp_atlas.indicators.cross_section.factors import (
 )
 from qrp_atlas.indicators.cross_section.universe import build_historical_universe
 from qrp_atlas.strategies import StrategyInput, get_strategy
+from qrp_atlas.strategies.models import StrategyRunResult
 from qrp_atlas.strategies.selection.rebalance import (
     REBALANCE_FREQUENCIES,
     build_rebalance_schedule,
@@ -88,7 +93,6 @@ def resolve_cross_section_product_params(
     lookback = int(resolved.get("momentum_lookback") or 20)
 
     if frequency not in REBALANCE_FREQUENCIES or frequency == "explicit":
-        # Product path uses calendar frequencies only; explicit dates remain research-only.
         if frequency == "explicit":
             raise CrossSectionProductError(
                 "rebalance_frequency=explicit is not supported on the product path"
@@ -107,44 +111,28 @@ def resolve_cross_section_product_params(
         raise CrossSectionProductError("cash_buffer must be in [0, 1)")
     if not 0.0 < max_weight <= 1.0:
         raise CrossSectionProductError("max_weight_per_symbol must be in (0, 1]")
-    if top_n * max_weight + 1e-12 < (1.0 - cash_buffer):
-        # Allow residual cash; reject only impossible over-weight plans? Spec:
-        # top_n * max_weight must be able to form a legal target (<= 1 - cash_buffer is OK;
-        # if top_n * max_weight < target, residual cash remains. That is legal.
-        pass
     if lookback < 1:
         raise CrossSectionProductError("momentum lookback must be >= 1")
 
-    # SSOT: strategy capacity/weight fields mirror portfolio config.
     resolved["top_n"] = top_n
     resolved["max_positions"] = max_positions
     resolved["max_weight_per_asset"] = max_weight
     resolved["cash_buffer"] = cash_buffer
     resolved["rebalance_frequency"] = frequency
-    resolved["score_column"] = str(resolved.get("score_column") or DEFAULT_SCORE_COLUMN)
+    resolved["score_column"] = DEFAULT_SCORE_COLUMN
     resolved["momentum_lookback"] = lookback
-    # Keep score column name stable for prepared factor frame.
-    if resolved["score_column"] != DEFAULT_SCORE_COLUMN:
-        # Product always generates the canonical momentum column.
-        resolved["score_column"] = DEFAULT_SCORE_COLUMN
     return resolved
 
 
-def _calendar_from_db(
+def _market_calendar_from_db(
     *,
     start_date: str,
     end_date: str,
     db_path: Any,
-    warmup_calendar_days: int,
 ) -> list[pd.Timestamp]:
-    """Load a broad market calendar using any stock bars available in range."""
+    """Load deterministic market trade dates from DISTINCT trade_date rows."""
 
-    cal_start = (pd.Timestamp(start_date) - pd.Timedelta(days=warmup_calendar_days)).strftime(
-        "%Y-%m-%d"
-    )
     try:
-        # Prefer an unrestricted calendar if caller provides enough data; load_stock_prices
-        # requires tickers. Use a temporary universe probe via DuckDB trading dates if present.
         import duckdb
 
         con = duckdb.connect(str(db_path), read_only=True)
@@ -156,7 +144,7 @@ def _calendar_from_db(
                 WHERE trade_date >= ? AND trade_date <= ?
                 ORDER BY trade_date
                 """,
-                [cal_start, end_date],
+                [start_date, end_date],
             ).fetchall()
         finally:
             con.close()
@@ -168,6 +156,111 @@ def _calendar_from_db(
     return [pd.Timestamp(row[0]).normalize() for row in rows]
 
 
+def _extend_calendar_with_next_open(
+    *,
+    calendar: list[pd.Timestamp],
+    formal_end: pd.Timestamp,
+    db_path: Any,
+) -> list[pd.Timestamp]:
+    """Append the first market day strictly after formal_end when available.
+
+    This extra day is only for signal→execution mapping so terminal weekly /
+    monthly signals can become out-of-range executions and enter skipped.
+    """
+    if not calendar:
+        return calendar
+    try:
+        import duckdb
+
+        con = duckdb.connect(str(db_path), read_only=True)
+        try:
+            row = con.execute(
+                """
+                SELECT MIN(trade_date)
+                FROM daily_market_snapshot
+                WHERE trade_date > ?
+                """,
+                [formal_end.strftime("%Y-%m-%d")],
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        raise CrossSectionProductError(
+            f"failed to load post-end execution calendar day: {exc}"
+        ) from exc
+
+    if not row or row[0] is None:
+        return list(calendar)
+    next_day = pd.Timestamp(row[0]).normalize()
+    if next_day in calendar:
+        return list(calendar)
+    return list(calendar) + [next_day]
+
+
+def build_cash_only_portfolio_result(
+    *,
+    config: PortfolioBacktestConfig,
+    formal_trade_dates: list[pd.Timestamp],
+) -> PortfolioBacktestResult:
+    """Build a deterministic all-cash portfolio result with no assets.
+
+    Used when the historical index universe is empty for every signal date.
+    Dates come from the market trade calendar, not any security price series.
+    """
+    snapshots: list[PortfolioSnapshot] = []
+    cash = float(config.initial_cash)
+    for trade_date in formal_trade_dates:
+        snapshots.append(
+            PortfolioSnapshot(
+                trade_date=_iso(trade_date),
+                cash=cash,
+                market_value=0.0,
+                equity=cash,
+                daily_return=0.0,
+                drawdown=0.0,
+                turnover=0.0,
+                commission=0.0,
+                stamp_tax=0.0,
+                slippage_cost=0.0,
+                cumulative_cost=0.0,
+                positions=(),
+            )
+        )
+    summary = {
+        "initial_cash": float(config.initial_cash),
+        "final_equity": float(config.initial_cash),
+        "total_return": 0.0,
+        "total_return_pct": 0.0,
+        "max_drawdown": 0.0,
+        "max_drawdown_pct": 0.0,
+        "turnover": 0.0,
+        "order_count": 0,
+        "fill_count": 0,
+        "trade_count": 0,
+        "skipped_count": 0,
+        "commission": 0.0,
+        "stamp_tax": 0.0,
+        "slippage_cost": 0.0,
+        "total_cost": 0.0,
+    }
+    equity_curve = tuple(
+        {
+            "date": snapshot.trade_date,
+            "equity": 1.0,
+            "drawdown_pct": 0.0,
+        }
+        for snapshot in snapshots
+    )
+    return PortfolioBacktestResult(
+        config=config,
+        summary=summary,
+        orders=(),
+        fills=(),
+        snapshots=tuple(snapshots),
+        equity_curve=equity_curve,
+    )
+
+
 def _filter_execution_targets(
     target_weights: pd.DataFrame,
     *,
@@ -175,11 +268,7 @@ def _filter_execution_targets(
     end_date: str,
     signal_by_execution: dict[str, str],
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
-    """Keep only execution dates inside the formal request window.
-
-    Strategies already mapped signal→next open. We only drop executions that
-    fall outside [start, end] and record end-of-range skips.
-    """
+    """Keep only execution dates inside the formal request window."""
     if target_weights is None or target_weights.empty:
         empty = pd.DataFrame(
             columns=["trade_date", "asset_id", "target_weight", "priority", "signal_date"]
@@ -235,6 +324,34 @@ def _filter_execution_targets(
     return pd.DataFrame(rows), skipped
 
 
+def _collect_out_of_range_skips(
+    schedule: pd.DataFrame,
+    *,
+    formal_start: pd.Timestamp,
+    formal_end: pd.Timestamp,
+) -> list[dict[str, str]]:
+    skipped: list[dict[str, str]] = []
+    if schedule is None or schedule.empty:
+        return skipped
+    for row in schedule.itertuples(index=False):
+        exec_iso = _iso(row.trade_date)
+        signal_iso = _iso(row.signal_date)
+        exec_ts = pd.Timestamp(exec_iso).normalize()
+        if exec_ts < formal_start or exec_ts > formal_end:
+            skipped.append(
+                {
+                    "asset_id": None,
+                    "signal_date": signal_iso,
+                    "reason": REASON_NO_EXECUTION_DATE_IN_RANGE,
+                    "detail": (
+                        "end-of-range rebalance signal has no execution date "
+                        f"within requested end_date; execution_date={exec_iso}"
+                    ),
+                }
+            )
+    return skipped
+
+
 def run_cross_sectional_momentum_product_backtest(
     request: CreateBacktestTaskRequest,
     *,
@@ -265,45 +382,62 @@ def run_cross_sectional_momentum_product_backtest(
     max_positions = int(resolved["max_positions"])
     max_weight = float(resolved["max_weight_per_asset"])
 
-    # Warmup calendar padding for momentum lookback + schedule context.
     warmup_calendar_days = max(lookback * 3, lookback + 40, 60)
-    calendar = _calendar_from_db(
-        start_date=request.start_date,
-        end_date=request.end_date,
-        db_path=db_path,
-        warmup_calendar_days=warmup_calendar_days,
-    )
+    cal_start = (
+        pd.Timestamp(request.start_date) - pd.Timedelta(days=warmup_calendar_days)
+    ).strftime("%Y-%m-%d")
     formal_start = pd.Timestamp(request.start_date).normalize()
     formal_end = pd.Timestamp(request.end_date).normalize()
-    formal_calendar = [d for d in calendar if formal_start <= d <= formal_end]
-    if not formal_calendar:
-        raise CrossSectionProductError(
-            "no trading days inside the requested date range"
-        )
 
-    # Strategy schedule owns signal→execution mapping once.
+    # Base market calendar through formal end, then optionally one post-end day
+    # for terminal next-open mapping only.
+    base_calendar = _market_calendar_from_db(
+        start_date=cal_start,
+        end_date=request.end_date,
+        db_path=db_path,
+    )
+    mapping_calendar = _extend_calendar_with_next_open(
+        calendar=base_calendar,
+        formal_end=formal_end,
+        db_path=db_path,
+    )
+    formal_calendar = [d for d in base_calendar if formal_start <= d <= formal_end]
+    if not formal_calendar:
+        raise CrossSectionProductError("no trading days inside the requested date range")
+
+    # Signal calendar restricted to formal range; execution mapping may use the
+    # extra post-end day present in mapping_calendar.
     schedule = build_rebalance_schedule(
-        calendar,
+        mapping_calendar,
         frequency=frequency,  # type: ignore[arg-type]
         start_date=request.start_date,
         end_date=request.end_date,
     )
-    signal_dates = [
-        normalize_trade_date(value) for value in schedule["signal_date"].tolist()
-    ] if not schedule.empty else []
-    signal_by_execution = {
-        _iso(row.trade_date): _iso(row.signal_date)
-        for row in schedule.itertuples(index=False)
-    } if not schedule.empty else {}
+    signal_dates = (
+        [normalize_trade_date(value) for value in schedule["signal_date"].tolist()]
+        if not schedule.empty
+        else []
+    )
+    # Guard: never allow signal dates after formal end.
+    signal_dates = [d for d in signal_dates if formal_start <= d <= formal_end]
+    if not schedule.empty:
+        schedule = schedule[
+            schedule["signal_date"].map(normalize_trade_date).isin(set(signal_dates))
+        ].reset_index(drop=True)
 
-    # PIT historical universe only on signal dates (empty day stays empty).
+    signal_by_execution = (
+        {_iso(row.trade_date): _iso(row.signal_date) for row in schedule.itertuples(index=False)}
+        if not schedule.empty
+        else {}
+    )
+
     universe = build_historical_universe(
         signal_dates,
         index_code=index_code,
         source="index",
         db_path=db_path,
     )
-    # Diagnostics for empty-universe signal days.
+
     universe_diagnostics: list[dict[str, Any]] = []
     assets_by_signal: dict[str, set[str]] = {}
     if not universe.empty:
@@ -321,60 +455,37 @@ def run_cross_sectional_momentum_product_backtest(
             }
         )
 
-    union_assets = sorted({asset for assets in assets_by_signal.values() for asset in assets})
-    if not union_assets:
-        # Completely empty historical membership across all signal dates.
-        # Use a placeholder market series only so the portfolio engine can mark
-        # cash over the formal calendar; targets stay empty (all-cash).
-        import duckdb
+    config = PortfolioBacktestConfig(
+        name=request.name or f"{request.strategy_code}@{request.strategy_version}",
+        initial_cash=float(request.position.initial_cash),
+        max_positions=max_positions,
+        max_weight_per_asset=max_weight,
+        cost=CostRule(
+            commission_rate=float(request.cost.commission_rate),
+            stamp_tax_rate=float(request.cost.stamp_tax_rate),
+            slippage_bps=float(request.cost.slippage_bps),
+        ),
+        execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+    )
 
-        con = duckdb.connect(str(db_path), read_only=True)
-        try:
-            row = con.execute(
-                """
-                SELECT ticker
-                FROM daily_market_snapshot
-                WHERE trade_date >= ? AND trade_date <= ?
-                LIMIT 1
-                """,
-                [request.start_date, request.end_date],
-            ).fetchone()
-        finally:
-            con.close()
-        if not row:
-            raise CrossSectionProductError(
-                "empty historical index universe and no market data for formal range"
-            )
-        placeholder = str(row[0])
-        price_df = load_stock_prices(
-            tickers=[placeholder],
-            start_date=request.start_date,
-            end_date=request.end_date,
-            db_path=db_path,
-        )
-        price_df = price_df.copy()
-        price_df["trade_date"] = pd.to_datetime(price_df["trade_date"]).dt.normalize()
-        config = PortfolioBacktestConfig(
-            name=request.name or f"{request.strategy_code}@{request.strategy_version}",
-            initial_cash=float(request.position.initial_cash),
-            max_positions=max_positions,
-            max_weight_per_asset=max_weight,
-            cost=CostRule(
-                commission_rate=float(request.cost.commission_rate),
-                stamp_tax_rate=float(request.cost.stamp_tax_rate),
-                slippage_bps=float(request.cost.slippage_bps),
-            ),
-            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
-        )
+    union_assets = sorted({asset for assets in assets_by_signal.values() for asset in assets})
+    skipped_signals = _collect_out_of_range_skips(
+        schedule,
+        formal_start=formal_start,
+        formal_end=formal_end,
+    )
+
+    if not union_assets:
+        # Full-window empty historical universe → deterministic cash-only result.
+        # No real or placeholder tickers are injected.
         empty_targets = pd.DataFrame(
             columns=["trade_date", "asset_id", "target_weight", "priority", "signal_date"]
         )
-        portfolio_result = PortfolioBacktestEngine().run(
-            price_df.reset_index(drop=True), empty_targets, config
+        portfolio_result = build_cash_only_portfolio_result(
+            config=config,
+            formal_trade_dates=formal_calendar,
         )
         strategy = get_strategy(request.strategy_code, request.strategy_version)
-        from qrp_atlas.strategies.models import StrategyRunResult
-
         strategy_result = StrategyRunResult(
             strategy.definition,
             resolved,
@@ -400,36 +511,21 @@ def run_cross_sectional_momentum_product_backtest(
             "universe_diagnostics": universe_diagnostics,
             "rebalance_schedule_rows": int(len(schedule)),
             "signal_dates": [_iso(v) for v in signal_dates],
+            "empty_historical_universe": True,
+            "cash_only_result": True,
             "warmup": {
                 "momentum_lookback": lookback,
                 "calendar_padding_days": warmup_calendar_days,
                 "formal_decisions_not_before": request.start_date,
             },
+            "market_trade_date_count": len(formal_calendar),
+            "mapping_calendar_extra_days": max(0, len(mapping_calendar) - len(base_calendar)),
         }
-        # End-of-range schedule executions outside window still produce skips.
-        skipped: list[dict[str, str]] = []
-        for row in schedule.itertuples(index=False):
-            exec_iso = _iso(row.trade_date)
-            signal_iso = _iso(row.signal_date)
-            exec_ts = pd.Timestamp(exec_iso).normalize()
-            if exec_ts < formal_start or exec_ts > formal_end:
-                skipped.append(
-                    {
-                        "asset_id": None,
-                        "signal_date": signal_iso,
-                        "reason": REASON_NO_EXECUTION_DATE_IN_RANGE,
-                        "detail": (
-                            "end-of-range rebalance signal has no execution date "
-                            f"within requested end_date; execution_date={exec_iso}"
-                        ),
-                    }
-                )
-        return run, skipped, meta
+        return run, skipped_signals, meta
 
-    # Price load: union of historical members + warmup history.
-    price_start = (pd.Timestamp(request.start_date) - pd.Timedelta(days=warmup_calendar_days)).strftime(
-        "%Y-%m-%d"
-    )
+    price_start = (
+        pd.Timestamp(request.start_date) - pd.Timedelta(days=warmup_calendar_days)
+    ).strftime("%Y-%m-%d")
     try:
         price_df = load_stock_prices(
             tickers=union_assets,
@@ -452,21 +548,21 @@ def run_cross_sectional_momentum_product_backtest(
             "insufficient market data inside the requested date range"
         )
 
-    # Factor universe restricted to signal-date historical membership.
     factor_frame = generate_factor_frame(
         [FactorRequest(code=MOMENTUM_FACTOR_CODE, parameters={"lookback": lookback})],
         universe=universe,
-        prices=price_df.rename(columns={"asset_id": ASSET_ID}) if ASSET_ID not in price_df.columns else price_df,
+        prices=(
+            price_df.rename(columns={"asset_id": ASSET_ID})
+            if ASSET_ID not in price_df.columns
+            else price_df
+        ),
     )
-    # Ensure score column name.
     if DEFAULT_SCORE_COLUMN not in factor_frame.columns:
-        # generate_factor_frame may alias non-default lookback.
         score_cols = [c for c in factor_frame.columns if c not in {TRADE_DATE, ASSET_ID}]
         if not score_cols:
             raise CrossSectionProductError("momentum factor frame has no score column")
         factor_frame = factor_frame.rename(columns={score_cols[0]: DEFAULT_SCORE_COLUMN})
 
-    # Prepared data for strategy: factor rows only (already universe-aligned).
     prepared = factor_frame.copy()
     if "ticker" not in prepared.columns:
         prepared["ticker"] = prepared[ASSET_ID]
@@ -479,9 +575,9 @@ def run_cross_sectional_momentum_product_backtest(
             prepared_data=prepared,
             parameters=resolved,
             initial_positions={},
-            runtime_context={
-                "trading_days": list(calendar),
-            },
+            # Mapping calendar includes optional post-end day so strategy schedule
+            # can form terminal next-open executions once.
+            runtime_context={"trading_days": list(mapping_calendar)},
         )
     )
 
@@ -494,98 +590,22 @@ def run_cross_sectional_momentum_product_backtest(
         emit_unchanged_snapshots=True,
     )
 
-    execution_targets, skipped_signals = _filter_execution_targets(
+    execution_targets, filter_skips = _filter_execution_targets(
         target_weights,
         start_date=request.start_date,
         end_date=request.end_date,
         signal_by_execution=signal_by_execution,
     )
+    # Merge skips deterministically by (signal_date, reason).
+    skip_map: dict[tuple[str | None, str | None], dict[str, str]] = {}
+    for item in skipped_signals + filter_skips:
+        key = (item.get("signal_date"), item.get("reason"))
+        skip_map[key] = item
+    skipped_signals = [
+        skip_map[key]
+        for key in sorted(skip_map.keys(), key=lambda item: (item[0] or "", item[1] or ""))
+    ]
 
-    # Also record end-of-range signals that never received an in-range execution.
-    # Strategy schedule may either:
-    # 1) omit last-day signals when next open does not exist on full calendar, or
-    # 2) map them to an execution date outside the formal request window.
-    present_signal_in_targets = set()
-    if not execution_targets.empty and "signal_date" in execution_targets.columns:
-        present_signal_in_targets = set(execution_targets["signal_date"].astype(str).tolist())
-    skipped_keys = {(item.get("signal_date"), item.get("reason")) for item in skipped_signals}
-
-    # Signals that strategy schedule retained but execution is outside formal range.
-    for row in schedule.itertuples(index=False):
-        exec_iso = _iso(row.trade_date)
-        signal_iso = _iso(row.signal_date)
-        exec_ts = pd.Timestamp(exec_iso).normalize()
-        if exec_ts < formal_start or exec_ts > formal_end:
-            key = (signal_iso, REASON_NO_EXECUTION_DATE_IN_RANGE)
-            if key not in skipped_keys:
-                skipped_signals.append(
-                    {
-                        "asset_id": None,
-                        "signal_date": signal_iso,
-                        "reason": REASON_NO_EXECUTION_DATE_IN_RANGE,
-                        "detail": (
-                            "end-of-range rebalance signal has no execution date "
-                            f"within requested end_date; execution_date={exec_iso}"
-                        ),
-                    }
-                )
-                skipped_keys.add(key)
-
-    # Formal-range candidate signals dropped entirely by schedule (no next open).
-    formal_signal_candidates = [d for d in formal_calendar]
-    if frequency == "daily":
-        candidate_signals = formal_signal_candidates
-    else:
-        # For non-daily frequencies, reconstruct schedule without end clipping of execution.
-        candidate_schedule = build_rebalance_schedule(
-            calendar,
-            frequency=frequency,  # type: ignore[arg-type]
-            start_date=request.start_date,
-            end_date=None,
-        )
-        candidate_signals = [
-            normalize_trade_date(v)
-            for v in candidate_schedule["signal_date"].tolist()
-            if formal_start <= normalize_trade_date(v) <= formal_end
-        ] if not candidate_schedule.empty else []
-
-    scheduled_signals = { _iso(v) for v in signal_dates }
-    for signal in candidate_signals:
-        signal_iso = _iso(signal)
-        if signal_iso in scheduled_signals:
-            # retained by schedule; outside-range handled above
-            if signal_iso in present_signal_in_targets:
-                continue
-            # retained but produced no in-range target rows and not yet skipped
-            # Check if its execution was outside range (already skipped) or missing.
-            continue
-        key = (signal_iso, REASON_NO_EXECUTION_DATE_IN_RANGE)
-        if key not in skipped_keys:
-            skipped_signals.append(
-                {
-                    "asset_id": None,
-                    "signal_date": signal_iso,
-                    "reason": REASON_NO_EXECUTION_DATE_IN_RANGE,
-                    "detail": (
-                        "rebalance signal has no next open execution date "
-                        "within requested end_date"
-                    ),
-                }
-            )
-            skipped_keys.add(key)
-
-    config = PortfolioBacktestConfig(
-        name=request.name or f"{request.strategy_code}@{request.strategy_version}",
-        initial_cash=float(request.position.initial_cash),
-        max_positions=max_positions,
-        max_weight_per_asset=max_weight,
-        cost=CostRule(
-            commission_rate=float(request.cost.commission_rate),
-            stamp_tax_rate=float(request.cost.stamp_tax_rate),
-            slippage_bps=float(request.cost.slippage_bps),
-        ),
-        execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
-    )
     portfolio_result = PortfolioBacktestEngine().run(
         formal_prices.reset_index(drop=True),
         execution_targets,
@@ -614,11 +634,14 @@ def run_cross_sectional_momentum_product_backtest(
         "rebalance_schedule_rows": int(len(schedule)),
         "signal_dates": [_iso(v) for v in signal_dates],
         "union_asset_count": len(union_assets),
+        "empty_historical_universe": False,
+        "cash_only_result": False,
         "warmup": {
             "momentum_lookback": lookback,
             "calendar_padding_days": warmup_calendar_days,
             "formal_decisions_not_before": request.start_date,
         },
         "market_trade_date_count": len(market_trade_dates(formal_prices)),
+        "mapping_calendar_extra_days": max(0, len(mapping_calendar) - len(base_calendar)),
     }
     return run, skipped_signals, meta

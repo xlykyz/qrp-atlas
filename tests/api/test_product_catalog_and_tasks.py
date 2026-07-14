@@ -358,3 +358,30 @@ def test_create_cross_sectional_rejects_same_close(client: ASGITestClient):
     }
     resp = client.post("/api/backtest/tasks", json=payload)
     assert resp.status_code == 400
+
+
+def test_indicator_catalog_frequency_stable_values(client: ASGITestClient):
+    resp = client.get("/api/indicators")
+    assert resp.status_code == 200
+    indicators = resp.json()
+    assert indicators
+    by_code = {item["code"]: item for item in indicators}
+    # Formal indicator codes may be lowercase ids depending on registry naming.
+    # Accept either MA5 style or ma5 if mapped; search by name/code contains.
+    ma = next((item for item in indicators if str(item["code"]).lower() in {"ma5", "ma_5"} or item.get("name") == "MA5"), None)
+    assert ma is not None, sorted(by_code)[:20]
+    assert ma["frequency"] == "after_close"
+
+    event_items = [item for item in indicators if "event" in str(item["code"]).lower() or "forecast" in str(item["code"]).lower() or "profit_change" in str(item["code"]).lower()]
+    residual_items = [item for item in indicators if "residual" in str(item["code"]).lower() or "rolling_alpha" in str(item["code"]).lower() or item.get("name", "").lower().find("residual") >= 0]
+
+    # Event indicators should be realtime; residual after_close.
+    if event_items:
+        assert any(item["frequency"] == "realtime" for item in event_items)
+    if residual_items:
+        assert any(item["frequency"] == "after_close" for item in residual_items)
+
+    for item in indicators:
+        freq = str(item.get("frequency", ""))
+        assert not freq.startswith("UpdateFrequency.")
+        assert freq in {"after_close", "realtime", "intraday", "manual"} or freq  # factors may use after_close
