@@ -10,7 +10,7 @@ use.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import pandas as pd
 
@@ -20,8 +20,10 @@ from qrp_atlas.contracts import (
     CLOSE,
     HIGH,
     LOW,
+    TICKER,
     TRADE_DATE,
     TURNOVER,
+    VOLUME,
 )
 from qrp_atlas.indicators.cross_section.conventions import (
     empty_cross_section_frame,
@@ -35,6 +37,19 @@ from qrp_atlas.indicators.cross_section.factors import (
     _normalize_panel_keys,
     compute_momentum_factor,
 )
+
+
+_INDICATOR_FACTOR_SOURCES: dict[str, tuple[str, str]] = {
+    "trend_slope": ("linear_regression_trend", "normalized_slope"),
+    "trend_r_squared": ("linear_regression_trend", "r_squared"),
+    "price_efficiency": ("kaufman_efficiency_ratio", "value"),
+    "realized_volatility": ("return_volatility", "value"),
+    "downside_volatility": ("downside_volatility", "value"),
+    "rolling_max_drawdown": ("rolling_max_drawdown", "value"),
+    "relative_volume": ("relative_volume", "value"),
+    "amihud_illiquidity": ("amihud_illiquidity", "value"),
+    "price_volume_correlation": ("price_volume_correlation", "value"),
+}
 
 
 def _validate_positive_integer(value: int, *, label: str) -> None:
@@ -109,6 +124,219 @@ def _compute_grouped_factor(
     )
     out[output_column] = _as_finite_series(out[output_column])
     return sort_cross_section_frame(out)
+
+
+def _compute_indicator_backed_market_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    factor_code: str,
+    parameters: Mapping[str, object],
+    output_column: str,
+) -> pd.DataFrame:
+    """Calculate a factor through the existing parameterized indicator primitive.
+
+    ``_INDICATOR_FACTOR_SOURCES`` only maps public factor identity to an existing
+    calculation code/output. Formula implementations remain single-sourced in
+    ``qrp_atlas.indicators.stock`` and are resolved through the parameterized
+    indicator registry.
+    """
+    from qrp_atlas.indicators.parameterized import (
+        IndicatorRequest,
+        IndicatorRequestError,
+        get_calculation_definition,
+        resolve_indicator_requests,
+    )
+
+    try:
+        indicator_code, indicator_output = _INDICATOR_FACTOR_SOURCES[factor_code]
+    except KeyError:
+        raise FactorRequestError(
+            f"factor {factor_code!r} is not backed by a classic indicator"
+        ) from None
+
+    try:
+        resolved = resolve_indicator_requests(
+            [IndicatorRequest(indicator_code, dict(parameters))]
+        )[0]
+    except IndicatorRequestError as exc:
+        raise FactorRequestError(str(exc)) from exc
+    definition = get_calculation_definition(indicator_code)
+
+    def _calculate(group: pd.DataFrame) -> pd.Series:
+        indicator_input = group.copy()
+        indicator_input[TICKER] = indicator_input[ASSET_ID]
+        calculated = definition.calculator(indicator_input, resolved.parameters)
+        return calculated[indicator_output]
+
+    return _compute_grouped_factor(
+        prices,
+        universe=universe,
+        required_columns=definition.required_fields,
+        output_column=output_column,
+        calculator=_calculate,
+    )
+
+
+def compute_trend_slope_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "trend_slope",
+) -> pd.DataFrame:
+    """Scale-free OLS price slope from ``linear_regression_trend``."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="trend_slope",
+        parameters={"window": window},
+        output_column=output_column,
+    )
+
+
+def compute_trend_r_squared_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "trend_r_squared",
+) -> pd.DataFrame:
+    """Rolling OLS coefficient of determination from the trend indicator."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="trend_r_squared",
+        parameters={"window": window},
+        output_column=output_column,
+    )
+
+
+def compute_price_efficiency_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "price_efficiency",
+) -> pd.DataFrame:
+    """Kaufman efficiency ratio from the shared indicator implementation."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="price_efficiency",
+        parameters={"window": window},
+        output_column=output_column,
+    )
+
+
+def compute_realized_volatility_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    annualization: float = 252.0,
+    output_column: str = "realized_volatility",
+) -> pd.DataFrame:
+    """Annualized population volatility from shared simple-return logic."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="realized_volatility",
+        parameters={"window": window, "annualization": annualization},
+        output_column=output_column,
+    )
+
+
+def compute_downside_volatility_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    annualization: float = 252.0,
+    target: float = 0.0,
+    output_column: str = "downside_volatility",
+) -> pd.DataFrame:
+    """Annualized downside RMS from the shared indicator implementation."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="downside_volatility",
+        parameters={
+            "window": window,
+            "annualization": annualization,
+            "target": target,
+        },
+        output_column=output_column,
+    )
+
+
+def compute_rolling_max_drawdown_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "rolling_max_drawdown",
+) -> pd.DataFrame:
+    """Worst inclusive-window drawdown from the shared indicator primitive."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="rolling_max_drawdown",
+        parameters={"window": window},
+        output_column=output_column,
+    )
+
+
+def compute_relative_volume_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "relative_volume",
+) -> pd.DataFrame:
+    """Current volume divided by the prior-window mean volume."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="relative_volume",
+        parameters={"window": window},
+        output_column=output_column,
+    )
+
+
+def compute_amihud_illiquidity_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    scale: float = 1.0,
+    output_column: str = "amihud_illiquidity",
+) -> pd.DataFrame:
+    """Rolling Amihud ratio from the shared liquidity indicator."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="amihud_illiquidity",
+        parameters={"window": window, "scale": scale},
+        output_column=output_column,
+    )
+
+
+def compute_price_volume_correlation_factor(
+    prices: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    window: int = 20,
+    output_column: str = "price_volume_correlation",
+) -> pd.DataFrame:
+    """Rolling return/volume-change correlation from the shared indicator."""
+    return _compute_indicator_backed_market_factor(
+        prices,
+        universe=universe,
+        factor_code="price_volume_correlation",
+        parameters={"window": window},
+        output_column=output_column,
+    )
 
 
 def compute_intermediate_momentum_factor(
@@ -338,11 +566,20 @@ def compute_average_traded_amount_factor(
 
 
 __all__ = [
+    "compute_amihud_illiquidity_factor",
     "compute_average_traded_amount_factor",
     "compute_average_turnover_factor",
     "compute_distance_to_high_factor",
+    "compute_downside_volatility_factor",
     "compute_high_low_range_volatility_factor",
     "compute_intermediate_momentum_factor",
+    "compute_price_efficiency_factor",
+    "compute_price_volume_correlation_factor",
+    "compute_realized_volatility_factor",
+    "compute_relative_volume_factor",
+    "compute_rolling_max_drawdown_factor",
     "compute_short_term_reversal_factor",
+    "compute_trend_r_squared_factor",
+    "compute_trend_slope_factor",
     "compute_turnover_change_factor",
 ]
