@@ -15,11 +15,16 @@ SOURCE_BUSINESS = "tushare.earnings_forecast"
 ENDPOINT_FORECAST = "forecast"
 ENDPOINT_FORECAST_VIP = "forecast_vip"
 
-REQUIRED_RAW_FIELDS = (
+# Core identity fields: non-empty responses must include these columns and values.
+CORE_RAW_FIELDS = (
     "ts_code",
     "ann_date",
     "end_date",
     "type",
+)
+
+# Optional structured / text fields may be filled with None when omitted by API.
+OPTIONAL_RAW_FIELDS = (
     "p_change_min",
     "p_change_max",
     "net_profit_min",
@@ -29,6 +34,8 @@ REQUIRED_RAW_FIELDS = (
     "summary",
     "change_reason",
 )
+
+REQUIRED_RAW_FIELDS = CORE_RAW_FIELDS + OPTIONAL_RAW_FIELDS
 
 
 class ForecastPermissionError(PermissionError):
@@ -97,14 +104,23 @@ def _call_with_retry(
 
 
 def _ensure_raw_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep all required raw fields present even when the API omits empty columns."""
+    """Validate core columns and fill only optional omitted columns with None.
+
+    Non-empty responses missing core columns fail closed. Empty responses keep a
+    stable column layout for downstream empty handling.
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=list(REQUIRED_RAW_FIELDS))
     out = df.copy()
-    for col in REQUIRED_RAW_FIELDS:
+    missing_core = [c for c in CORE_RAW_FIELDS if c not in out.columns]
+    if missing_core:
+        raise ForecastApiError(
+            f"non-empty forecast response missing core columns: {missing_core}; "
+            f"present={list(out.columns)}"
+        )
+    for col in OPTIONAL_RAW_FIELDS:
         if col not in out.columns:
             out[col] = None
-    # Preserve any extra diagnostic columns but ensure required ones exist.
     return out
 
 

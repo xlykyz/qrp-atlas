@@ -464,13 +464,30 @@ def query_earnings_forecast_as_of(
 ) -> pd.DataFrame:
     """Point-in-time query for earnings_forecast_event.
 
-    Rules:
+    Market-time rule (formal disclosure availability):
     - Only rows with ``available_trade_date <= as_of_date`` are eligible.
-    - Default: latest available revision per ``source_record_id``.
-    - ``include_all_disclosures=True`` keeps every formal disclosure
-      (still latest revision per source_record_id unless revisions requested).
-    - ``include_all_revisions=True`` returns every eligible technical revision.
-    - Never returns future announcements or future revisions.
+    - ``available_trade_date`` is derived from announcement date and does **not**
+      encode technical-revision knowledge time.
+
+    Revision / disclosure selection:
+    - Default: one row per ``event_series_id`` — the latest formal disclosure
+      available as of the date, using its current canonical technical revision.
+    - ``include_all_disclosures=True``: every formal disclosure
+      (``source_record_id``) that is market-available, each with its current
+      canonical technical revision.
+    - ``include_all_revisions=True``: every market-available technical revision
+      for every formal disclosure. This is an audit surface, not research
+      knowledge-as-of history.
+
+    Important boundary:
+    - Source does not provide a reliable revision publication timestamp.
+    - Therefore this API does **not** claim that later technical revisions are
+      invisible to earlier research ``as_of`` dates.
+    - Do **not** filter by ``ingested_at <= as_of_date``; backfilled historical
+      data would otherwise disappear.
+    - Canonical revision means the current best version stored for that
+      disclosure under append-only retention (latest by available ordering /
+      ingested_at / revision_id via ``select_latest_available_records``).
     """
     as_of = _require_as_of_date(as_of_date)
 
@@ -522,9 +539,10 @@ def query_earnings_forecast_as_of(
         return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
 
     if include_all_revisions:
+        # Audit mode: keep every market-available technical revision.
         selected = raw.reset_index(drop=True)
     else:
-        # Latest available revision per formal disclosure (source_record_id).
+        # Canonical technical revision per formal disclosure.
         selected = select_latest_available_records(
             raw,
             as_of_date=as_of,
@@ -534,14 +552,17 @@ def query_earnings_forecast_as_of(
             ingested_at_col="ingested_at" if "ingested_at" in raw.columns else None,
             revision_col="revision_id" if "revision_id" in raw.columns else None,
         )
-
-    # include_all_disclosures is the default semantics once per source_record_id
-    # latest revision is selected: every formal disclosure remains visible.
-    # The flag is retained for explicit 05-B callers; when False we still keep
-    # all disclosures because event research needs the full disclosure chain.
-    # Historical "only latest disclosure per series" is intentionally not the
-    # default and can be derived by callers from event_series_id if needed.
-    _ = include_all_disclosures
+        if not include_all_disclosures:
+            # Research default: latest formal disclosure per event series.
+            selected = select_latest_available_records(
+                selected,
+                as_of_date=as_of,
+                entity_keys=["event_series_id"],
+                available_date_col="available_trade_date",
+                published_at_col="published_at" if "published_at" in selected.columns else None,
+                ingested_at_col="ingested_at" if "ingested_at" in selected.columns else None,
+                revision_col="revision_id" if "revision_id" in selected.columns else None,
+            )
 
     sort_cols = [
         c

@@ -376,25 +376,36 @@ def test_as_of_no_lookahead(tmp_db: Path, resolver: NextTradeDateResolver):
     # available trade date of first disclosure
     day1 = query_earnings_forecast_as_of(as_of_date="2024-03-18", db_path=tmp_db)
     assert len(day1) == 1
-    assert day1.iloc[0]["announcement_date"] == date(2024, 3, 15) or str(day1.iloc[0]["announcement_date"]).startswith("2024-03-15")
-    # second disclosure available after its next trade date (2024-03-25 -> 2024-03-25 is open? yes in calendar)
-    # next after 2024-03-25 is? 25 is open, next is strictly later: 2024-04-01? Wait open dates have 3/25 then 4/1.
+    assert str(day1.iloc[0]["announcement_date"]).startswith("2024-03-15")
+    # default returns only latest formal disclosure per event_series
     later = query_earnings_forecast_as_of(as_of_date="2024-04-01", db_path=tmp_db)
-    assert len(later) == 2
+    assert len(later) == 1
+    assert str(later.iloc[0]["announcement_date"]).startswith("2024-03-25")
+    # all disclosures available when requested
+    all_disc = query_earnings_forecast_as_of(
+        as_of_date="2024-04-01",
+        include_all_disclosures=True,
+        db_path=tmp_db,
+    )
+    assert len(all_disc) == 2
 
 
-def test_future_revision_does_not_pollute(tmp_db: Path, resolver: NextTradeDateResolver):
+def test_canonical_revision_semantics(tmp_db: Path, resolver: NextTradeDateResolver):
+    """Technical revisions use current canonical semantics, not knowledge-as-of.
+
+    available_trade_date gates formal disclosure market availability only.
+    Later-ingested technical revisions for the same disclosure are the default
+    canonical answer for historical as_of queries once the disclosure is
+    market-available. include_all_revisions is an audit surface.
+    """
     base = _raw_row(summary="old")
     c1 = clean_earnings_forecast(pd.DataFrame([base]), trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
     load_earnings_forecast(c1, db_path=tmp_db, init=True)
-    # technical revision with same ann_date / available_trade_date
     changed = dict(base)
     changed["summary"] = "new"
     c2 = clean_earnings_forecast(pd.DataFrame([changed]), trade_date_resolver=resolver, ingested_at=datetime(2024, 6, 1))
-    # force older available? same available. To simulate future revision pollution, we need revision only
-    # visible after later ingest isn't the model — availability is by available_trade_date.
-    # Construct revision with later announcement instead.
     load_earnings_forecast(c2, db_path=tmp_db, init=False)
+
     all_rev = query_earnings_forecast_as_of(
         as_of_date="2024-03-18",
         include_all_revisions=True,
@@ -403,7 +414,6 @@ def test_future_revision_does_not_pollute(tmp_db: Path, resolver: NextTradeDateR
     assert len(all_rev) == 2
     latest = query_earnings_forecast_as_of(as_of_date="2024-03-18", db_path=tmp_db)
     assert len(latest) == 1
-    # default latest should prefer higher ingested_at/revision via select_latest_available_records
     assert "new" in str(latest.iloc[0]["summary"])
 
 
@@ -453,7 +463,7 @@ def test_raw_parquet_corrupt_quarantine(tmp_path: Path):
     # quarantine helper renames; ensure raise happened is enough for contract
 
 
-def test_migration_idempotent(tmp_path: Path):
+def test_migration_idempotent_and_no_backup_when_present(tmp_path: Path):
     import importlib.util
 
     script = Path(__file__).resolve().parents[2] / "scripts" / "migrate_earnings_forecast_event.py"
@@ -465,11 +475,22 @@ def test_migration_idempotent(tmp_path: Path):
     db = tmp_path / "m.duckdb"
     con = duckdb.connect(str(db))
     con.close()
-    r1 = mod.migrate(db, do_backup=False)
-    r2 = mod.migrate(db, do_backup=False)
+    r1 = mod.migrate(db, do_backup=True)
     assert r1["schema_ok"] is True
+    assert r1["created"] is True
+    # second run: already compatible => no backup copy
+    before_backups = list(tmp_path.glob("m.backup_earnings_forecast_*"))
+    r2 = mod.migrate(db, do_backup=True)
+    after_backups = list(tmp_path.glob("m.backup_earnings_forecast_*"))
+    assert r2["action"] == "noop"
     assert r2["already_present"] is True
     assert r2["schema_ok"] is True
+    assert r2["backup"] is None
+    assert len(after_backups) == len(before_backups)
+    # full schema fields present in report
+    assert r2["diff"]["compatible"] is True
+    assert r2["primary_key"] == ["revision_id"]
+    assert "ticker" in r2["column_names"]
 
 
 def test_fetch_modes_and_empty():
@@ -500,3 +521,117 @@ def test_to_event_frame_empty():
     frame = to_earnings_forecast_event_frame(pd.DataFrame())
     assert list(frame.columns)
     assert frame.empty
+
+def test_include_all_disclosures_and_revisions(tmp_db: Path, resolver: NextTradeDateResolver):
+    raw = pd.DataFrame(
+        [
+            _raw_row(ann_date="20240315", summary="d1v1"),
+            _raw_row(ann_date="20240325", summary="d2v1"),
+        ]
+    )
+    cleaned = clean_earnings_forecast(raw, trade_date_resolver=resolver, ingested_at=datetime(2024, 1, 1))
+    load_earnings_forecast(cleaned, db_path=tmp_db, init=True)
+    # technical revision on second disclosure
+    rev = _raw_row(ann_date="20240325", summary="d2v2")
+    c2 = clean_earnings_forecast(pd.DataFrame([rev]), trade_date_resolver=resolver, ingested_at=datetime(2024, 6, 1))
+    load_earnings_forecast(c2, db_path=tmp_db, init=False)
+
+    default = query_earnings_forecast_as_of(as_of_date="2024-04-01", db_path=tmp_db)
+    assert len(default) == 1
+    assert "d2v2" in str(default.iloc[0]["summary"])
+
+    all_disc = query_earnings_forecast_as_of(
+        as_of_date="2024-04-01",
+        include_all_disclosures=True,
+        db_path=tmp_db,
+    )
+    assert len(all_disc) == 2
+    summaries = set(all_disc["summary"].astype(str))
+    assert "d1v1" in summaries
+    assert "d2v2" in summaries
+    assert "d2v1" not in summaries  # canonical only per disclosure
+
+    all_rev = query_earnings_forecast_as_of(
+        as_of_date="2024-04-01",
+        include_all_revisions=True,
+        db_path=tmp_db,
+    )
+    assert len(all_rev) == 3
+
+
+def test_missing_core_columns_fail():
+    from qrp_atlas.pipeline.earnings_forecast.fetch import ForecastApiError, _ensure_raw_columns
+
+    df = pd.DataFrame([{"ts_code": "000001.SZ", "ann_date": "20240315"}])  # missing end_date/type
+    with pytest.raises(ForecastApiError, match="missing core columns"):
+        _ensure_raw_columns(df)
+
+
+def test_core_field_null_fails(resolver: NextTradeDateResolver):
+    raw = pd.DataFrame([_raw_row(ts_code=None)])
+    with pytest.raises(EarningsForecastDataQualityError, match="core field"):
+        clean_earnings_forecast(raw, trade_date_resolver=resolver)
+
+
+def test_pipeline_auto_raw_and_manifest(tmp_path: Path, tmp_db: Path, resolver: NextTradeDateResolver, monkeypatch):
+    from qrp_atlas.pipeline.earnings_forecast import run as erun
+
+    monkeypatch.setattr(
+        erun,
+        "default_artifact_dirs",
+        lambda run_tag="earnings_forecast": {
+            "raw_dir": tmp_path / "raw",
+            "cleaned_dir": tmp_path / "cleaned",
+            "state_dir": tmp_path / "state",
+        },
+    )
+    client = FakePro()
+    result = run_earnings_forecast(
+        mode="period",
+        periods=["20231231"],
+        tickers=["000001.SZ"],
+        client=client,
+        db_path=str(tmp_db),
+        resolver=resolver,
+        run_tag="test_run",
+        state_dir=tmp_path / "state",
+    )
+    assert result["ok"] is True
+    assert result["batch_id"]
+    assert result["raw_path"] and Path(result["raw_path"]).exists()
+    assert result["cleaned_path"] and Path(result["cleaned_path"]).exists()
+    assert result["manifest_path"] and Path(result["manifest_path"]).exists()
+    manifest_text = Path(result["manifest_path"]).read_text(encoding="utf-8")
+    assert "forecast_vip" in manifest_text or "endpoint" in manifest_text
+    assert result["fetch_status"] in {"success", "empty"}
+    assert result["clean_status"] in {"success", "empty"}
+    assert result["load_status"] in {"success", "empty"}
+
+
+def test_pipeline_failure_written_to_manifest(tmp_path: Path, resolver: NextTradeDateResolver, monkeypatch):
+    from qrp_atlas.pipeline.earnings_forecast import run as erun
+
+    monkeypatch.setattr(
+        erun,
+        "default_artifact_dirs",
+        lambda run_tag="earnings_forecast": {
+            "raw_dir": tmp_path / "raw",
+            "cleaned_dir": tmp_path / "cleaned",
+            "state_dir": tmp_path / "state",
+        },
+    )
+    client = FakePro(permission=True)
+    result = run_earnings_forecast(
+        mode="period",
+        periods=["20231231"],
+        client=client,
+        resolver=resolver,
+        load=False,
+        state_dir=tmp_path / "state",
+    )
+    assert result["ok"] is False
+    assert result["error_type"] == "permission"
+    assert result["fetch_status"] == "failed"
+    assert result["manifest_path"]
+    text = Path(result["manifest_path"]).read_text(encoding="utf-8")
+    assert "failed" in text

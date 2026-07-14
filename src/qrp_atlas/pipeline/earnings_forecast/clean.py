@@ -162,17 +162,40 @@ def clean_earnings_forecast(
 
     out = apply_mapping(df.copy(), MAPPING_SOURCE)
 
+    # Core mapped columns must exist for non-empty batches.
+    core_mapped = [TICKER, REPORT_PERIOD, ANNOUNCEMENT_DATE, FORECAST_TYPE]
+    missing_core = [c for c in core_mapped if c not in out.columns]
+    if missing_core:
+        raise EarningsForecastDataQualityError(
+            f"mapped frame missing core columns: {missing_core}; present={list(out.columns)}"
+        )
+
     for col in [REPORT_PERIOD, ANNOUNCEMENT_DATE, FIRST_ANNOUNCEMENT_DATE]:
         if col in out.columns:
             out[col] = normalize_date_series(out[col])
         else:
             out[col] = None
 
-    out = out[out[TICKER].notna() & out[REPORT_PERIOD].notna() & out[ANNOUNCEMENT_DATE].notna()].copy()
-    if out.empty:
-        return out
+    out[TICKER] = out[TICKER].map(lambda x: None if _is_missing(x) else str(x).strip())
+    out[FORECAST_TYPE] = out[FORECAST_TYPE].map(_normalize_text) if FORECAST_TYPE in out.columns else None
 
-    out[TICKER] = out[TICKER].map(lambda x: str(x).strip())
+    invalid_mask = (
+        out[TICKER].isna()
+        | out[REPORT_PERIOD].isna()
+        | out[ANNOUNCEMENT_DATE].isna()
+        | out[FORECAST_TYPE].isna()
+    )
+    invalid_rows = int(invalid_mask.sum())
+    if invalid_rows:
+        sample = out.loc[
+            invalid_mask,
+            [c for c in [TICKER, REPORT_PERIOD, ANNOUNCEMENT_DATE, FORECAST_TYPE] if c in out.columns],
+        ].head(5)
+        raise EarningsForecastDataQualityError(
+            f"core field null/empty in {invalid_rows} rows; sample={sample.to_dict('records')}"
+        )
+
+    out.attrs["invalid_rows"] = 0
     out[EVENT_TYPE] = EVENT_TYPE_EARNINGS_FORECAST
     out[TIME_PRECISION] = TIME_PRECISION_DATE
     out[PUBLISHED_AT] = None
@@ -180,16 +203,7 @@ def clean_earnings_forecast(
     now = ingested_at or datetime.now(timezone.utc).replace(tzinfo=None)
     out[INGESTED_AT] = now
 
-    # Structured fields
-    if FORECAST_TYPE not in out.columns:
-        out[FORECAST_TYPE] = None
-    out[FORECAST_TYPE] = out[FORECAST_TYPE].map(_normalize_text)
-    if out[FORECAST_TYPE].isna().any():
-        bad = out[out[FORECAST_TYPE].isna()][[TICKER, REPORT_PERIOD, ANNOUNCEMENT_DATE]]
-        raise EarningsForecastDataQualityError(
-            f"forecast_type missing/illegal for {len(bad)} rows; sample={bad.head(3).to_dict('records')}"
-        )
-
+    # Structured optional numeric/text fields
     for col in (
         PROFIT_CHANGE_MIN,
         PROFIT_CHANGE_MAX,
