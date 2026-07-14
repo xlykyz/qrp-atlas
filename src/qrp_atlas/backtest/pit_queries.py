@@ -437,6 +437,59 @@ EARNINGS_FORECAST_EVENT_FRAME_COLUMNS = (
 )
 
 
+
+def _select_latest_disclosure_per_series(records: pd.DataFrame) -> pd.DataFrame:
+    """Keep the latest formal disclosure per event_series_id.
+
+    Ordering (ascending; last wins):
+    1. available_trade_date
+    2. announcement_date  (formal disclosure recency; required tie-break when
+       weekend/holiday announcements share the same next open trade date)
+    3. ingested_at
+    4. revision_id
+    5. stable source row order
+    """
+    if records is None or records.empty:
+        return records.copy().reset_index(drop=True) if records is not None else pd.DataFrame()
+    if "event_series_id" not in records.columns:
+        raise ValueError("records missing required column: event_series_id")
+
+    work = records.copy()
+    order_col = "__ef_series_order"
+    work[order_col] = range(len(work))
+
+    sort_cols: list[str] = ["event_series_id"]
+    temp_cols = [order_col]
+
+    avail_col = "__ef_available_trade_date"
+    work[avail_col] = pd.to_datetime(work["available_trade_date"], errors="coerce")
+    sort_cols.append(avail_col)
+    temp_cols.append(avail_col)
+
+    ann_col = "__ef_announcement_date"
+    if "announcement_date" not in work.columns:
+        raise ValueError("records missing required column: announcement_date")
+    work[ann_col] = pd.to_datetime(work["announcement_date"], errors="coerce")
+    sort_cols.append(ann_col)
+    temp_cols.append(ann_col)
+
+    if "ingested_at" in work.columns:
+        ing_col = "__ef_ingested_at"
+        work[ing_col] = pd.to_datetime(work["ingested_at"], errors="coerce")
+        sort_cols.append(ing_col)
+        temp_cols.append(ing_col)
+
+    if "revision_id" in work.columns:
+        rev_col = "__ef_revision_id"
+        work[rev_col] = work["revision_id"].map(lambda v: "" if pd.isna(v) else str(v))
+        sort_cols.append(rev_col)
+        temp_cols.append(rev_col)
+
+    ordered = work.sort_values([*sort_cols, order_col], kind="mergesort", na_position="first")
+    selected = ordered.drop_duplicates(subset=["event_series_id"], keep="last")
+    return selected.drop(columns=temp_cols).reset_index(drop=True)
+
+
 def to_earnings_forecast_event_frame(records: pd.DataFrame) -> pd.DataFrame:
     """Project earnings forecast rows to the stable 05-B event frame columns."""
     if records is None or records.empty:
@@ -471,7 +524,8 @@ def query_earnings_forecast_as_of(
 
     Revision / disclosure selection:
     - Default: one row per ``event_series_id`` — the latest formal disclosure
-      available as of the date, using its current canonical technical revision.
+      available as of the date (by ``announcement_date``, after market
+      availability filtering), using its current canonical technical revision.
     - ``include_all_disclosures=True``: every formal disclosure
       (``source_record_id``) that is market-available, each with its current
       canonical technical revision.
@@ -554,15 +608,11 @@ def query_earnings_forecast_as_of(
         )
         if not include_all_disclosures:
             # Research default: latest formal disclosure per event series.
-            selected = select_latest_available_records(
-                selected,
-                as_of_date=as_of,
-                entity_keys=["event_series_id"],
-                available_date_col="available_trade_date",
-                published_at_col="published_at" if "published_at" in selected.columns else None,
-                ingested_at_col="ingested_at" if "ingested_at" in selected.columns else None,
-                revision_col="revision_id" if "revision_id" in selected.columns else None,
-            )
+            # Explicit announcement_date ordering is required: multiple weekend /
+            # holiday announcements can share the same available_trade_date, and
+            # published_at is always NULL for this dataset. Without this key,
+            # revision_id hash could incorrectly pick the earlier announcement.
+            selected = _select_latest_disclosure_per_series(selected)
 
     sort_cols = [
         c

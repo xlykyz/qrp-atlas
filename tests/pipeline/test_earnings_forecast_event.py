@@ -635,3 +635,53 @@ def test_pipeline_failure_written_to_manifest(tmp_path: Path, resolver: NextTrad
     assert result["manifest_path"]
     text = Path(result["manifest_path"]).read_text(encoding="utf-8")
     assert "failed" in text
+
+def test_same_available_date_prefers_later_announcement(tmp_db: Path, resolver: NextTradeDateResolver):
+    """Sat + Sun announcements both map to Monday; default keeps Sunday disclosure.
+
+    This guards series-level selection: when available_trade_date ties,
+    announcement_date must decide "latest formal disclosure", not revision hash.
+    """
+    # Use open calendar already in fixture: 2024-03-15 Fri, 18 Mon ...
+    # Craft weekend announcements: 2024-03-16 Sat, 2024-03-17 Sun -> both available 2024-03-18.
+    raw = pd.DataFrame(
+        [
+            _raw_row(
+                ann_date="20240316",
+                first_ann_date="20240316",
+                summary="saturday",
+                p_change_min=10,
+                p_change_max=12,
+            ),
+            _raw_row(
+                ann_date="20240317",
+                first_ann_date="20240316",
+                summary="sunday",
+                p_change_min=20,
+                p_change_max=22,
+            ),
+        ]
+    )
+    cleaned = clean_earnings_forecast(
+        raw,
+        trade_date_resolver=resolver,
+        ingested_at=datetime(2024, 3, 18, 12, 0, 0),
+    )
+    assert len(cleaned) == 2
+    assert cleaned["available_trade_date"].nunique() == 1
+    assert pd.Timestamp(cleaned["available_trade_date"].iloc[0]).date() == date(2024, 3, 18)
+    load_earnings_forecast(cleaned, db_path=tmp_db, init=True)
+
+    default = query_earnings_forecast_as_of(as_of_date="2024-03-18", db_path=tmp_db)
+    assert len(default) == 1
+    assert str(default.iloc[0]["announcement_date"]).startswith("2024-03-17")
+    assert "sunday" in str(default.iloc[0]["summary"])
+
+    all_disc = query_earnings_forecast_as_of(
+        as_of_date="2024-03-18",
+        include_all_disclosures=True,
+        db_path=tmp_db,
+    )
+    assert len(all_disc) == 2
+    anns = sorted(str(x)[:10] for x in all_disc["announcement_date"])
+    assert anns == ["2024-03-16", "2024-03-17"]
