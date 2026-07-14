@@ -1,5 +1,9 @@
 import type { BacktestWorkflowFormState } from './form-model';
-import { isCrossSectionalStrategy, parseTickers } from './form-model';
+import {
+  isCrossSectionalStrategy,
+  isEventStrategy,
+  parseTickers,
+} from './form-model';
 import type { ParameterSchema, StrategyParamValues } from '@/types/strategy';
 
 export type FieldErrors = Record<string, string>;
@@ -57,6 +61,7 @@ export function validateWorkflowForm(
 ): FieldErrors {
   const errors: FieldErrors = {};
   const crossSectional = isCrossSectionalStrategy(form.strategyCode);
+  const eventStrategy = isEventStrategy(form.strategyCode);
 
   if (!form.strategyCode) {
     errors.strategyCode = '请选择策略';
@@ -77,6 +82,14 @@ export function validateWorkflowForm(
     const topN = form.strategyParams.top_n;
     if (typeof topN === 'number' && topN > form.maxPositions) {
       errors['param.top_n'] = `Top N 不能大于最大持仓数（${form.maxPositions}）`;
+    }
+  } else if (eventStrategy) {
+    const tickers = parseTickers(form.tickersText);
+    if (tickers.length === 0) {
+      errors.tickersText = '请至少输入一只股票代码（事件过滤股票池）';
+    }
+    if (form.entryTiming !== 'next_open') {
+      errors.entryTiming = '事件策略仅支持 available_trade_date 开盘入场（next_open 语义）';
     }
   } else {
     const universeMode =

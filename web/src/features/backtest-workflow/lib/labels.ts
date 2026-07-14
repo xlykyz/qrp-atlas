@@ -49,6 +49,8 @@ export function strategyFamilyLabel(family: StrategyFamily): string {
       return '突破';
     case 'cross_sectional':
       return '横截面';
+    case 'event_driven':
+      return '事件驱动';
     default:
       return '其他';
   }
