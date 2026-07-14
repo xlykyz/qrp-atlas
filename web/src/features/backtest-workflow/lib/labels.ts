@@ -47,6 +47,8 @@ export function strategyFamilyLabel(family: StrategyFamily): string {
       return '趋势';
     case 'breakout':
       return '突破';
+    case 'cross_sectional':
+      return '横截面';
     default:
       return '其他';
   }

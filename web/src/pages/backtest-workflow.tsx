@@ -16,6 +16,7 @@ import {
   createDefaultFormState,
   defaultParamsFromSchema,
   formStateToCreateRequest,
+  isCrossSectionalStrategy,
   type BacktestWorkflowFormState,
 } from '@/features/backtest-workflow/lib/form-model';
 import { validateWorkflowForm } from '@/features/backtest-workflow/lib/validate';
@@ -84,11 +85,15 @@ export default function BacktestWorkflowPage() {
   }
 
   function handleSelectStrategy(strategy: StrategyCatalogItem) {
+    const crossSectional = isCrossSectionalStrategy(strategy.code);
     setForm((prev) => ({
       ...prev,
       strategyCode: strategy.code,
       strategyVersion: strategy.version,
       strategyParams: defaultParamsFromSchema(strategy.parameter_schema),
+      universeMode: crossSectional ? 'index_components' : prev.universeMode === 'index_components' ? 'tickers' : prev.universeMode,
+      entryTiming: crossSectional ? 'next_open' : prev.entryTiming,
+      indexCode: prev.indexCode || '000300.SH',
     }));
     setFieldErrors((prev) => {
       const next = { ...prev };

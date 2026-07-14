@@ -25,6 +25,7 @@ export type StrategyFamily =
   | 'mean_reversion'
   | 'trend'
   | 'breakout'
+  | 'cross_sectional'
   | 'other';
 
 export interface StrategyCatalogItem {
@@ -39,6 +40,12 @@ export interface StrategyCatalogItem {
   required_fields: string[];
   required_indicators: string[];
   parameter_schema: ParameterSchema;
+  /** Product capability metadata from backend catalog. */
+  product_supported?: boolean;
+  requires_historical_universe?: boolean;
+  supported_universe_modes?: Array<'tickers' | 'preset' | 'index_components'>;
+  supported_entry_timings?: Array<'next_open' | 'same_close' | 'next_close'>;
+  requires_portfolio_config?: boolean;
 }
 
 export type StrategyParamValues = Record<string, number | string | boolean | null>;

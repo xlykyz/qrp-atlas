@@ -10,7 +10,8 @@ export type BacktestTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed';
 
 export type EntryTiming = 'next_open' | 'same_close' | 'next_close';
 
-export type UniverseMode = 'preset' | 'tickers';
+/** Product universe modes. `index_components` is PIT historical membership. */
+export type UniverseMode = 'preset' | 'tickers' | 'index_components';
 
 export interface BacktestCostConfig {
   commission_rate: number;
@@ -40,6 +41,8 @@ export interface CreateBacktestTaskRequest {
   strategy_params: StrategyParamValues;
   universe_mode: UniverseMode;
   universe_preset?: string;
+  /** Required when universe_mode is index_components. */
+  index_code?: string;
   tickers?: string[];
   start_date: string;
   end_date: string;
@@ -57,6 +60,7 @@ export interface BacktestTask {
   strategy_params: StrategyParamValues;
   universe_mode: UniverseMode;
   universe_preset: string | null;
+  index_code?: string | null;
   tickers: string[];
   start_date: string;
   end_date: string;

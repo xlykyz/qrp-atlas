@@ -1,4 +1,4 @@
-"""Product orchestration for classic strategy backtest tasks."""
+"""Product orchestration for classic and cross-sectional backtest tasks."""
 
 from __future__ import annotations
 
@@ -23,6 +23,12 @@ from qrp_atlas.strategies.registry import StrategyNotFoundError
 from qrp_atlas.strategies.validation import StrategyValidationError, resolve_parameters
 
 from .catalog import PRODUCT_SUPPORTED_STRATEGY_CODES
+from .cross_section import (
+    CrossSectionProductError,
+    is_cross_sectional_product_strategy,
+    resolve_cross_section_product_params,
+    run_cross_sectional_momentum_product_backtest,
+)
 from .schemas import (
     BacktestTaskRecord,
     CreateBacktestTaskRequest,
@@ -118,18 +124,41 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
         raise BacktestTaskValidationError("start_date must be <= end_date")
 
     universe_mode = str(request.universe_mode or "tickers").strip().lower()
-    if universe_mode not in {"tickers", "preset"}:
-        raise BacktestTaskValidationError("universe_mode must be tickers or preset")
+    if universe_mode not in {"tickers", "preset", "index_components"}:
+        raise BacktestTaskValidationError(
+            "universe_mode must be tickers, preset, or index_components"
+        )
 
     tickers = _normalize_tickers(request.tickers)
     universe_preset = request.universe_preset
-    if universe_mode == "tickers":
+    index_code = (request.index_code or None)
+    if index_code is not None:
+        index_code = str(index_code).strip().upper() or None
+
+    if is_cross_sectional_product_strategy(strategy_code):
+        if universe_mode != "index_components":
+            raise BacktestTaskValidationError(
+                "cross_sectional_momentum_long_only requires universe_mode=index_components"
+            )
+        if not index_code:
+            raise BacktestTaskValidationError(
+                "index_code is required when universe_mode is index_components"
+            )
+        tickers = []
+        universe_preset = None
+    elif universe_mode == "tickers":
         if not tickers:
             raise BacktestTaskValidationError("tickers required when universe_mode is tickers")
         universe_preset = None
+        index_code = None
+    elif universe_mode == "index_components":
+        raise BacktestTaskValidationError(
+            "universe_mode=index_components is only supported for "
+            "cross_sectional_momentum_long_only"
+        )
     else:
         raise BacktestTaskValidationError(
-            "universe_mode=preset is not supported in 07-A; provide tickers"
+            "universe_mode=preset is not supported; provide tickers or index_components"
         )
 
     position = request.position
@@ -154,6 +183,32 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
             f"entry_timing must be one of {sorted(_ENTRY_TIMING)}"
         )
 
+    # Cross-sectional product: only next_open; apply portfolio SSOT into strategy params.
+    if is_cross_sectional_product_strategy(strategy_code):
+        if entry_timing != "next_open":
+            raise BacktestTaskValidationError(
+                "cross_sectional_momentum_long_only only supports entry_timing=next_open"
+            )
+        try:
+            draft = CreateBacktestTaskRequest(
+                name=request.name,
+                strategy_code=strategy_code,
+                strategy_version=strategy.definition.version,
+                strategy_params=dict(resolved),
+                universe_mode=universe_mode,
+                universe_preset=universe_preset,
+                index_code=index_code,
+                tickers=tickers,
+                start_date=start_date,
+                end_date=end_date,
+                position=position,
+                cost=cost,
+                execution=request.execution.model_copy(update={"entry_timing": entry_timing}),
+            )
+            resolved = resolve_cross_section_product_params(draft)
+        except CrossSectionProductError as exc:
+            raise BacktestTaskValidationError(str(exc)) from exc
+
     return CreateBacktestTaskRequest(
         name=request.name,
         strategy_code=strategy_code,
@@ -161,6 +216,7 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
         strategy_params=dict(resolved),
         universe_mode=universe_mode,
         universe_preset=universe_preset,
+        index_code=index_code,
         tickers=tickers,
         start_date=start_date,
         end_date=end_date,
@@ -180,6 +236,8 @@ def _execution_rule(entry_timing: str) -> PortfolioExecutionRule:
 def _universe_label(request: CreateBacktestTaskRequest) -> str:
     if request.universe_mode == "tickers":
         return ",".join(request.tickers or [])
+    if request.universe_mode == "index_components":
+        return f"index_components:{request.index_code}"
     return request.universe_preset or "preset"
 
 
@@ -329,10 +387,29 @@ def execute_validated_task(
     """Run strategy + portfolio engine and persist a standard results package."""
 
     strategy = get_strategy(request.strategy_code, request.strategy_version)
-    price_df = _load_prices(request, db_path=db_path)
-    strategy_result, execution_targets, portfolio_result, skipped_signals = _run_product_portfolio(
-        request, price_df
-    )
+    cross_section_meta: dict[str, Any] = {}
+    if is_cross_sectional_product_strategy(request.strategy_code):
+        if db_path is None:
+            raise BacktestTaskExecutionError(
+                "cross-sectional product tasks require a market database path"
+            )
+        try:
+            cs_run, skipped_signals, cross_section_meta = (
+                run_cross_sectional_momentum_product_backtest(
+                    request,
+                    db_path=db_path,
+                )
+            )
+        except CrossSectionProductError as exc:
+            raise BacktestTaskExecutionError(str(exc)) from exc
+        strategy_result = cs_run.strategy_result
+        execution_targets = cs_run.target_weights
+        portfolio_result = cs_run.portfolio_result
+    else:
+        price_df = _load_prices(request, db_path=db_path)
+        strategy_result, execution_targets, portfolio_result, skipped_signals = (
+            _run_product_portfolio(request, price_df)
+        )
 
     execution_signal_map: dict[tuple[str, str], str] = {}
     if execution_targets is not None and not execution_targets.empty:
@@ -389,6 +466,7 @@ def execute_validated_task(
         "strategy_version": strategy.definition.version,
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
+        "cross_section": cross_section_meta or None,
     }
 
     try:
