@@ -22,6 +22,7 @@ dependencies = [
     "uvicorn",
     "psycopg[binary]>=3.2",
     "argon2-cffi>=23.1",
+    "filelock>=3.13",
 ]
 
 [project.optional-dependencies]

@@ -235,7 +235,13 @@ def migrate(db_path: Path, *, do_backup: bool = True) -> dict:
                 ),
             }
 
-        backup = backup_db(db_path) if do_backup else None
+        # Windows cannot copy a DuckDB file while this connection holds it open.
+        if do_backup:
+            con.close()
+            backup = backup_db(db_path)
+            con = duckdb.connect(str(db_path))
+        else:
+            backup = None
         con.execute(TABLE.duckdb_create_sql())
         after = inspect_table(con, TABLE.name)
         diff_after = schema_diff(after, expected)
