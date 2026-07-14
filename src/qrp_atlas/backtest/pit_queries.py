@@ -392,3 +392,171 @@ def summarize_index_components(components: pd.DataFrame) -> dict[str, Any]:
         "snapshot_date": snap,
         "index_code": code,
     }
+
+
+EARNINGS_FORECAST_EVENT_TABLE = "earnings_forecast_event"
+EARNINGS_FORECAST_EVENT_COLUMNS = (
+    "ticker",
+    "event_type",
+    "event_series_id",
+    "report_period",
+    "announcement_date",
+    "first_announcement_date",
+    "published_at",
+    "time_precision",
+    "available_trade_date",
+    "forecast_type",
+    "profit_change_min",
+    "profit_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "last_parent_net",
+    "summary",
+    "change_reason",
+    "source",
+    "source_record_id",
+    "revision_id",
+    "ingested_at",
+)
+
+# Stable 05-B input projection (no strategy fields).
+EARNINGS_FORECAST_EVENT_FRAME_COLUMNS = (
+    "ticker",
+    "event_type",
+    "event_series_id",
+    "report_period",
+    "announcement_date",
+    "available_trade_date",
+    "forecast_type",
+    "profit_change_min",
+    "profit_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "source_record_id",
+    "revision_id",
+)
+
+
+def to_earnings_forecast_event_frame(records: pd.DataFrame) -> pd.DataFrame:
+    """Project earnings forecast rows to the stable 05-B event frame columns."""
+    if records is None or records.empty:
+        return pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_FRAME_COLUMNS))
+    out = records.copy()
+    for col in EARNINGS_FORECAST_EVENT_FRAME_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+    return out.loc[:, list(EARNINGS_FORECAST_EVENT_FRAME_COLUMNS)].reset_index(drop=True)
+
+
+def query_earnings_forecast_as_of(
+    *,
+    as_of_date: Any,
+    tickers: str | Sequence[str] | None = None,
+    report_period: Any = None,
+    report_period_start: Any = None,
+    report_period_end: Any = None,
+    forecast_type: str | Sequence[str] | None = None,
+    include_all_disclosures: bool = False,
+    include_all_revisions: bool = False,
+    as_event_frame: bool = False,
+    db_path: Any = None,
+    con: Any = None,
+) -> pd.DataFrame:
+    """Point-in-time query for earnings_forecast_event.
+
+    Rules:
+    - Only rows with ``available_trade_date <= as_of_date`` are eligible.
+    - Default: latest available revision per ``source_record_id``.
+    - ``include_all_disclosures=True`` keeps every formal disclosure
+      (still latest revision per source_record_id unless revisions requested).
+    - ``include_all_revisions=True`` returns every eligible technical revision.
+    - Never returns future announcements or future revisions.
+    """
+    as_of = _require_as_of_date(as_of_date)
+
+    clauses: list[str] = ["available_trade_date <= ?"]
+    params: list[Any] = [as_of]
+
+    ticker_list = _as_list(tickers)
+    if ticker_list is not None and len(ticker_list) == 0:
+        empty = pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_COLUMNS))
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+    if ticker_list:
+        placeholders = ", ".join("?" * len(ticker_list))
+        clauses.append(f"ticker IN ({placeholders})")
+        params.extend(ticker_list)
+
+    if report_period is not None:
+        clauses.append("report_period = ?")
+        params.append(_normalize_date(report_period))
+    if report_period_start is not None:
+        clauses.append("report_period >= ?")
+        params.append(_normalize_date(report_period_start))
+    if report_period_end is not None:
+        clauses.append("report_period <= ?")
+        params.append(_normalize_date(report_period_end))
+
+    forecast_types = _as_list(forecast_type)
+    if forecast_types is not None and len(forecast_types) == 0:
+        empty = pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_COLUMNS))
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+    if forecast_types:
+        placeholders = ", ".join("?" * len(forecast_types))
+        clauses.append(f"forecast_type IN ({placeholders})")
+        params.extend(forecast_types)
+
+    where_sql = " WHERE " + " AND ".join(clauses)
+    raw = _read_table(
+        table_name=EARNINGS_FORECAST_EVENT_TABLE,
+        db_path=db_path,
+        con=con,
+        where_sql=where_sql,
+        params=params,
+        order_by=(
+            "ticker, report_period, announcement_date, available_trade_date, "
+            "source_record_id, revision_id"
+        ),
+    )
+    if raw.empty:
+        empty = raw.reset_index(drop=True)
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+
+    if include_all_revisions:
+        selected = raw.reset_index(drop=True)
+    else:
+        # Latest available revision per formal disclosure (source_record_id).
+        selected = select_latest_available_records(
+            raw,
+            as_of_date=as_of,
+            entity_keys=["source_record_id"],
+            available_date_col="available_trade_date",
+            published_at_col="published_at" if "published_at" in raw.columns else None,
+            ingested_at_col="ingested_at" if "ingested_at" in raw.columns else None,
+            revision_col="revision_id" if "revision_id" in raw.columns else None,
+        )
+
+    # include_all_disclosures is the default semantics once per source_record_id
+    # latest revision is selected: every formal disclosure remains visible.
+    # The flag is retained for explicit 05-B callers; when False we still keep
+    # all disclosures because event research needs the full disclosure chain.
+    # Historical "only latest disclosure per series" is intentionally not the
+    # default and can be derived by callers from event_series_id if needed.
+    _ = include_all_disclosures
+
+    sort_cols = [
+        c
+        for c in (
+            "ticker",
+            "report_period",
+            "announcement_date",
+            "available_trade_date",
+            "source_record_id",
+            "revision_id",
+        )
+        if c in selected.columns
+    ]
+    if sort_cols:
+        selected = selected.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    if as_event_frame:
+        return to_earnings_forecast_event_frame(selected)
+    return selected
