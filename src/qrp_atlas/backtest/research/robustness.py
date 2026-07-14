@@ -99,10 +99,11 @@ def annualized_net_return_from_growth(
         growth = float(total_growth)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(growth) or growth <= 0.0:
+    if not math.isfinite(growth) or growth < 0.0:
         return None
-    if observation_count == 0:
-        return None
+    # Total loss is a valid geometric outcome: 0 ** positive_power - 1 = -1.
+    if growth == 0.0:
+        return -1.0
     try:
         annualized = growth ** (float(periods_per_year) / float(observation_count)) - 1.0
     except (OverflowError, ValueError, ZeroDivisionError):

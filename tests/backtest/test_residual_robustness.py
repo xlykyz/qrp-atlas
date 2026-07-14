@@ -286,6 +286,64 @@ def test_performance_metrics_gross_net_cost_and_json_safe() -> None:
 
 
 
+
+def test_zero_growth_annualization_is_total_loss_not_invalid() -> None:
+    """final_equity=0 must annualize to -100% and remain selectable under net_calmar."""
+
+    assert annualized_net_return_from_growth(0.0, 252) == -1.0
+    assert annualized_net_return_from_growth(0.0, 1) == -1.0
+
+    from qrp_atlas.backtest.portfolio.models import (
+        PortfolioBacktestResult,
+        PortfolioSnapshot,
+    )
+
+    config = _open_config(cash=100.0)
+    snapshots = (
+        PortfolioSnapshot(
+            trade_date="2024-01-02",
+            cash=0.0,
+            market_value=0.0,
+            equity=0.0,
+            daily_return=-1.0,
+            drawdown=-1.0,
+            turnover=0.0,
+            commission=0.0,
+            stamp_tax=0.0,
+            slippage_cost=0.0,
+            cumulative_cost=0.0,
+            positions=(),
+        ),
+    )
+    result = PortfolioBacktestResult(
+        config=config,
+        summary={
+            "initial_cash": 100.0,
+            "final_equity": 0.0,
+            "commission": 0.0,
+            "stamp_tax": 0.0,
+            "slippage_cost": 0.0,
+            "total_cost": 0.0,
+            "max_drawdown": -1.0,
+            "max_drawdown_pct": -100.0,
+            "turnover": 0.0,
+            "trade_count": 1,
+            "order_count": 1,
+            "fill_count": 1,
+            "skipped_count": 0,
+        },
+        orders=(),
+        fills=(),
+        snapshots=snapshots,
+        equity_curve=(),
+    )
+    metrics = compute_portfolio_performance_metrics(result)
+    assert metrics["annualized_net_return"] == -1.0
+    assert metrics["net_calmar"] == -1.0
+    # Still finite and therefore eligible for selection objective scoring.
+    assert metrics["net_calmar"] is not None
+
+
 def test_annualized_net_return_is_geometric_from_equity_path() -> None:
     """Non-constant returns must use CAGR from realized growth, not mean-day compound."""
 
