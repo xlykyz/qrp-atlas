@@ -94,7 +94,7 @@ export function TaskList({
               </button>
 
               <div className="flex flex-wrap gap-1.5">
-                {task.status === 'success' && task.run_id ? (
+                {task.status === 'succeeded' && task.run_id ? (
                   <>
                     <Button
                       size="sm"
@@ -111,7 +111,7 @@ export function TaskList({
                       加入对比
                     </Button>
                     <Link
-                      to={`/backtest?runId=${encodeURIComponent(task.run_id)}&source=mock`}
+                      to={`/backtest?runId=${encodeURIComponent(task.run_id)}&source=${task.is_mock ? 'mock' : 'http'}`}
                       className={cn(buttonVariants({ size: 'sm', variant: 'ghost' }))}
                     >
                       分析页
@@ -127,11 +127,11 @@ export function TaskList({
               </div>
             ) : null}
 
-            {(task.status === 'queued' || task.status === 'running') && (
+            {(task.status === 'pending' || task.status === 'running') && (
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
                 <div
                   className={`h-full rounded-full bg-blue-500 transition-all ${
-                    task.status === 'queued' ? 'w-1/4 animate-pulse' : 'w-2/3 animate-pulse'
+                    task.status === 'pending' ? 'w-1/4 animate-pulse' : 'w-2/3 animate-pulse'
                   }`}
                 />
               </div>

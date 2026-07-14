@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from qrp_atlas.config.paths import BACKTEST_RUNS_DIR
+from qrp_atlas.config.paths import PROJECT_ROOT
 
 from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
 
@@ -46,17 +46,26 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def portfolio_fills_to_trades(
     result: PortfolioBacktestResult,
+    *,
+    execution_signal_map: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Pair buy and sell fills FIFO into the existing BacktestTrade contract."""
+    """Pair buy and sell fills FIFO into the existing BacktestTrade contract.
+
+    When ``execution_signal_map`` is provided as ``(execution_date, asset_id) -> signal_date``,
+    trade.signal_date keeps the original strategy signal day even if entry happens later.
+    """
 
     lots: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
     trades: list[dict[str, Any]] = []
     trade_seq = 1
+    signal_map = execution_signal_map or {}
 
     for fill in sorted(result.fills, key=lambda item: (item.trade_date, item.fill_id)):
         if fill.side == "BUY":
+            signal_date = signal_map.get((fill.trade_date, fill.asset_id), fill.trade_date)
             lots[fill.asset_id].append(
                 {
+                    "signal_date": signal_date,
                     "entry_date": fill.trade_date,
                     "entry_price": fill.execution_price,
                     "remaining_quantity": fill.quantity,
@@ -91,7 +100,7 @@ def portfolio_fills_to_trades(
                 {
                     "trade_id": f"T{trade_seq:08d}",
                     "asset_id": fill.asset_id,
-                    "signal_date": lot["entry_date"],
+                    "signal_date": lot.get("signal_date", lot["entry_date"]),
                     "entry_date": lot["entry_date"],
                     "entry_price": lot["entry_price"],
                     "exit_date": fill.trade_date,
@@ -118,7 +127,7 @@ def portfolio_fills_to_trades(
                 {
                     "trade_id": f"T{trade_seq:08d}",
                     "asset_id": asset_id,
-                    "signal_date": lot["entry_date"],
+                    "signal_date": lot.get("signal_date", lot["entry_date"]),
                     "entry_date": lot["entry_date"],
                     "entry_price": lot["entry_price"],
                     "exit_date": None,
@@ -152,6 +161,8 @@ def _summary_payload(
     run_id: str,
     result: PortfolioBacktestResult,
     trades: list[dict[str, Any]],
+    *,
+    extra_skipped_count: int = 0,
 ) -> dict[str, Any]:
     closed = [trade for trade in trades if trade["status"] == "closed"]
     returns = [float(trade["return_pct"]) for trade in closed]
@@ -180,7 +191,7 @@ def _summary_payload(
         "avg_holding_days": (sum(holdings) / len(holdings)) if holdings else None,
         "max_trade_loss_pct": min(losses) if losses else None,
         "max_trade_profit_pct": max(wins) if wins else None,
-        "skipped_count": int(result.summary["skipped_count"]),
+        "skipped_count": int(result.summary["skipped_count"]) + int(extra_skipped_count),
         "turnover": float(result.summary["turnover"]),
         "commission": float(result.summary["commission"]),
         "stamp_tax": float(result.summary["stamp_tax"]),
@@ -190,8 +201,12 @@ def _summary_payload(
     }
 
 
-def _skipped_payload(result: PortfolioBacktestResult) -> list[dict[str, Any]]:
-    return [
+def _skipped_payload(
+    result: PortfolioBacktestResult,
+    *,
+    extra_skipped: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    rows = [
         {
             "asset_id": order.asset_id,
             "signal_date": order.trade_date,
@@ -204,13 +219,32 @@ def _skipped_payload(result: PortfolioBacktestResult) -> list[dict[str, Any]]:
         for order in result.orders
         if order.status == ORDER_REJECTED
     ]
+    for item in extra_skipped or []:
+        rows.append(
+            {
+                "asset_id": item.get("asset_id"),
+                "signal_date": item.get("signal_date"),
+                "reason": item.get("reason") or "SKIPPED",
+                "detail": item.get("detail"),
+            }
+        )
+    return rows
+
+
+def _default_runs_dir() -> Path:
+    import os
+
+    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
+    if env:
+        return Path(env)
+    return PROJECT_ROOT / "data" / "backtest_runs"
 
 
 class BacktestRunWriter:
     """Write portfolio output through a temporary result directory."""
 
     def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else BACKTEST_RUNS_DIR
+        self.root = Path(root) if root is not None else _default_runs_dir()
 
     def write_portfolio_run(
         self,
@@ -222,6 +256,9 @@ class BacktestRunWriter:
         name: str | None = None,
         created_at: str | None = None,
         overwrite: bool = False,
+        config_overlay: dict[str, Any] | None = None,
+        execution_signal_map: dict[tuple[str, str], str] | None = None,
+        extra_skipped: list[dict[str, Any]] | None = None,
     ) -> Path:
         _validate_run_id(run_id)
         run_dir = self.root / run_id
@@ -235,7 +272,8 @@ class BacktestRunWriter:
         temp_dir.mkdir()
 
         try:
-            trades = portfolio_fills_to_trades(result)
+            trades = portfolio_fills_to_trades(result, execution_signal_map=execution_signal_map)
+            skipped = _skipped_payload(result, extra_skipped=extra_skipped)
             start_date = result.snapshots[0].trade_date if result.snapshots else ""
             end_date = result.snapshots[-1].trade_date if result.snapshots else ""
             meta = {
@@ -251,11 +289,19 @@ class BacktestRunWriter:
             }
             payloads = {
                 "run_meta.json": meta,
-                "summary.json": _summary_payload(run_id, result, trades),
+                "summary.json": _summary_payload(
+                    run_id,
+                    result,
+                    trades,
+                    extra_skipped_count=len(extra_skipped or []),
+                ),
                 "equity.json": list(result.equity_curve),
                 "trades.json": trades,
-                "skipped.json": _skipped_payload(result),
-                "config.json": asdict(result.config),
+                "skipped.json": skipped,
+                "config.json": {
+                    **asdict(result.config),
+                    **(config_overlay or {}),
+                },
                 "orders.json": [order.to_dict() for order in result.orders],
                 "fills.json": [fill.to_dict() for fill in result.fills],
                 "snapshots.json": [snapshot.to_dict() for snapshot in result.snapshots],

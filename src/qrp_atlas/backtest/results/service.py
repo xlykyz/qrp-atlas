@@ -19,7 +19,20 @@ from .schemas import (
 )
 
 
-_loader = BacktestRunsLoader()
+_loader: BacktestRunsLoader | None = None
+
+
+def get_loader() -> BacktestRunsLoader:
+    global _loader
+    if _loader is None:
+        _loader = BacktestRunsLoader()
+    return _loader
+
+
+def set_loader_for_tests(loader: BacktestRunsLoader | None) -> None:
+    """Test helper to inject/reset the process-wide results loader."""
+    global _loader
+    _loader = loader
 
 
 def list_runs() -> List[BacktestRunMeta]:
@@ -28,9 +41,9 @@ def list_runs() -> List[BacktestRunMeta]:
     缺失 run_meta.json 的 run 会被跳过，不抛错。
     """
     runs: List[BacktestRunMeta] = []
-    for run_id in _loader.list_run_ids():
+    for run_id in get_loader().list_run_ids():
         try:
-            meta = _loader.load_run_meta(run_id)
+            meta = get_loader().load_run_meta(run_id)
         except ResultFileMissingError:
             continue
         runs.append(BacktestRunMeta.model_validate(meta))
@@ -38,34 +51,34 @@ def list_runs() -> List[BacktestRunMeta]:
 
 
 def get_run_meta(run_id: str) -> BacktestRunMeta:
-    meta = _loader.load_run_meta(run_id)
+    meta = get_loader().load_run_meta(run_id)
     return BacktestRunMeta.model_validate(meta)
 
 
 def get_summary(run_id: str) -> BacktestSummary:
-    data = _loader.load_summary(run_id)
+    data = get_loader().load_summary(run_id)
     if "run_id" not in data:
         data = {"run_id": run_id, **data}
     return BacktestSummary.model_validate(data)
 
 
 def get_equity(run_id: str) -> List[EquityPoint]:
-    data = _loader.load_equity(run_id)
+    data = get_loader().load_equity(run_id)
     return [EquityPoint.model_validate(p) for p in data]
 
 
 def get_trades(run_id: str) -> List[BacktestTrade]:
-    data = _loader.load_trades(run_id)
+    data = get_loader().load_trades(run_id)
     return [BacktestTrade.model_validate(t) for t in data]
 
 
 def get_skipped(run_id: str) -> List[SkippedTrade]:
-    data = _loader.load_skipped(run_id)
+    data = get_loader().load_skipped(run_id)
     return [SkippedTrade.model_validate(s) for s in data]
 
 
 def get_config(run_id: str) -> BacktestConfigSnapshot:
-    data = _loader.load_config(run_id)
+    data = get_loader().load_config(run_id)
     return BacktestConfigSnapshot(run_id=run_id, config=data)
 
 
@@ -79,4 +92,6 @@ __all__ = [
     "get_trades",
     "get_skipped",
     "get_config",
+    "get_loader",
+    "set_loader_for_tests",
 ]
