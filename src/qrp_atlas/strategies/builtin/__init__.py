@@ -6,6 +6,7 @@ from .classic import (
     RollingZscoreMeanReversionStrategy,
     TimeSeriesMomentumStrategy,
 )
+from .residual import MarketResidualMeanReversionStrategy
 from .cross_section import (
     CrossSectionalMomentumLongOnlyStrategy,
     MultifactorLongOnlyStrategy,
@@ -18,6 +19,7 @@ __all__ = [
     "CrossSectionalMomentumLongOnlyStrategy",
     "DonchianBreakoutStrategy",
     "DualSmaTrendStrategy",
+    "MarketResidualMeanReversionStrategy",
     "MultifactorLongOnlyStrategy",
     "RollingZscoreMeanReversionStrategy",
     "SystemBBasicStrategy",

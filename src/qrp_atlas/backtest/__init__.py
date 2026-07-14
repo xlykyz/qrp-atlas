@@ -13,6 +13,7 @@ from .models import (
 )
 from .exposure_data import prepare_cross_section_exposure_panel
 from .factor_data import prepare_financial_factor_panel
+from .residual_data import ResidualDataError, ResidualPanelPreparation, prepare_market_residual_panel
 from .point_in_time import select_latest_available_records
 from .pit_queries import (
     IndustryMembershipConflictError,
@@ -41,6 +42,9 @@ from .runtime import StrategyBacktestRun, StrategyBacktestRuntime, prepare_strat
 from .research import (
     CrossSectionResearchError,
     CrossSectionResearchResult,
+    ResidualResearchError,
+    ResidualResearchResult,
+    ResidualStrategyBacktestRun,
     TargetExposureResult,
     analyze_target_exposures,
     assign_factor_groups,
@@ -48,6 +52,8 @@ from .research import (
     compute_group_returns,
     compute_information_coefficient,
     run_cross_section_research,
+    run_market_residual_mean_reversion_backtest,
+    run_residual_research,
     summarize_information_coefficient,
     EarningsForecastEventStudyResult,
     EventStudyError,
@@ -79,6 +85,9 @@ __all__ = [
     "IndustryMembershipConflictError",
     "prepare_cross_section_exposure_panel",
     "prepare_financial_factor_panel",
+    "prepare_market_residual_panel",
+    "ResidualDataError",
+    "ResidualPanelPreparation",
     "prepare_strategy_data",
     "query_earnings_forecast_as_of",
     "query_financial_as_of",
@@ -100,6 +109,11 @@ __all__ = [
     "compute_group_returns",
     "compute_information_coefficient",
     "run_cross_section_research",
+    "run_market_residual_mean_reversion_backtest",
+    "run_residual_research",
+    "ResidualResearchError",
+    "ResidualResearchResult",
+    "ResidualStrategyBacktestRun",
     "summarize_information_coefficient",
     "EarningsForecastEventStudyResult",
     "EventStudyError",

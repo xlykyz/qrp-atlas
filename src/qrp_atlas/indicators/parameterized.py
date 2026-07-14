@@ -12,6 +12,10 @@ import pandas as pd
 
 from qrp_atlas.contracts import CLOSE, HIGH, LOW, TICKER, TRADE_DATE
 from qrp_atlas.indicators.stock import calculate_stock_trend
+from qrp_atlas.indicators.stock.residual import (
+    RESIDUAL_OUTPUT_COLUMNS,
+    market_residual_calculator,
+)
 from qrp_atlas.indicators.system_b import calculate_system_b_basic_states_from_prices
 
 
@@ -243,6 +247,19 @@ CALCULATION_REGISTRY: dict[str, IndicatorCalculationDefinition] = {
     "rolling_mean": IndicatorCalculationDefinition("rolling_mean", _WINDOW, (CLOSE,), ("value",), _rolling(CLOSE, "mean")),
     "rolling_std": IndicatorCalculationDefinition("rolling_std", _WINDOW, (CLOSE,), ("value",), _rolling(CLOSE, "std")),
     "rolling_zscore": IndicatorCalculationDefinition("rolling_zscore", _WINDOW, (CLOSE,), ("value",), _rolling_zscore),
+
+    "market_residual": IndicatorCalculationDefinition(
+        "market_residual",
+        {
+            "window": IndicatorParameterSpec("integer", 60, True, 2, 10000),
+            "min_periods": IndicatorParameterSpec("integer", 60, True, 2, 10000),
+            "z_window": IndicatorParameterSpec("integer", 60, True, 2, 10000),
+            "fit_intercept": IndicatorParameterSpec("boolean", True, True),
+        },
+        ("asset_return", "benchmark_return"),
+        RESIDUAL_OUTPUT_COLUMNS,
+        market_residual_calculator,
+    ),
     "stock_trend_legacy": IndicatorCalculationDefinition(
         "stock_trend_legacy", {}, (CLOSE,),
         ("ma5", "close_above_ma5", "close_below_ma5", "close_above_ma5_days", "close_below_ma5_days"),
