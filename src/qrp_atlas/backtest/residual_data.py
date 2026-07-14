@@ -419,7 +419,16 @@ def _build_industry_benchmark_return_map(
     *,
     industry_benchmark_prices: pd.DataFrame | None,
     industry_benchmark_returns: pd.DataFrame | None,
+    trading_calendar: Sequence[Any] | None = None,
 ) -> dict[tuple[pd.Timestamp, str], float]:
+    """Map exact (trade_date, industry_code) -> single-day benchmark return.
+
+    For price inputs, returns are formed only when both T and the previous
+    calendar trading day have valid positive closes. Sparse industry records
+    are reindexed onto the provided calendar so a missing day never creates a
+    multi-day return on the next available observation.
+    """
+
     if industry_benchmark_prices is not None and industry_benchmark_returns is not None:
         raise ResidualDataError(
             "provide either industry_benchmark_prices or industry_benchmark_returns, not both"
@@ -444,10 +453,45 @@ def _build_industry_benchmark_return_map(
         return result
 
     frame = _require_industry_benchmark_prices(industry_benchmark_prices)
+    if frame.empty:
+        return result
+
+    calendar_dates: list[pd.Timestamp]
+    if trading_calendar is None:
+        calendar_dates = sorted({pd.Timestamp(value) for value in frame[TRADE_DATE].tolist()})
+    else:
+        calendar_dates = []
+        seen: set[pd.Timestamp] = set()
+        for value in trading_calendar:
+            try:
+                date = normalize_trade_date(value)
+            except CrossSectionFrameError as exc:
+                raise ResidualDataError(str(exc)) from exc
+            if date in seen:
+                continue
+            seen.add(date)
+            calendar_dates.append(date)
+        calendar_dates = sorted(calendar_dates)
+    if not calendar_dates:
+        return result
+
+    calendar_index = pd.DatetimeIndex(calendar_dates)
     for code, group in frame.groupby(INDUSTRY_CODE, sort=False):
         piece = group.sort_values(TRADE_DATE, kind="mergesort")
-        returns = _simple_returns(piece[CLOSE])
-        for date, value in zip(piece[TRADE_DATE].tolist(), returns.tolist(), strict=True):
+        closes = (
+            pd.Series(
+                pd.to_numeric(piece[CLOSE], errors="coerce").to_numpy(),
+                index=pd.DatetimeIndex(piece[TRADE_DATE].tolist()),
+                dtype="float64",
+            )
+            .groupby(level=0, sort=False)
+            .last()
+            .reindex(calendar_index)
+        )
+        # Exact adjacent-calendar-day returns only; missing intermediate days
+        # yield NaN rather than bridging across the gap.
+        returns = _simple_returns(closes)
+        for date, value in zip(closes.index.tolist(), returns.tolist(), strict=True):
             if pd.isna(value) or not math.isfinite(float(value)):
                 continue
             result[(pd.Timestamp(date), str(code))] = float(value)
@@ -482,9 +526,15 @@ def prepare_industry_residual_panel(
     """
 
     assets = _require_price_frame(asset_prices, label="asset_prices")
+    trading_calendar = (
+        sorted({pd.Timestamp(value) for value in assets[TRADE_DATE].tolist()})
+        if not assets.empty
+        else []
+    )
     bench_map = _build_industry_benchmark_return_map(
         industry_benchmark_prices=industry_benchmark_prices,
         industry_benchmark_returns=industry_benchmark_returns,
+        trading_calendar=trading_calendar,
     )
 
     if assets.empty:

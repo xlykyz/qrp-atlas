@@ -26,6 +26,7 @@ from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import PortfolioExecutionRule
 from qrp_atlas.backtest.research.robustness import (
     ResidualRobustnessError,
+    annualized_net_return_from_growth,
     normalize_trading_dates,
 )
 from qrp_atlas.backtest.results import ResidualRobustnessWriter
@@ -282,6 +283,102 @@ def test_performance_metrics_gross_net_cost_and_json_safe() -> None:
     )
     payload = json.dumps(metrics, allow_nan=False)
     assert "NaN" not in payload and "Infinity" not in payload
+
+
+
+def test_annualized_net_return_is_geometric_from_equity_path() -> None:
+    """Non-constant returns must use CAGR from realized growth, not mean-day compound."""
+
+    from qrp_atlas.backtest.portfolio.models import (
+        PortfolioBacktestResult,
+        PortfolioSnapshot,
+    )
+
+    # Two-day path: +100% then -50% => final growth 1.0, CAGR = 0.
+    # Arithmetic mean daily return is +0.25, so (1.25)**252-1 is hugely positive.
+    config = _open_config(cash=100.0)
+    snapshots = (
+        PortfolioSnapshot(
+            trade_date="2024-01-02",
+            cash=0.0,
+            market_value=200.0,
+            equity=200.0,
+            daily_return=1.0,
+            drawdown=0.0,
+            turnover=0.0,
+            commission=0.0,
+            stamp_tax=0.0,
+            slippage_cost=0.0,
+            cumulative_cost=0.0,
+            positions=(),
+        ),
+        PortfolioSnapshot(
+            trade_date="2024-01-03",
+            cash=0.0,
+            market_value=100.0,
+            equity=100.0,
+            daily_return=-0.5,
+            drawdown=-0.5,
+            turnover=0.0,
+            commission=0.0,
+            stamp_tax=0.0,
+            slippage_cost=0.0,
+            cumulative_cost=0.0,
+            positions=(),
+        ),
+    )
+    result = PortfolioBacktestResult(
+        config=config,
+        summary={
+            "initial_cash": 100.0,
+            "final_equity": 100.0,
+            "commission": 0.0,
+            "stamp_tax": 0.0,
+            "slippage_cost": 0.0,
+            "total_cost": 0.0,
+            "max_drawdown": -0.5,
+            "max_drawdown_pct": -50.0,
+            "turnover": 0.0,
+            "trade_count": 0,
+            "order_count": 0,
+            "fill_count": 0,
+            "skipped_count": 0,
+        },
+        orders=(),
+        fills=(),
+        snapshots=snapshots,
+        equity_curve=(),
+    )
+    metrics = compute_portfolio_performance_metrics(result)
+    expected = annualized_net_return_from_growth(1.0, 2)
+    assert expected == 0.0
+    assert metrics["annualized_net_return"] == 0.0
+    mean_compound = (1.0 + 0.25) ** 252 - 1.0
+    assert metrics["annualized_net_return"] != pytest.approx(mean_compound)
+    assert metrics["net_calmar"] == 0.0
+
+    # OOS public stitch summary also uses geometric annualization.
+    from types import SimpleNamespace
+    from qrp_atlas.backtest.research.robustness import WalkForwardSplit, stitch_oos_equity
+
+    split = WalkForwardSplit(
+        fold_id="fold_000",
+        fold_index=0,
+        train_start="2024-01-01",
+        train_end="2024-01-01",
+        validation_start="2024-01-01",
+        validation_end="2024-01-01",
+        test_start="2024-01-02",
+        test_end="2024-01-03",
+        train_size=1,
+        validation_size=1,
+        test_size=2,
+    )
+    portfolio = SimpleNamespace(snapshots=snapshots)
+    run = SimpleNamespace(portfolio_result=portfolio)
+    _, oos_summary = stitch_oos_equity([(split, run)])  # type: ignore[arg-type]
+    assert oos_summary["annualized_net_return"] == 0.0
+    assert oos_summary["net_total_return"] == 0.0
 
 
 def test_oos_stitch_and_rolling_only_test_dates() -> None:
@@ -647,6 +744,62 @@ def test_robustness_writer_artifacts_atomic_and_lock(tmp_path: Path) -> None:
     # JSON finite
     for path in run_dir.glob("*.json"):
         json.loads(path.read_text())
+
+
+def test_robustness_writer_overwrite_failure_restores_old_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asset, bench = _mean_reverting_pair(50, seed=11)
+    assets = _prices({"A": asset})
+    benchmark = _prices({"MKT": bench}, asset_type="index")
+    config = _open_config()
+    wf = WalkForwardConfig(
+        train_size=12, validation_size=8, test_size=8, step_size=8, max_folds=1
+    )
+    result = run_residual_robustness_study(
+        assets,
+        benchmark,
+        config,
+        benchmark_id="MKT",
+        base_parameters={
+            "window": 6,
+            "min_periods": 6,
+            "z_window": 6,
+            "entry_zscore": -0.8,
+            "exit_zscore": 0.0,
+            "min_r2": 0.0,
+            "max_hold_days": 4,
+        },
+        walk_forward_config=wf,
+        selection_objective="net_total_return",
+        minimum_validation_trades=0,
+        cost_scenarios=(CostStressScenario(code="baseline"),),
+        rolling_windows=(5,),
+    )
+    writer = ResidualRobustnessWriter(root=tmp_path)
+    run_dir = writer.write(result, run_id="rob_atomic")
+    marker = run_dir / "marker_old.txt"
+    marker.write_text("keep-me\n", encoding="utf-8")
+    old_manifest = (run_dir / "manifest.json").read_text(encoding="utf-8")
+
+    original_replace = Path.replace
+
+    def flaky_replace(self: Path, target: Path):  # type: ignore[no-untyped-def]
+        # Fail only when promoting temp -> formal run directory.
+        if self.name == ".rob_atomic.tmp" and Path(target).name == "rob_atomic":
+            raise OSError("injected promotion failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    with pytest.raises(OSError, match="injected promotion failure"):
+        writer.write(result, run_id="rob_atomic", overwrite=True)
+
+    assert run_dir.exists()
+    assert (run_dir / "marker_old.txt").read_text(encoding="utf-8") == "keep-me\n"
+    assert (run_dir / "manifest.json").read_text(encoding="utf-8") == old_manifest
+    # No durable temp/backup leftovers after failed overwrite.
+    assert not (tmp_path / ".rob_atomic.tmp").exists()
+    assert not (tmp_path / ".rob_atomic.bak").exists()
 
 
 def test_run_residual_robustness_end_to_end_deterministic() -> None:

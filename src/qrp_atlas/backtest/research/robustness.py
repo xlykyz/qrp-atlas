@@ -40,20 +40,6 @@ DEFAULT_ROLLING_WINDOWS = (20, 60, 120)
 TRADING_DAYS_PER_YEAR = 252
 RESULT_SCHEMA_VERSION = "1.0.0"
 
-STRATEGY_PARAM_KEYS = frozenset(
-    {
-        "window",
-        "min_periods",
-        "z_window",
-        "fit_intercept",
-        "entry_zscore",
-        "exit_zscore",
-        "min_r2",
-        "max_hold_days",
-    }
-)
-
-
 class ResidualRobustnessError(ValueError):
     """Raised when residual robustness validation cannot proceed."""
 
@@ -92,6 +78,45 @@ def _finite_or_none(value: Any) -> float | None:
     if math.isnan(number) or math.isinf(number):
         return None
     return float(number)
+
+
+def annualized_net_return_from_growth(
+    total_growth: float | None,
+    observation_count: int,
+    *,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
+) -> float | None:
+    """Geometric/CAGR annualization from realized equity growth.
+
+    ``total_growth`` is final_equity / initial_cash (or chained OOS equity).
+    Uses trading-day compounding:
+    ``total_growth ** (periods_per_year / observation_count) - 1``.
+    """
+
+    if observation_count <= 0 or total_growth is None:
+        return None
+    try:
+        growth = float(total_growth)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(growth) or growth <= 0.0:
+        return None
+    if observation_count == 0:
+        return None
+    try:
+        annualized = growth ** (float(periods_per_year) / float(observation_count)) - 1.0
+    except (OverflowError, ValueError, ZeroDivisionError):
+        return None
+    if not math.isfinite(annualized):
+        return None
+    return float(annualized)
+
+
+def declared_strategy_parameter_keys() -> frozenset[str]:
+    """Return declared parameter names from the residual strategy definition."""
+
+    strategy = get_strategy(STRATEGY_CODE, STRATEGY_VERSION)
+    return frozenset(strategy.definition.parameter_schema.keys())
 
 
 def normalize_trading_dates(trade_dates: Sequence[Any] | pd.Series | pd.Index) -> list[pd.Timestamp]:
@@ -421,11 +446,12 @@ def build_parameter_candidates(
         raise ResidualRobustnessError("max_candidates must be >= 1")
     strategy = get_strategy(STRATEGY_CODE, STRATEGY_VERSION)
     base = resolve_parameters(strategy.definition, dict(base_parameters or {}))
+    allowed_keys = frozenset(strategy.definition.parameter_schema.keys())
 
     grid = {} if parameter_grid is None else dict(parameter_grid)
     # Do not mutate caller structures.
     for key in grid:
-        if key not in STRATEGY_PARAM_KEYS:
+        if key not in allowed_keys:
             raise ResidualRobustnessError(
                 f"parameter_grid key {key!r} is not a declared strategy parameter"
             )
@@ -507,32 +533,32 @@ def compute_portfolio_performance_metrics(
         and math.isfinite(float(snapshot.daily_return))
     ]
     n = len(daily_returns)
+    total_growth = (
+        final_equity / initial_cash
+        if initial_cash and math.isfinite(final_equity / initial_cash)
+        else None
+    )
+    annualized_net = annualized_net_return_from_growth(total_growth, n)
     if n >= 2:
         mean_r = sum(daily_returns) / n
         var = sum((value - mean_r) ** 2 for value in daily_returns) / (n - 1)
         vol = math.sqrt(var)
         annualized_vol = vol * math.sqrt(TRADING_DAYS_PER_YEAR)
-        annualized_net = (1.0 + mean_r) ** TRADING_DAYS_PER_YEAR - 1.0
         if vol > 0:
             net_sharpe = (mean_r / vol) * math.sqrt(TRADING_DAYS_PER_YEAR)
         else:
             net_sharpe = None
     elif n == 1:
-        mean_r = daily_returns[0]
         annualized_vol = 0.0
-        annualized_net = (1.0 + mean_r) ** TRADING_DAYS_PER_YEAR - 1.0
         net_sharpe = None
     else:
         annualized_vol = None
-        annualized_net = None
         net_sharpe = None
 
     max_drawdown = float(summary.get("max_drawdown", 0.0))
     abs_dd = abs(max_drawdown)
-    if annualized_net is None:
+    if annualized_net is None or abs_dd == 0.0:
         net_calmar = None
-    elif abs_dd == 0.0:
-        net_calmar = None if annualized_net == 0.0 else None
     else:
         net_calmar = annualized_net / abs_dd
 
@@ -733,7 +759,7 @@ def stitch_oos_equity(
 
     daily = [float(value) for value in frame["daily_return"].tolist()]
     n = len(daily)
-    mean_r = sum(daily) / n
+    mean_r = sum(daily) / n if n else 0.0
     if n >= 2:
         var = sum((value - mean_r) ** 2 for value in daily) / (n - 1)
         vol = math.sqrt(var)
@@ -744,11 +770,16 @@ def stitch_oos_equity(
     else:
         annualized_vol = 0.0
         net_sharpe = None
-    annualized_net = (1.0 + mean_r) ** TRADING_DAYS_PER_YEAR - 1.0
+    final_growth = float(frame["oos_equity"].iloc[-1])
+    annualized_net = annualized_net_return_from_growth(final_growth, n)
     max_dd = float(frame["drawdown"].min())
     abs_dd = abs(max_dd)
-    net_calmar = annualized_net / abs_dd if abs_dd > 0 else None
-    net_total_return = float(frame["oos_equity"].iloc[-1]) - 1.0
+    net_calmar = (
+        annualized_net / abs_dd
+        if annualized_net is not None and abs_dd > 0
+        else None
+    )
+    net_total_return = final_growth - 1.0
     summary = {
         "observation_count": n,
         "net_total_return": net_total_return,
@@ -1263,6 +1294,10 @@ def run_residual_robustness_study(
             "net_total_return": "final_equity / initial_cash - 1",
             "net_sharpe": "mean(daily_return)/std(daily_return)*sqrt(252); rf=0",
             "net_calmar": "annualized_net_return / abs(max_drawdown)",
+            "annualized_net_return": (
+                "(final_equity / initial_cash) ** (252 / observation_count) - 1 "
+                "from realized equity growth (geometric/CAGR), not (1+mean_daily)**252-1"
+            ),
         },
         "walk_forward_config": walk_forward_config.to_dict(),
         "base_parameters": dict(base_parameters or {}),
@@ -1318,6 +1353,7 @@ __all__ = [
     "ResidualRobustnessResult",
     "WalkForwardConfig",
     "WalkForwardSplit",
+    "annualized_net_return_from_growth",
     "build_parameter_candidates",
     "build_walk_forward_splits",
     "compute_portfolio_performance_metrics",

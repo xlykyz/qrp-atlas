@@ -186,9 +186,30 @@ class ResidualRobustnessWriter:
                         ],
                     )
 
-                if run_dir.exists():
-                    shutil.rmtree(run_dir)
-                temp_dir.replace(run_dir)
+                # Atomic promotion with rollback-safe overwrite:
+                # write fully into temp first; only then swap directories.
+                backup_dir = self.root / f".{run_id}.bak"
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir)
+
+                replaced_existing = False
+                try:
+                    if run_dir.exists():
+                        # Move existing run aside so a failed promotion can restore it.
+                        run_dir.replace(backup_dir)
+                        replaced_existing = True
+                    temp_dir.replace(run_dir)
+                except Exception:
+                    # Best-effort restore of the previous formal directory.
+                    if replaced_existing and backup_dir.exists() and not run_dir.exists():
+                        try:
+                            backup_dir.replace(run_dir)
+                        except Exception:
+                            pass
+                    raise
+                else:
+                    if backup_dir.exists():
+                        shutil.rmtree(backup_dir)
             except Exception:
                 if temp_dir.exists():
                     shutil.rmtree(temp_dir)

@@ -205,6 +205,40 @@ def test_missing_benchmark_no_fill_and_no_market_fallback() -> None:
     assert any("MISSING_INDUSTRY_BENCHMARK" in item for item in prep.diagnostics)
 
 
+def test_missing_industry_price_day_does_not_bridge_to_next_day() -> None:
+    """Deleting T must invalidate both T and T+1 single-day returns."""
+
+    n = 8
+    assets = _prices({"A": [100 + i for i in range(n)]})
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    closes = [1000, 1010, 1020, 1030, 1040, 1050, 1060, 1070]
+    # Remove index 3 (T). Keep T-1 and T+1 present so a sparse shift would wrongly bridge.
+    bench = _industry_prices({"I1": closes}).drop(index=[3]).reset_index(drop=True)
+    industry = _flat_panel_industry(["A"], dates, lambda a, d: "I1")
+    prep = prepare_industry_residual_panel(
+        assets,
+        industry_benchmark_prices=bench,
+        industry_panel=industry,
+        window=3,
+        min_periods=3,
+        z_window=3,
+        compute_residuals=False,
+    )
+    panel = prep.panel.set_index("trade_date")
+    missing_t = panel.loc[dates[3]]
+    next_day = panel.loc[dates[4]]
+    recovery = panel.loc[dates[5]]
+    assert math.isnan(float(missing_t["benchmark_return"]))
+    assert missing_t["preparation_diagnostic_code"] == "MISSING_INDUSTRY_BENCHMARK"
+    assert math.isnan(float(next_day["benchmark_return"]))
+    assert next_day["preparation_diagnostic_code"] == "MISSING_INDUSTRY_BENCHMARK"
+    # T+2 has both T+1 and T+2 prices available on the asset calendar.
+    assert math.isfinite(float(recovery["benchmark_return"]))
+    assert math.isclose(float(recovery["benchmark_return"]), closes[5] / closes[4] - 1.0)
+    # Ensure we did not silently form the multi-day bridge close[4]/close[2]-1.
+    assert not math.isclose(float(recovery["benchmark_return"]), closes[4] / closes[2] - 1.0)
+
+
 def test_missing_industry_no_market_fallback() -> None:
     n = 8
     assets = _prices({"A": [100 + i for i in range(n)], "B": [100 + i for i in range(n)]})
