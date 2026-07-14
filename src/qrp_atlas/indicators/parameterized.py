@@ -10,11 +10,47 @@ from typing import Any
 
 import pandas as pd
 
-from qrp_atlas.contracts import CLOSE, HIGH, LOW, TICKER, TRADE_DATE
+from qrp_atlas.contracts import AMOUNT, CLOSE, HIGH, LOW, TICKER, TRADE_DATE, VOLUME
 from qrp_atlas.indicators.stock import calculate_stock_trend
 from qrp_atlas.indicators.stock.residual import (
     RESIDUAL_OUTPUT_COLUMNS,
     market_residual_calculator,
+)
+from qrp_atlas.indicators.stock.momentum import (
+    adx_calculator,
+    cci_calculator,
+    rsi_calculator,
+    stochastic_oscillator_calculator,
+    williams_r_calculator,
+)
+from qrp_atlas.indicators.stock.moving import (
+    ema_calculator,
+    kaufman_efficiency_ratio_calculator,
+    linear_regression_trend_calculator,
+    macd_calculator,
+    wma_calculator,
+)
+from qrp_atlas.indicators.stock.volatility import (
+    atr_breakout_bands_calculator,
+    atr_calculator,
+    bollinger_bands_calculator,
+    downside_volatility_calculator,
+    keltner_channel_calculator,
+    return_volatility_calculator,
+    rolling_current_drawdown_calculator,
+    rolling_max_drawdown_calculator,
+    true_range_calculator,
+    ulcer_index_calculator,
+)
+from qrp_atlas.indicators.stock.volume import (
+    amihud_illiquidity_calculator,
+    cmf_calculator,
+    mfi_calculator,
+    obv_calculator,
+    price_volume_correlation_calculator,
+    relative_volume_calculator,
+    rolling_vwap_calculator,
+    volume_sma_calculator,
 )
 from qrp_atlas.indicators.system_b import calculate_system_b_basic_states_from_prices
 
@@ -91,6 +127,7 @@ class IndicatorCalculationDefinition:
     required_fields: tuple[str, ...]
     outputs: tuple[str, ...]
     calculator: Callable[[pd.DataFrame, Mapping[str, Any]], Mapping[str, pd.Series]]
+    parameter_validator: Callable[[Mapping[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -237,17 +274,158 @@ def _legacy_system_b_adapter(
 
 _WINDOW = {"window": IndicatorParameterSpec("integer", 20, True, 2, 10000)}
 _LOOKBACK = {"lookback": IndicatorParameterSpec("integer", 20, True, 1, 10000)}
+_POSITIVE_MULTIPLIER = IndicatorParameterSpec("number", 2.0, True, 0.000001, 1000.0)
+
+
+def _validate_fast_slow(parameters: Mapping[str, Any]) -> None:
+    if parameters["fast_window"] >= parameters["slow_window"]:
+        raise IndicatorRequestError("fast_window must be less than slow_window")
 
 
 CALCULATION_REGISTRY: dict[str, IndicatorCalculationDefinition] = {
+    # Existing compatibility calculations.
     "sma": IndicatorCalculationDefinition("sma", _WINDOW, (CLOSE,), ("value",), _rolling(CLOSE, "mean")),
     "period_return": IndicatorCalculationDefinition("period_return", _LOOKBACK, (CLOSE,), ("value",), _period_return),
+    "roc": IndicatorCalculationDefinition("roc", _LOOKBACK, (CLOSE,), ("value",), _period_return),
     "donchian_high": IndicatorCalculationDefinition("donchian_high", _WINDOW, (HIGH,), ("value",), _rolling(HIGH, "max_previous")),
     "donchian_low": IndicatorCalculationDefinition("donchian_low", _WINDOW, (LOW,), ("value",), _rolling(LOW, "min_previous")),
     "rolling_mean": IndicatorCalculationDefinition("rolling_mean", _WINDOW, (CLOSE,), ("value",), _rolling(CLOSE, "mean")),
     "rolling_std": IndicatorCalculationDefinition("rolling_std", _WINDOW, (CLOSE,), ("value",), _rolling(CLOSE, "std")),
     "rolling_zscore": IndicatorCalculationDefinition("rolling_zscore", _WINDOW, (CLOSE,), ("value",), _rolling_zscore),
-
+    # Trend and moving averages.
+    "ema": IndicatorCalculationDefinition("ema", _WINDOW, (CLOSE,), ("value",), ema_calculator),
+    "wma": IndicatorCalculationDefinition("wma", _WINDOW, (CLOSE,), ("value",), wma_calculator),
+    "macd": IndicatorCalculationDefinition(
+        "macd",
+        {
+            "fast_window": IndicatorParameterSpec("integer", 12, True, 2, 10000),
+            "slow_window": IndicatorParameterSpec("integer", 26, True, 3, 10000),
+            "signal_window": IndicatorParameterSpec("integer", 9, True, 2, 10000),
+        },
+        (CLOSE,),
+        ("line", "signal", "histogram"),
+        macd_calculator,
+        _validate_fast_slow,
+    ),
+    "linear_regression_trend": IndicatorCalculationDefinition(
+        "linear_regression_trend", _WINDOW, (CLOSE,),
+        ("slope", "normalized_slope", "r_squared"), linear_regression_trend_calculator,
+    ),
+    "kaufman_efficiency_ratio": IndicatorCalculationDefinition(
+        "kaufman_efficiency_ratio", _WINDOW, (CLOSE,), ("value",),
+        kaufman_efficiency_ratio_calculator,
+    ),
+    # Volatility, ranges, channels, and drawdowns.
+    "true_range": IndicatorCalculationDefinition(
+        "true_range", {}, (HIGH, LOW, CLOSE), ("value",), true_range_calculator,
+    ),
+    "atr": IndicatorCalculationDefinition(
+        "atr", _WINDOW, (HIGH, LOW, CLOSE), ("value",), atr_calculator,
+    ),
+    "bollinger_bands": IndicatorCalculationDefinition(
+        "bollinger_bands",
+        {"window": _WINDOW["window"], "multiplier": _POSITIVE_MULTIPLIER},
+        (CLOSE,),
+        ("middle", "upper", "lower", "bandwidth", "percent_b"),
+        bollinger_bands_calculator,
+    ),
+    "keltner_channel": IndicatorCalculationDefinition(
+        "keltner_channel",
+        {
+            "ema_window": IndicatorParameterSpec("integer", 20, True, 2, 10000),
+            "atr_window": IndicatorParameterSpec("integer", 10, True, 2, 10000),
+            "multiplier": _POSITIVE_MULTIPLIER,
+        },
+        (HIGH, LOW, CLOSE),
+        ("middle", "upper", "lower", "atr"),
+        keltner_channel_calculator,
+    ),
+    "return_volatility": IndicatorCalculationDefinition(
+        "return_volatility",
+        {
+            "window": _WINDOW["window"],
+            "annualization": IndicatorParameterSpec("number", 252.0, True, 0.000001, 100000.0),
+        },
+        (CLOSE,), ("value",), return_volatility_calculator,
+    ),
+    "downside_volatility": IndicatorCalculationDefinition(
+        "downside_volatility",
+        {
+            "window": _WINDOW["window"],
+            "annualization": IndicatorParameterSpec("number", 252.0, True, 0.000001, 100000.0),
+            "target": IndicatorParameterSpec("number", 0.0, True, -1000.0, 1000.0),
+        },
+        (CLOSE,), ("value",), downside_volatility_calculator,
+    ),
+    "rolling_current_drawdown": IndicatorCalculationDefinition(
+        "rolling_current_drawdown", _WINDOW, (CLOSE,), ("value",),
+        rolling_current_drawdown_calculator,
+    ),
+    "rolling_max_drawdown": IndicatorCalculationDefinition(
+        "rolling_max_drawdown", _WINDOW, (CLOSE,), ("value",),
+        rolling_max_drawdown_calculator,
+    ),
+    "ulcer_index": IndicatorCalculationDefinition(
+        "ulcer_index", _WINDOW, (CLOSE,), ("value",), ulcer_index_calculator,
+    ),
+    "atr_breakout_bands": IndicatorCalculationDefinition(
+        "atr_breakout_bands",
+        {"window": _WINDOW["window"], "multiplier": _POSITIVE_MULTIPLIER},
+        (HIGH, LOW, CLOSE), ("upper", "lower", "atr"), atr_breakout_bands_calculator,
+    ),
+    # Momentum and oscillators.
+    "rsi": IndicatorCalculationDefinition("rsi", _WINDOW, (CLOSE,), ("value",), rsi_calculator),
+    "stochastic_oscillator": IndicatorCalculationDefinition(
+        "stochastic_oscillator",
+        {
+            "window": IndicatorParameterSpec("integer", 14, True, 2, 10000),
+            "d_window": IndicatorParameterSpec("integer", 3, True, 1, 10000),
+        },
+        (HIGH, LOW, CLOSE), ("percent_k", "percent_d"), stochastic_oscillator_calculator,
+    ),
+    "williams_r": IndicatorCalculationDefinition(
+        "williams_r", _WINDOW, (HIGH, LOW, CLOSE), ("value",), williams_r_calculator,
+    ),
+    "cci": IndicatorCalculationDefinition(
+        "cci",
+        {
+            "window": _WINDOW["window"],
+            "constant": IndicatorParameterSpec("number", 0.015, True, 0.000001, 1000.0),
+        },
+        (HIGH, LOW, CLOSE), ("value",), cci_calculator,
+    ),
+    "adx": IndicatorCalculationDefinition(
+        "adx", _WINDOW, (HIGH, LOW, CLOSE), ("adx", "plus_di", "minus_di"), adx_calculator,
+    ),
+    # Volume and liquidity.
+    "obv": IndicatorCalculationDefinition("obv", {}, (CLOSE, VOLUME), ("value",), obv_calculator),
+    "rolling_vwap": IndicatorCalculationDefinition(
+        "rolling_vwap", _WINDOW, (CLOSE, VOLUME), ("value",), rolling_vwap_calculator,
+    ),
+    "volume_sma": IndicatorCalculationDefinition(
+        "volume_sma", _WINDOW, (VOLUME,), ("value",), volume_sma_calculator,
+    ),
+    "relative_volume": IndicatorCalculationDefinition(
+        "relative_volume", _WINDOW, (VOLUME,), ("value",), relative_volume_calculator,
+    ),
+    "mfi": IndicatorCalculationDefinition(
+        "mfi", _WINDOW, (HIGH, LOW, CLOSE, VOLUME), ("value",), mfi_calculator,
+    ),
+    "cmf": IndicatorCalculationDefinition(
+        "cmf", _WINDOW, (HIGH, LOW, CLOSE, VOLUME), ("value",), cmf_calculator,
+    ),
+    "amihud_illiquidity": IndicatorCalculationDefinition(
+        "amihud_illiquidity",
+        {
+            "window": _WINDOW["window"],
+            "scale": IndicatorParameterSpec("number", 1.0, True, 0.000001, 1e20),
+        },
+        (CLOSE, AMOUNT), ("value",), amihud_illiquidity_calculator,
+    ),
+    "price_volume_correlation": IndicatorCalculationDefinition(
+        "price_volume_correlation", _WINDOW, (CLOSE, VOLUME), ("value",),
+        price_volume_correlation_calculator,
+    ),
     "market_residual": IndicatorCalculationDefinition(
         "market_residual",
         {
@@ -270,7 +448,6 @@ CALCULATION_REGISTRY: dict[str, IndicatorCalculationDefinition] = {
         ("system_b_trend_valid", "system_b_exit_triggered"), _legacy_system_b_adapter,
     ),
 }
-
 
 LEGACY_INDICATOR_REQUESTS: dict[str, IndicatorRequest] = {
     output: IndicatorRequest("stock_trend_legacy", alias=output, output_fields={output: output})
@@ -342,6 +519,8 @@ def resolve_indicator_requests(
                 )
             _validate_parameter(request.code, name, value, spec)
             parameters[name] = value
+        if definition.parameter_validator is not None:
+            definition.parameter_validator(parameters)
 
         alias = request.alias or _default_alias(request.code, parameters)
         _validate_identifier(alias, "indicator alias")
