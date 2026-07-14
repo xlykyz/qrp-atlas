@@ -107,6 +107,21 @@ from qrp_atlas.indicators.cross_section import (
     sort_cross_section_frame,
 )
 
+# 事件指标（业绩预告）
+from qrp_atlas.indicators.events import (
+    DIRECTION_SCORE_BY_FORECAST_TYPE,
+    UNKNOWN_FORECAST_TYPE_DIRECTION,
+    attach_earnings_forecast_indicators,
+    compute_direction_score,
+    compute_event_age,
+    compute_event_window,
+    compute_net_profit_midpoint,
+    compute_net_profit_range,
+    compute_profit_change_midpoint,
+    compute_profit_change_range,
+    map_forecast_type_direction,
+)
+
 __all__ = [
     # 元数据定义
     "IndicatorDefinition",
@@ -187,4 +202,15 @@ __all__ = [
     "resolve_factor_requests",
     "resolve_historical_universe",
     "sort_cross_section_frame",
+    "DIRECTION_SCORE_BY_FORECAST_TYPE",
+    "UNKNOWN_FORECAST_TYPE_DIRECTION",
+    "attach_earnings_forecast_indicators",
+    "compute_direction_score",
+    "compute_event_age",
+    "compute_event_window",
+    "compute_net_profit_midpoint",
+    "compute_net_profit_range",
+    "compute_profit_change_midpoint",
+    "compute_profit_change_range",
+    "map_forecast_type_direction",
 ]

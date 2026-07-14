@@ -34,6 +34,7 @@ from .portfolio import (
     PortfolioSnapshot,
     PositionSnapshot,
     StrategyPortfolioBacktestRun,
+    run_event_drift_portfolio_backtest,
     run_strategy_portfolio_backtest,
     strategy_decisions_to_target_weights,
 )
@@ -54,6 +55,10 @@ from .research import (
     run_market_residual_mean_reversion_backtest,
     run_residual_research,
     summarize_information_coefficient,
+    EarningsForecastEventStudyResult,
+    EventStudyError,
+    compute_event_forward_returns,
+    run_earnings_forecast_event_study,
 )
 
 __all__ = [
@@ -89,6 +94,7 @@ __all__ = [
     "query_index_components_as_of",
     "query_industry_as_of",
     "run_strategy_backtest",
+    "run_event_drift_portfolio_backtest",
     "run_strategy_portfolio_backtest",
     "select_latest_available_records",
     "summarize_index_components",
@@ -109,4 +115,8 @@ __all__ = [
     "ResidualResearchResult",
     "ResidualStrategyBacktestRun",
     "summarize_information_coefficient",
+    "EarningsForecastEventStudyResult",
+    "EventStudyError",
+    "compute_event_forward_returns",
+    "run_earnings_forecast_event_study",
 ]

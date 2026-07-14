@@ -24,6 +24,15 @@ from qrp_atlas.indicators.system_b.detector import (
     SYSTEM_B_EXIT_TRIGGERED,
     SYSTEM_B_TREND_VALID,
 )
+from qrp_atlas.indicators.events.earnings_forecast import (
+    DIRECTION_SCORE,
+    EVENT_AGE,
+    EVENT_WINDOW,
+    NET_PROFIT_MIDPOINT,
+    NET_PROFIT_RANGE,
+    PROFIT_CHANGE_MIDPOINT,
+    PROFIT_CHANGE_RANGE,
+)
 
 
 ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
@@ -39,6 +48,13 @@ ALL_INDICATORS: tuple[IndicatorDefinition, ...] = (
     IndicatorDefinition(ROLLING_R2, "Rolling residual R2", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only rolling OLS R-squared versus a market benchmark."),
     IndicatorDefinition(RESIDUAL_RETURN, "Residual return", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Sample-out residual return using prior-only alpha/beta."),
     IndicatorDefinition(RESIDUAL_ZSCORE, "Residual z-score", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Prior-only z-score of residual returns."),
+    IndicatorDefinition(EVENT_WINDOW, "Earnings forecast event window", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Point-in-time active earnings-forecast event window."),
+    IndicatorDefinition(EVENT_AGE, "Earnings forecast event age", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Trading-day age of the active earnings-forecast event."),
+    IndicatorDefinition(DIRECTION_SCORE, "Earnings forecast direction score", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Signed directional score of the active earnings-forecast event."),
+    IndicatorDefinition(NET_PROFIT_MIDPOINT, "Net profit midpoint", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Midpoint of active net-profit forecast range."),
+    IndicatorDefinition(NET_PROFIT_RANGE, "Net profit range", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Width of active net-profit forecast range."),
+    IndicatorDefinition(PROFIT_CHANGE_MIDPOINT, "Profit change midpoint", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Midpoint of active profit-change forecast range."),
+    IndicatorDefinition(PROFIT_CHANGE_RANGE, "Profit change range", IndicatorLayer.BASIC, IndicatorScope.STOCK, UpdateFrequency.AFTER_CLOSE, "Width of active profit-change forecast range."),
 )
 
 

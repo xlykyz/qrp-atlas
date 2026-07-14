@@ -13,6 +13,7 @@ from .cross_section import (
     compute_composite_score,
 )
 from .system_b_basic import SystemBBasicStrategy
+from .event_drift import EventDriftBasicStrategy
 
 __all__ = [
     "CrossSectionalMomentumLongOnlyStrategy",
@@ -22,6 +23,7 @@ __all__ = [
     "MultifactorLongOnlyStrategy",
     "RollingZscoreMeanReversionStrategy",
     "SystemBBasicStrategy",
+    "EventDriftBasicStrategy",
     "TimeSeriesMomentumStrategy",
     "compute_composite_score",
 ]

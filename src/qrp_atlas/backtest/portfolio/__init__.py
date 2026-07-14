@@ -24,6 +24,7 @@ from .models import (
 )
 from .strategy import (
     StrategyPortfolioBacktestRun,
+    run_event_drift_portfolio_backtest,
     run_strategy_portfolio_backtest,
     strategy_decisions_to_target_weights,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "REASON_SUSPENDED",
     "REASON_T_PLUS_ONE_BLOCKED",
     "StrategyPortfolioBacktestRun",
+    "run_event_drift_portfolio_backtest",
     "run_strategy_portfolio_backtest",
     "strategy_decisions_to_target_weights",
     "validate_portfolio_config",

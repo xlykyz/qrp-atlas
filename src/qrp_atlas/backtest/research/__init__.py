@@ -42,11 +42,23 @@ from .residual import (
     run_market_residual_mean_reversion_backtest,
     run_residual_research,
 )
+from .event_study import (
+    DEFAULT_EVENT_HORIZONS,
+    EarningsForecastEventStudyResult,
+    EventStudyError,
+    compute_event_forward_returns,
+    event_forward_return_column,
+    run_earnings_forecast_event_study,
+    summarize_event_groups,
+)
 
 __all__ = [
     "DEFAULT_FORWARD_HORIZONS",
+    "DEFAULT_EVENT_HORIZONS",
     "CrossSectionResearchError",
     "CrossSectionResearchResult",
+    "EarningsForecastEventStudyResult",
+    "EventStudyError",
     "ForwardReturnError",
     "GroupReturnResult",
     "ICSummaryResult",
@@ -56,12 +68,16 @@ __all__ = [
     "TargetExposureResult",
     "analyze_target_exposures",
     "assign_factor_groups",
+    "compute_event_forward_returns",
     "compute_forward_returns",
     "compute_group_returns",
     "compute_information_coefficient",
+    "event_forward_return_column",
     "forward_return_column",
     "run_cross_section_research",
+    "run_earnings_forecast_event_study",
     "run_market_residual_mean_reversion_backtest",
     "run_residual_research",
+    "summarize_event_groups",
     "summarize_information_coefficient",
 ]
