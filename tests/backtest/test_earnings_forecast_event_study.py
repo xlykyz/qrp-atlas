@@ -131,3 +131,27 @@ def test_group_stats_and_input_immutability():
 
 def DIRECTION_SCORE_PRESENT(result) -> bool:
     return "direction_score" in set(result.group_stats["group_dim"])
+
+
+def test_midpoint_buckets_param_removed_and_fixed_bins():
+    import inspect
+    from qrp_atlas.backtest.research.event_study import run_earnings_forecast_event_study as study
+
+    sig = inspect.signature(study)
+    assert "midpoint_buckets" not in sig.parameters
+    result = run_earnings_forecast_event_study(
+        _events(),
+        _prices(),
+        trading_days=_calendar(),
+        horizons=[1],
+    )
+    assert "profit_change_midpoint_bucket" in set(result.group_stats["group_dim"])
+    buckets = set(
+        result.group_stats.loc[
+            result.group_stats["group_dim"] == "profit_change_midpoint_bucket",
+            "profit_change_midpoint_bucket",
+        ].astype(str)
+    )
+    # sample midpoints 15 and -15 map to fixed research bins
+    assert "(10,50]" in buckets
+    assert "(-50,-10]" in buckets

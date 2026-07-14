@@ -210,16 +210,14 @@ def compute_event_forward_returns(
     return work.reset_index(drop=True), diagnostics
 
 
-def _bucket_profit_change_midpoint(value: Any, n_buckets: int = 5) -> str | float:
-    if n_buckets <= 0:
-        raise EventStudyError("n_buckets must be positive")
+def _bucket_profit_change_midpoint(value: Any) -> str | float:
+    """Fixed research bins in percent points for stable cross-sample comparison."""
     try:
         number = float(value)
     except (TypeError, ValueError):
         return math.nan
     if not math.isfinite(number):
         return math.nan
-    # Fixed research bins in percent points for stable cross-sample comparison.
     edges = [-math.inf, -50.0, -10.0, 0.0, 10.0, 50.0, math.inf]
     labels = ["<=-50", "(-50,-10]", "(-10,0]", "(0,10]", "(10,50]", ">50"]
     for idx in range(1, len(edges)):
@@ -308,7 +306,6 @@ def run_earnings_forecast_event_study(
     end_date: Any | None = None,
     open_field: str = "open",
     close_field: str = "close",
-    midpoint_buckets: int = 5,
 ) -> EarningsForecastEventStudyResult:
     """Run the 05-B earnings-forecast event research loop."""
     if events is None or not isinstance(events, pd.DataFrame):
@@ -348,7 +345,7 @@ def run_earnings_forecast_event_study(
     diagnostics.extend(ret_diag)
 
     labeled["profit_change_midpoint_bucket"] = [
-        _bucket_profit_change_midpoint(v, n_buckets=midpoint_buckets)
+        _bucket_profit_change_midpoint(v)
         for v in labeled.get(PROFIT_CHANGE_MIDPOINT, pd.Series(dtype=float)).tolist()
     ]
 

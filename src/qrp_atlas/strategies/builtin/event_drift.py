@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pandas as pd
@@ -72,21 +72,30 @@ def _finite(value: Any) -> float | None:
 class EventDriftBasicStrategy:
     """Long-only drift on positive earnings-forecast events.
 
-    Time semantics (do not shift again):
-    - announcement_date: evidence date
-    - available_trade_date: actual entry trade date (already next open day from 05-A)
-    - entry price: open on available_trade_date (portfolio engine price_field)
-    - hold_days: number of legal trading days held, including entry day as day 1
-      when converting targets to exits at rebalance/exit generation time.
+    Time semantics (do not shift available_trade_date again):
+    - announcement_date: event evidence date
+    - available_trade_date: actual entry trade date from 05-A
+    - entry price: open on available_trade_date
+    - hold_days: number of legal trading days held including the entry day as day 1;
+      exit is the next open after the hold window, i.e.
+      ``exit_index = entry_index + hold_days``
+
+    Capacity / weights:
+    - This strategy only selects names and hold periods.
+    - ``max_positions`` / ``max_weight_per_asset`` / concurrent equal-weight are owned
+      by ``PortfolioBacktestConfig`` + ``strategy_decisions_to_target_weights``.
+    - ENTER weights are left unset so the portfolio adapter can equal-weight the
+      full concurrent book.
     """
 
     definition = StrategyDefinition(
         code="event_drift_basic",
         name="Earnings Forecast Event Drift Basic",
-        version="1.0.0",
+        version="1.0.1",
         description=(
             "Long-only positive earnings-forecast drift. Enters on available_trade_date "
-            "open, holds hold_days trading days, equal-weights concurrent names."
+            "open, holds hold_days trading days, then exits on the next open. Selection "
+            "only; portfolio config owns capacity and equal-weighting."
         ),
         strategy_type=StrategyType.BUILTIN,
         required_fields=(
@@ -99,12 +108,13 @@ class EventDriftBasicStrategy:
             "event_series_id",
             "source_record_id",
         ),
-        required_indicators=(DIRECTION_SCORE, PROFIT_CHANGE_MIDPOINT),
+        # Event metrics are derived from EventFrame columns inside run(); they are
+        # not price-panel calculation-registry indicators consumed by
+        # prepare_strategy_data().
+        required_indicators=(),
         parameter_schema={
             "hold_days": _integer(5, minimum=1, maximum=120),
             "min_profit_change_midpoint": _number(0.0, minimum=-1000.0, maximum=1000.0),
-            "max_positions": _integer(50, minimum=1, maximum=5000),
-            "max_weight_per_asset": _number(1.0, minimum=0.0001, maximum=1.0),
         },
     )
 
@@ -115,20 +125,16 @@ class EventDriftBasicStrategy:
         parameters = resolve_parameters(self.definition, strategy_input.parameters)
         hold_days = int(parameters["hold_days"])
         min_mid = float(parameters["min_profit_change_midpoint"])
-        max_positions = int(parameters["max_positions"])
 
         prepared = strategy_input.prepared_data
         if prepared is None or not isinstance(prepared, pd.DataFrame):
             raise StrategyValidationError("prepared_data must be a DataFrame of events")
-        # Do not mutate caller frame.
         events = prepared.copy()
         missing = [c for c in self.definition.required_fields if c not in events.columns]
         if missing:
             raise StrategyValidationError(f"prepared_data missing fields: {missing}")
 
         enriched, diagnostics = attach_earnings_forecast_indicators(events, copy=False)
-
-        # Keep only positive directional forecasts.
         enriched[PROFIT_CHANGE_MIDPOINT] = pd.to_numeric(
             enriched[PROFIT_CHANGE_MIDPOINT], errors="coerce"
         )
@@ -148,7 +154,6 @@ class EventDriftBasicStrategy:
                 diagnostics=tuple(diagnostics + ["no_positive_events"]),
             )
 
-        # Same ticker same trade_date: keep deterministic latest formal disclosure.
         candidates["__entry_date"] = candidates["available_trade_date"].map(_normalize_date)
         candidates["__ann_date"] = candidates["announcement_date"].map(_normalize_date)
         candidates = candidates.sort_values(
@@ -157,27 +162,23 @@ class EventDriftBasicStrategy:
         )
         candidates = candidates.drop_duplicates(subset=["__entry_date", "ticker"], keep="last")
 
-        # Capacity: equal-weight among same-day entries, capped by max_positions.
-        decisions: list[StrategyDecision] = []
-        active: dict[str, dict[str, Any]] = {}
         open_dates = self._resolve_open_dates(strategy_input, candidates)
-
-        # Process chronological entry dates and manage exits by hold_days.
         entry_dates = sorted(candidates["__entry_date"].unique())
-        # Include open_dates after last entry for exits.
         timeline = sorted(set(entry_dates) | set(open_dates))
-        # Map for next-day iteration
-        if not timeline:
-            timeline = entry_dates
-
         by_entry = {
-            day: part.sort_values(["ticker"], kind="mergesort")
+            day: part.sort_values(
+                [PROFIT_CHANGE_MIDPOINT, "ticker"],
+                ascending=[False, True],
+                kind="mergesort",
+            )
             for day, part in candidates.groupby("__entry_date", sort=True)
         }
 
-        date_index = {day: i for i, day in enumerate(timeline)}
+        decisions: list[StrategyDecision] = []
+        active: dict[str, dict[str, Any]] = {}
+
         for day in timeline:
-            # exits first (same-day rebalance friendly)
+            # exits first
             to_exit = [
                 asset
                 for asset, state in active.items()
@@ -201,29 +202,26 @@ class EventDriftBasicStrategy:
                             "announcement_date": state["announcement_date"],
                             "available_trade_date": state["entry_date"],
                             "hold_days": hold_days,
+                            "exit_rule": "next_open_after_hold_window",
                             "event_series_id": state.get("event_series_id"),
                             "source_record_id": state.get("source_record_id"),
                         },
                     )
                 )
 
-            # entries
             day_entries = by_entry.get(day)
             if day_entries is not None and not day_entries.empty:
-                # equal weight among today's selected entries that fit capacity
-                remaining = max(0, max_positions - len(active))
-                selected = day_entries.head(remaining) if remaining else day_entries.iloc[0:0]
-                if remaining == 0:
-                    diagnostics.append(f"max_positions_reached_on_{day}")
-                n_sel = int(len(selected))
-                weight = (1.0 / n_sel) if n_sel else None
-                for _, row in selected.iterrows():
+                for _, row in day_entries.iterrows():
                     asset = str(row["ticker"])
                     score = _finite(row[PROFIT_CHANGE_MIDPOINT])
                     ann = row["__ann_date"]
-                    # Hard safety: entry must be after announcement evidence date.
                     if day <= ann:
-                        diagnostics.append(f"rejected_entry_not_after_announcement:{asset}:{day}")
+                        diagnostics.append(
+                            f"rejected_entry_not_after_announcement:{asset}:{day}"
+                        )
+                        continue
+                    if asset in active:
+                        # Already held from an earlier entry; keep existing hold window.
                         continue
                     exit_date = self._exit_date(day, hold_days, open_dates)
                     active[asset] = {
@@ -244,7 +242,8 @@ class EventDriftBasicStrategy:
                             strategy_version=self.definition.version,
                             reason_code="POSITIVE_FORECAST_DRIFT",
                             score=score,
-                            weight=weight,
+                            # Portfolio adapter owns concurrent equal-weight.
+                            weight=None,
                             evidence={
                                 "announcement_date": ann,
                                 "available_trade_date": day,
@@ -253,17 +252,17 @@ class EventDriftBasicStrategy:
                                 "direction_score": int(row[DIRECTION_SCORE]),
                                 "profit_change_midpoint": score,
                                 "hold_days": hold_days,
+                                "exit_date": exit_date,
                                 "event_series_id": row.get("event_series_id"),
                                 "source_record_id": row.get("source_record_id"),
                             },
                         )
                     )
 
-            # holds
             for asset in sorted(active):
                 state = active[asset]
                 if state["entry_date"] == day:
-                    continue  # entered today
+                    continue
                 decisions.append(
                     StrategyDecision(
                         trade_date=day,
@@ -287,7 +286,13 @@ class EventDriftBasicStrategy:
         decisions.sort(key=lambda d: (d.trade_date, d.asset_id, d.action.value))
         selected_entries = sum(1 for d in decisions if d.action is StrategyAction.ENTER)
         diagnostics.append(f"selected_entries={selected_entries}")
-        diagnostics.append("time_semantics:announcement_date=evidence;available_trade_date=entry;no_extra_next_open")
+        diagnostics.append(
+            "time_semantics:announcement_date=evidence;"
+            "available_trade_date=entry;"
+            "exit=next_open_after_hold_days;"
+            "no_extra_next_open_on_entry;"
+            "capacity_owned_by_portfolio_config"
+        )
         return StrategyRunResult(
             definition=self.definition,
             parameters=parameters,
@@ -306,24 +311,26 @@ class EventDriftBasicStrategy:
             days = sorted({_normalize_date(v) for v in raw})
             if days:
                 return days
-        # Fallback: use entry dates only (exits may become None and rely on later data).
         return sorted({_normalize_date(v) for v in candidates["__entry_date"].tolist()})
 
     def _exit_date(self, entry_date: str, hold_days: int, open_dates: list[str]) -> str | None:
+        """Exit on the next open after holding ``hold_days`` trading days.
+
+        Entry day is day 1. Example:
+        - hold_days=1, entry=D0 -> exit=D1 open
+        - hold_days=5, entry=D0 -> exit=D5 open
+        """
         if not open_dates:
             return None
         if entry_date not in open_dates:
-            # insert logically: find first open_date >= entry
             later = [d for d in open_dates if d >= entry_date]
             if not later:
                 return None
             entry_date = later[0]
         idx = open_dates.index(entry_date)
-        exit_idx = idx + (hold_days - 1)
+        exit_idx = idx + hold_days
         if exit_idx >= len(open_dates):
             return None
-        # Exit decision emitted on the exit day; holding window includes entry as day 1.
-        # For portfolio targets, EXIT weight 0 is applied on that day.
         return open_dates[exit_idx]
 
 

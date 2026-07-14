@@ -104,3 +104,21 @@ def test_attach_does_not_mutate_and_unknown_diagnostics():
     assert out.loc[0, "direction_score"] == 0
     assert any("unknown_forecast_type" in d for d in diag)
     assert get_indicator("event_age").code == "event_age"
+
+
+def test_event_indicators_registered_as_realtime_open_usable():
+    from qrp_atlas.indicators.definitions import UpdateFrequency
+
+    for code in (
+        "profit_change_midpoint",
+        "profit_change_range",
+        "net_profit_midpoint",
+        "net_profit_range",
+        "direction_score",
+        "event_age",
+        "event_window",
+    ):
+        definition = get_indicator(code)
+        assert definition.frequency is UpdateFrequency.REALTIME
+        assert definition.allow_intraday_decision is True
+        assert "available_trade_date" in definition.description or "Usable before open" in definition.description or "decision-time" in definition.description
