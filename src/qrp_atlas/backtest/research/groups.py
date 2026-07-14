@@ -204,12 +204,16 @@ def compute_group_returns(
             if groups_present:
                 low_group = min(groups_present)
                 high_group = max(groups_present)
-                high_ret = day_stats[high_group]["group_return"]
-                low_ret = day_stats[low_group]["group_return"]
-                if _is_finite(high_ret) and _is_finite(low_ret):
-                    spread = float(high_ret) - float(low_ret)
-                else:
+                # Fewer than two distinct groups cannot form a comparable spread.
+                if high_group == low_group:
                     spread = math.nan
+                else:
+                    high_ret = day_stats[high_group]["group_return"]
+                    low_ret = day_stats[low_group]["group_return"]
+                    if _is_finite(high_ret) and _is_finite(low_ret):
+                        spread = float(high_ret) - float(low_ret)
+                    else:
+                        spread = math.nan
                 spread_rows.append(
                     {
                         TRADE_DATE: normalize_trade_date(trade_date),

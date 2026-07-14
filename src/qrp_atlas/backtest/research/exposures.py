@@ -60,6 +60,8 @@ def analyze_target_exposures(
     Exposures are always read on the rebalance ``signal_date`` that produced
     the execution ``trade_date`` snapshot. Future revisions must not enter.
     Only positive target weights contribute.
+
+    Mapping schedules must be ``signal_date -> trade_date``.
     """
     if target_weights is None or not isinstance(target_weights, pd.DataFrame):
         raise ExposureAnalysisError("target_weights must be a pandas DataFrame")
@@ -70,12 +72,12 @@ def analyze_target_exposures(
             f"target_weights missing required columns: {missing}"
         )
 
+    working = _validate_target_weights(target_weights)
     trade_to_signal = _schedule_to_trade_signal_map(schedule)
     numeric_cols = normalize_feature_columns(numeric_exposures)
     categorical_cols = normalize_feature_columns(categorical_exposures)
 
     if not numeric_cols and not categorical_cols:
-        # Sensible defaults when callers pass a 04-C panel / factor frame.
         if exposure_panel is not None:
             if "log_market_cap" in exposure_panel.columns:
                 numeric_cols.append("log_market_cap")
@@ -89,7 +91,7 @@ def analyze_target_exposures(
                 if pd.api.types.is_numeric_dtype(factor_frame[column]):
                     numeric_cols.append(column)
 
-    if target_weights.empty:
+    if working.empty:
         return TargetExposureResult(
             numeric=_empty_numeric(),
             categorical=_empty_categorical(),
@@ -105,22 +107,15 @@ def analyze_target_exposures(
     numeric_rows: list[dict[str, Any]] = []
     categorical_rows: list[dict[str, Any]] = []
 
-    working = target_weights.copy()
-    working["trade_date"] = working["trade_date"].map(
-        lambda value: normalize_trade_date(value).strftime("%Y-%m-%d")
-    )
-    working["asset_id"] = working["asset_id"].astype(str)
-    working["target_weight"] = pd.to_numeric(working["target_weight"], errors="coerce")
-
     for trade_date, day in working.groupby("trade_date", sort=True):
         signal_date = trade_to_signal.get(normalize_trade_date(trade_date))
         if signal_date is None:
             raise ExposureAnalysisError(
                 f"missing signal_date mapping for trade_date={trade_date}"
             )
-        positive = day[
-            day["target_weight"].map(lambda value: _is_finite(value) and float(value) > 0)
-        ]
+        positive = day[day["target_weight"] > 0]
+        total_positive = float(positive["target_weight"].sum()) if not positive.empty else 0.0
+
         if positive.empty:
             for exposure in numeric_cols:
                 numeric_rows.append(
@@ -143,7 +138,6 @@ def analyze_target_exposures(
                 strict=True,
             )
         }
-        total_positive = sum(weights.values())
 
         for exposure in numeric_cols:
             covered = 0.0
@@ -154,7 +148,7 @@ def analyze_target_exposures(
                     continue
                 covered += weight
                 weighted_sum += weight * float(value)
-            missing = max(total_positive - covered, 0.0)
+            missing_weight = max(total_positive - covered, 0.0)
             mean = weighted_sum / covered if covered > 0 else math.nan
             numeric_rows.append(
                 {
@@ -163,7 +157,7 @@ def analyze_target_exposures(
                     "exposure": exposure,
                     "weighted_mean": mean,
                     "covered_weight": covered,
-                    "missing_weight": missing,
+                    "missing_weight": missing_weight,
                 }
             )
 
@@ -175,6 +169,13 @@ def analyze_target_exposures(
                     continue
                 key = str(category)
                 category_weights[key] = category_weights.get(key, 0.0) + weight
+            category_total = sum(category_weights.values())
+            if category_total > total_positive + 1e-9:
+                raise ExposureAnalysisError(
+                    "categorical exposure weights exceed positive target gross "
+                    f"on trade_date={trade_date} exposure={exposure!r}: "
+                    f"{category_total} > {total_positive}"
+                )
             for category in sorted(category_weights):
                 categorical_rows.append(
                     {
@@ -205,14 +206,47 @@ def analyze_target_exposures(
             ["trade_date", "exposure", "category"],
             kind="mergesort",
         ).reset_index(drop=True)
-        # Guardrail: categorical weight sum must not exceed positive target gross.
-        # (Residual cash / missing categories can make it lower.)
     return TargetExposureResult(numeric=numeric, categorical=categorical)
+
+
+def _validate_target_weights(target_weights: pd.DataFrame) -> pd.DataFrame:
+    working = target_weights.copy()
+    if working.empty:
+        return working
+    try:
+        working["trade_date"] = working["trade_date"].map(
+            lambda value: normalize_trade_date(value).strftime("%Y-%m-%d")
+        )
+    except Exception as exc:
+        raise ExposureAnalysisError("target_weights contains invalid trade_date") from exc
+    working["asset_id"] = working["asset_id"].astype(str)
+    if working["asset_id"].eq("").any() or working["asset_id"].isin({"nan", "None"}).any():
+        raise ExposureAnalysisError("target_weights contains missing asset_id values")
+    if working.duplicated(["trade_date", "asset_id"], keep=False).any():
+        raise ExposureAnalysisError(
+            "target_weights has duplicate (trade_date, asset_id) pairs"
+        )
+    weights = pd.to_numeric(working["target_weight"], errors="coerce")
+    if weights.isna().any() or not weights.map(_is_finite).all():
+        raise ExposureAnalysisError("target_weight values must be finite numbers")
+    if (weights < 0).any():
+        raise ExposureAnalysisError("target_weight values must be >= 0")
+    working["target_weight"] = weights.astype(float)
+    sums = working.groupby("trade_date")["target_weight"].sum()
+    if (sums > 1.0 + 1e-9).any():
+        raise ExposureAnalysisError(
+            "target weights must sum to <= 1 on each trade_date"
+        )
+    return working
 
 
 def _schedule_to_trade_signal_map(
     schedule: pd.DataFrame | Mapping[Any, Any],
 ) -> dict[pd.Timestamp, pd.Timestamp]:
+    """Normalize schedule to trade_date -> signal_date.
+
+    Mapping input is strictly ``signal_date -> trade_date``.
+    """
     if isinstance(schedule, pd.DataFrame):
         required = {"signal_date", "trade_date"}
         missing = required - set(schedule.columns)
@@ -220,22 +254,52 @@ def _schedule_to_trade_signal_map(
             raise ExposureAnalysisError(
                 f"schedule missing required columns: {sorted(missing)}"
             )
+        if schedule.empty:
+            return {}
+        signals = [normalize_trade_date(value) for value in schedule["signal_date"]]
+        trades = [normalize_trade_date(value) for value in schedule["trade_date"]]
+        if len(signals) != len(set(signals)):
+            raise ExposureAnalysisError("schedule signal_date values must be unique")
+        if len(trades) != len(set(trades)):
+            raise ExposureAnalysisError("schedule trade_date values must be unique")
         mapping: dict[pd.Timestamp, pd.Timestamp] = {}
-        for row in schedule.itertuples(index=False):
-            mapping[normalize_trade_date(row.trade_date)] = normalize_trade_date(
-                row.signal_date
-            )
-        return mapping
-    if isinstance(schedule, Mapping):
-        # Accept either signal->trade or trade->signal; detect by value presence.
-        mapping = {}
-        for key, value in schedule.items():
-            # Prefer signal_date -> trade_date convention used by 04-D.
-            signal = normalize_trade_date(key)
-            trade = normalize_trade_date(value)
+        for signal, trade in zip(signals, trades, strict=True):
+            if not trade > signal:
+                raise ExposureAnalysisError(
+                    "schedule trade_date must be strictly after signal_date: "
+                    f"{signal.strftime('%Y-%m-%d')} -> {trade.strftime('%Y-%m-%d')}"
+                )
+            if trade in mapping:
+                raise ExposureAnalysisError(
+                    f"duplicate schedule trade_date: {trade.strftime('%Y-%m-%d')}"
+                )
             mapping[trade] = signal
         return mapping
-    raise ExposureAnalysisError("schedule must be a DataFrame or mapping")
+
+    if isinstance(schedule, Mapping):
+        mapping = {}
+        for signal_key, trade_value in schedule.items():
+            signal = normalize_trade_date(signal_key)
+            trade = normalize_trade_date(trade_value)
+            if not trade > signal:
+                raise ExposureAnalysisError(
+                    "schedule trade_date must be strictly after signal_date: "
+                    f"{signal.strftime('%Y-%m-%d')} -> {trade.strftime('%Y-%m-%d')}"
+                )
+            if trade in mapping:
+                raise ExposureAnalysisError(
+                    f"duplicate schedule trade_date: {trade.strftime('%Y-%m-%d')}"
+                )
+            # Mapping contract is signal_date -> trade_date only.
+            mapping[trade] = signal
+        # Also enforce unique signal dates when provided via mapping.
+        if len(mapping) != len({signal for signal in mapping.values()}):
+            raise ExposureAnalysisError("schedule signal_date values must be unique")
+        return mapping
+
+    raise ExposureAnalysisError(
+        "schedule must be a DataFrame or signal_date->trade_date mapping"
+    )
 
 
 def _build_signal_lookup(
@@ -248,7 +312,11 @@ def _build_signal_lookup(
     lookup: dict[tuple[pd.Timestamp, str, str], Any] = {}
     frames: list[tuple[pd.DataFrame, Sequence[str]]] = []
     if factor_frame is not None:
-        cols = [c for c in list(numeric_cols) + list(categorical_cols) if c in factor_frame.columns]
+        cols = [
+            c
+            for c in list(numeric_cols) + list(categorical_cols)
+            if c in factor_frame.columns
+        ]
         if cols:
             frames.append((factor_frame, cols))
     if exposure_panel is not None:

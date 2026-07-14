@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -27,6 +28,7 @@ from qrp_atlas.strategies import (
     get_strategy,
     run_strategy,
 )
+from qrp_atlas.strategies.validation import resolve_parameters
 
 from .exposures import TargetExposureResult, analyze_target_exposures
 from .forward_returns import (
@@ -111,6 +113,17 @@ def run_cross_section_research(
 
     Future returns only enter evaluation outputs. Selection, decisions and
     target weights are produced solely from prepared factors/eligibility.
+
+    Parameter priority for shared schedule knobs:
+
+    ```text
+    explicit run_cross_section_research convenience args
+    > strategy_parameters
+    > strategy definition defaults
+    ```
+
+    The same resolved parameter set drives the research schedule, strategy
+    runtime and exposure signal/trade mapping.
     """
     factors = normalize_feature_columns(factor_columns)
     if not factors:
@@ -122,21 +135,40 @@ def run_cross_section_research(
 
     diagnostics: list[str] = []
     prepared_factors = factor_frame.copy()
-    # Research labels (future returns) are computed independently of selection.
-    forward_returns = compute_forward_returns(
-        price_df,
-        trading_days=trading_days,
-        horizons=horizons,
-        price_field=price_field,
-        as_of_dates=sorted(
-            {normalize_trade_date(value) for value in prepared_factors[TRADE_DATE]}
+    empty_universe = prepared_factors.empty
+    if empty_universe:
+        diagnostics.append("empty_factor_universe")
+
+    # Empty research universe must not expand into the full price panel.
+    if empty_universe:
+        forward_returns = compute_forward_returns(
+            price_df,
+            trading_days=trading_days,
+            horizons=horizons,
+            price_field=price_field,
+            as_of_dates=[],
+            assets=[],
         )
-        if TRADE_DATE in prepared_factors.columns and not prepared_factors.empty
-        else None,
-        assets=sorted({str(value) for value in prepared_factors[ASSET_ID]})
-        if ASSET_ID in prepared_factors.columns and not prepared_factors.empty
-        else None,
-    )
+    else:
+        forward_returns = compute_forward_returns(
+            price_df,
+            trading_days=trading_days,
+            horizons=horizons,
+            price_field=price_field,
+            as_of_dates=sorted(
+                {
+                    normalize_trade_date(value)
+                    for value in prepared_factors[TRADE_DATE].tolist()
+                }
+            )
+            if TRADE_DATE in prepared_factors.columns
+            else [],
+            assets=sorted(
+                {str(value) for value in prepared_factors[ASSET_ID].tolist()}
+            )
+            if ASSET_ID in prepared_factors.columns
+            else [],
+        )
 
     daily_ic = compute_information_coefficient(
         prepared_factors,
@@ -163,66 +195,81 @@ def run_cross_section_research(
         columns=["trade_date", "asset_id", "target_weight", "priority"]
     )
     portfolio_result: PortfolioBacktestResult | None = None
+    resolved_parameters: dict[str, Any] = {}
+    schedule = pd.DataFrame(
+        {
+            "signal_date": pd.Series(dtype="datetime64[ns]"),
+            "trade_date": pd.Series(dtype="datetime64[ns]"),
+        }
+    )
 
-    parameters = dict(strategy_parameters or {})
-    if rebalance_frequency is not None:
-        parameters.setdefault("rebalance_frequency", rebalance_frequency)
-    if explicit_dates is not None and "explicit_dates_json" not in parameters:
-        import json
-
-        parameters["explicit_dates_json"] = json.dumps(
-            [
-                normalize_trade_date(value).strftime("%Y-%m-%d")
-                for value in explicit_dates
-            ]
+    if strategy_code is None:
+        diagnostics.append("strategy_skipped")
+        # Without a strategy, still allow schedule construction from convenience
+        # args / raw strategy_parameters for exposure mapping when targets exist.
+        candidate = dict(strategy_parameters or {})
+        if rebalance_frequency is not None:
+            candidate["rebalance_frequency"] = rebalance_frequency
+        if explicit_dates is not None:
+            candidate["explicit_dates_json"] = json.dumps(
+                [
+                    normalize_trade_date(value).strftime("%Y-%m-%d")
+                    for value in explicit_dates
+                ]
+            )
+        resolved_parameters = candidate
+        schedule = _build_schedule_from_resolved(
+            trading_days,
+            resolved_parameters,
+            explicit_dates_override=explicit_dates,
         )
-    if score_column is not None:
-        parameters.setdefault("score_column", score_column)
-    elif "score_column" not in parameters and factors:
-        parameters.setdefault("score_column", factors[0])
+    else:
+        strategy = get_strategy(strategy_code, strategy_version)
+        merged = _merge_strategy_parameters(
+            strategy.definition,
+            strategy_parameters=strategy_parameters,
+            rebalance_frequency=rebalance_frequency,
+            explicit_dates=explicit_dates,
+            score_column=score_column,
+            factor_columns=factors,
+        )
+        try:
+            resolved_parameters = resolve_parameters(strategy.definition, merged)
+        except Exception as exc:  # StrategyValidationError and friends
+            raise CrossSectionResearchError(str(exc)) from exc
 
-    resolved_frequency = str(
-        rebalance_frequency
-        or parameters.get("rebalance_frequency")
-        or "weekly"
-    )
-    schedule = build_rebalance_schedule(
-        trading_days,
-        frequency=resolved_frequency,  # type: ignore[arg-type]
-        explicit_dates=explicit_dates
-        if explicit_dates is not None
-        else parameters.get("explicit_dates"),
-    )
+        schedule = _build_schedule_from_resolved(
+            trading_days,
+            resolved_parameters,
+            explicit_dates_override=explicit_dates,
+        )
 
-    if strategy_code is not None:
         runtime_context: dict[str, Any] = {"trading_days": list(trading_days)}
         if eligibility is not None:
             runtime_context["eligibility"] = eligibility
-        if explicit_dates is not None:
-            runtime_context["explicit_dates"] = list(explicit_dates)
-
-        strategy_input = StrategyInput(
-            prepared_data=prepared_factors,
-            parameters=parameters,
-            runtime_context=runtime_context,
+        explicit_for_runtime = _resolved_explicit_dates(
+            resolved_parameters, explicit_dates
         )
+        if explicit_for_runtime is not None:
+            runtime_context["explicit_dates"] = list(explicit_for_runtime)
+
         strategy_result = run_strategy(
             strategy_code,
-            strategy_input,
+            StrategyInput(
+                prepared_data=prepared_factors,
+                parameters=resolved_parameters,
+                runtime_context=runtime_context,
+            ),
             version=strategy_version,
         )
-        strategy_max_positions = int(parameters.get("max_positions", 10))
-        strategy_max_weight = float(parameters.get("max_weight_per_asset", 1.0))
+
+        max_positions = int(resolved_parameters.get("max_positions") or 10)
+        max_weight = float(resolved_parameters.get("max_weight_per_asset") or 1.0)
+        cash_buffer = float(resolved_parameters.get("cash_buffer") or 0.0)
         if portfolio_config is not None:
-            max_positions = min(strategy_max_positions, int(portfolio_config.max_positions))
-            max_weight = min(
-                strategy_max_weight,
-                float(portfolio_config.max_weight_per_asset),
-            )
-        else:
-            max_positions = strategy_max_positions
-            max_weight = strategy_max_weight
-        cash_buffer = float(parameters.get("cash_buffer", 0.0))
+            max_positions = min(max_positions, int(portfolio_config.max_positions))
+            max_weight = min(max_weight, float(portfolio_config.max_weight_per_asset))
+
         target_weights = strategy_decisions_to_target_weights(
             strategy_result,
             max_positions=max_positions,
@@ -240,15 +287,12 @@ def run_cross_section_research(
                 )
         else:
             diagnostics.append("portfolio_config_missing")
-    else:
-        diagnostics.append("strategy_skipped")
 
     if schedule.empty:
         diagnostics.append("empty_rebalance_schedule")
 
     if target_weights.empty or schedule.empty:
         from .exposures import (
-            TargetExposureResult,
             empty_categorical_exposures,
             empty_numeric_exposures,
         )
@@ -274,17 +318,16 @@ def run_cross_section_research(
         "horizons": list(horizons),
         "n_groups": n_groups,
         "strategy_code": strategy_code,
-        "rebalance_frequency": rebalance_frequency
-        or (strategy_parameters or {}).get("rebalance_frequency"),
+        "strategy_version": strategy_version,
+        "resolved_parameters": dict(resolved_parameters),
+        "rebalance_frequency": resolved_parameters.get("rebalance_frequency"),
         "price_field": price_field,
     }
     return CrossSectionResearchResult(
         forward_returns=forward_returns,
         daily_ic=daily_ic,
         ic_summary=ic_summary,
-        group_assignments=group_result.assignments
-        if group_result.assignments is not None
-        else assignments,
+        group_assignments=group_result.assignments,
         group_returns=group_result.group_returns,
         group_spreads=group_result.spreads,
         strategy_result=strategy_result,
@@ -294,3 +337,95 @@ def run_cross_section_research(
         diagnostics=tuple(diagnostics),
         metadata=metadata,
     )
+
+
+def _merge_strategy_parameters(
+    definition,
+    *,
+    strategy_parameters: Mapping[str, Any] | None,
+    rebalance_frequency: str | None,
+    explicit_dates: Sequence[Any] | None,
+    score_column: str | None,
+    factor_columns: Sequence[str],
+) -> dict[str, Any]:
+    """Merge convenience args into declared strategy parameters only.
+
+    Priority:
+    convenience run args > strategy_parameters > definition defaults (later).
+    """
+    schema = set(definition.parameter_schema)
+    raw = dict(strategy_parameters or {})
+    unknown = sorted(set(raw) - schema)
+    if unknown:
+        raise CrossSectionResearchError(
+            f"unknown strategy parameters for {definition.code}: {unknown}"
+        )
+
+    merged = dict(raw)
+
+    # Convenience arguments override strategy_parameters when provided.
+    if rebalance_frequency is not None and "rebalance_frequency" in schema:
+        merged["rebalance_frequency"] = rebalance_frequency
+    if explicit_dates is not None and "explicit_dates_json" in schema:
+        merged["explicit_dates_json"] = json.dumps(
+            [
+                normalize_trade_date(value).strftime("%Y-%m-%d")
+                for value in explicit_dates
+            ]
+        )
+    if score_column is not None and "score_column" in schema:
+        merged["score_column"] = score_column
+    elif (
+        "score_column" in schema
+        and "score_column" not in merged
+        and factor_columns
+    ):
+        # Momentum-style default only when the strategy declares score_column.
+        merged["score_column"] = factor_columns[0]
+
+    # Multifactor convenience: if caller provided research factor columns and
+    # the strategy expects JSON factor config but no weights were given, keep
+    # caller-provided JSON only. Do not invent weights.
+    return merged
+
+
+def _build_schedule_from_resolved(
+    trading_days: Sequence[Any],
+    resolved_parameters: Mapping[str, Any],
+    *,
+    explicit_dates_override: Sequence[Any] | None,
+) -> pd.DataFrame:
+    frequency = str(resolved_parameters.get("rebalance_frequency") or "weekly")
+    explicit = _resolved_explicit_dates(resolved_parameters, explicit_dates_override)
+    return build_rebalance_schedule(
+        trading_days,
+        frequency=frequency,  # type: ignore[arg-type]
+        explicit_dates=explicit,
+    )
+
+
+def _resolved_explicit_dates(
+    resolved_parameters: Mapping[str, Any],
+    explicit_dates_override: Sequence[Any] | None,
+) -> list[Any] | None:
+    if explicit_dates_override is not None:
+        return list(explicit_dates_override)
+    raw = resolved_parameters.get("explicit_dates_json")
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise CrossSectionResearchError(
+                "explicit_dates_json must be valid JSON"
+            ) from exc
+        if not isinstance(parsed, list):
+            raise CrossSectionResearchError("explicit_dates_json must be a JSON list")
+        return list(parsed)
+    raise CrossSectionResearchError("explicit_dates_json must be a JSON list/string")
