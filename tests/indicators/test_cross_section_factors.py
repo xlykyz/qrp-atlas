@@ -148,19 +148,29 @@ def _financial_panel(
 
 def test_list_and_get_factor_definitions() -> None:
     codes = [item.code for item in list_factors()]
-    assert codes == [
+    expected = {
         "average_traded_amount",
         "average_turnover",
         "book_to_price",
         "distance_to_high",
+        "dividend_yield_ttm",
+        "earnings_yield_ttm",
+        "free_float_turnover_rate",
         "high_low_range_volatility",
         "intermediate_momentum",
+        "log_circulating_market_cap",
         "log_market_cap",
+        "log_total_market_cap",
         "momentum",
         "roe",
+        "sales_to_price_ttm",
         "short_term_reversal",
         "turnover_change",
-    ]
+        "turnover_rate",
+        "volume_ratio",
+    }
+    assert codes == sorted(codes)
+    assert expected.issubset(codes)
     momentum = get_factor_definition("momentum")
     assert "close[T]" in momentum.formula
     assert "T+1" in momentum.time_semantics
