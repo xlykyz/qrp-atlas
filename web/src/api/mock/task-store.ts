@@ -103,6 +103,7 @@ export function mockCreateTask(req: CreateBacktestTaskRequest): BacktestTask {
     strategy_params: { ...req.strategy_params },
     universe_mode: req.universe_mode,
     universe_preset: req.universe_preset ?? null,
+    index_code: req.index_code ?? null,
     tickers: req.tickers ? [...req.tickers] : [],
     start_date: req.start_date,
     end_date: req.end_date,

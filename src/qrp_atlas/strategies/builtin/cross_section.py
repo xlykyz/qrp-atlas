@@ -579,6 +579,7 @@ class CrossSectionalMomentumLongOnlyStrategy(_CrossSectionalLongOnlyBase):
             "max_positions": _integer(10, 1),
             "max_weight_per_asset": _number(0.1, 0.000001, 1.0),
             "cash_buffer": _number(0.0, 0.0, 0.999999),
+            "momentum_lookback": _integer(20, 1, 500),
             "score_column": _string("momentum"),
             "ascending": _boolean(False),
             "rebalance_frequency": _string("weekly"),

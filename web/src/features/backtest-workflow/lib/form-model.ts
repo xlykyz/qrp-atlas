@@ -13,6 +13,7 @@ export interface BacktestWorkflowFormState {
   strategyParams: StrategyParamValues;
   universeMode: UniverseMode;
   universePreset: string;
+  indexCode: string;
   tickersText: string;
   startDate: string;
   endDate: string;
@@ -32,11 +33,22 @@ export const UNIVERSE_PRESETS = [
   { value: 'CUSTOM', label: '自定义列表' },
 ] as const;
 
+export const INDEX_CODE_OPTIONS = [
+  { value: '000300.SH', label: '沪深300（000300.SH）' },
+  { value: '000905.SH', label: '中证500（000905.SH）' },
+  { value: '000852.SH', label: '中证1000（000852.SH）' },
+  { value: '000016.SH', label: '上证50（000016.SH）' },
+] as const;
+
 export const ENTRY_TIMING_OPTIONS: { value: EntryTiming; label: string }[] = [
   { value: 'next_open', label: '次日开盘' },
   { value: 'same_close', label: '当日收盘（同 bar，非严格 PIT）' },
   { value: 'next_close', label: '次日收盘' },
 ];
+
+export function isCrossSectionalStrategy(code: string): boolean {
+  return code === 'cross_sectional_momentum_long_only';
+}
 
 export function defaultParamsFromSchema(schema: ParameterSchema): StrategyParamValues {
   const values: StrategyParamValues = {};
@@ -62,6 +74,7 @@ export function createDefaultFormState(): BacktestWorkflowFormState {
     strategyParams: {},
     universeMode: 'tickers',
     universePreset: 'CUSTOM',
+    indexCode: '000300.SH',
     tickersText: '000001.SZ, 600519.SH',
     startDate: '2024-01-01',
     endDate: '2024-12-31',
@@ -89,11 +102,19 @@ export function parseTickers(text: string): string[] {
 export function formStateToCreateRequest(
   form: BacktestWorkflowFormState,
 ): CreateBacktestTaskRequest {
+  const crossSectional = isCrossSectionalStrategy(form.strategyCode);
   const tickers = parseTickers(form.tickersText);
-  const universeMode: UniverseMode =
-    form.universePreset === 'CUSTOM' || form.universeMode === 'tickers'
-      ? 'tickers'
-      : 'preset';
+
+  let universeMode: UniverseMode;
+  if (crossSectional) {
+    universeMode = 'index_components';
+  } else if (form.universePreset === 'CUSTOM' || form.universeMode === 'tickers') {
+    universeMode = 'tickers';
+  } else if (form.universeMode === 'index_components') {
+    universeMode = 'tickers';
+  } else {
+    universeMode = 'preset';
+  }
 
   return {
     name: form.taskName.trim() || undefined,
@@ -102,6 +123,7 @@ export function formStateToCreateRequest(
     strategy_params: { ...form.strategyParams },
     universe_mode: universeMode,
     universe_preset: universeMode === 'preset' ? form.universePreset : undefined,
+    index_code: universeMode === 'index_components' ? form.indexCode.trim().toUpperCase() : undefined,
     tickers: universeMode === 'tickers' ? tickers : undefined,
     start_date: form.startDate,
     end_date: form.endDate,
@@ -116,7 +138,7 @@ export function formStateToCreateRequest(
       slippage_bps: form.slippageBps,
     },
     execution: {
-      entry_timing: form.entryTiming,
+      entry_timing: crossSectional ? 'next_open' : form.entryTiming,
     },
   };
 }

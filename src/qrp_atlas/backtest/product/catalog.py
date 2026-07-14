@@ -18,8 +18,8 @@ _STRATEGY_FAMILY: dict[str, str] = {
     "dual_sma_trend": "trend",
     "donchian_breakout": "breakout",
     "rolling_zscore_mean_reversion": "mean_reversion",
-    "cross_sectional_momentum_long_only": "other",
-    "multifactor_long_only": "other",
+    "cross_sectional_momentum_long_only": "cross_sectional",
+    "multifactor_long_only": "cross_sectional",
 }
 
 _STRATEGY_SCOPE: dict[str, str] = {
@@ -28,8 +28,11 @@ _STRATEGY_SCOPE: dict[str, str] = {
     "dual_sma_trend": "价格行为趋势类；适合中长期单标的或多标的并行。",
     "donchian_breakout": "突破类价格行为；适合趋势启动段。",
     "rolling_zscore_mean_reversion": "均值回归；更适合震荡市。",
-    "cross_sectional_momentum_long_only": "横截面选股；07-A 暂不作为默认产品入口。",
-    "multifactor_long_only": "多因子选股；07-A 暂不作为默认产品入口。",
+    "cross_sectional_momentum_long_only": (
+        "横截面动量选股；使用历史指数成分股票池与 PIT 语义；"
+        "信号日 T 收盘后选股，下一合法交易日 open 成交。"
+    ),
+    "multifactor_long_only": "多因子选股；07-B1 暂不作为产品入口。",
 }
 
 PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
@@ -39,13 +42,28 @@ PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
         "time_series_momentum",
         "donchian_breakout",
         "rolling_zscore_mean_reversion",
+        "cross_sectional_momentum_long_only",
     }
 )
+
+_REQUIRES_HISTORICAL_UNIVERSE: frozenset[str] = frozenset(
+    {
+        "cross_sectional_momentum_long_only",
+    }
+)
+
+_SUPPORTED_UNIVERSE_MODES: dict[str, list[str]] = {
+    "cross_sectional_momentum_long_only": ["index_components"],
+}
+
+_SUPPORTED_ENTRY_TIMINGS: dict[str, list[str]] = {
+    "cross_sectional_momentum_long_only": ["next_open"],
+}
 
 
 def _parameter_spec_dto(spec: Any) -> ParameterSpecDTO:
     if hasattr(spec, "to_dict"):
-        raw = spec.to_dict()
+        raw = dict(spec.to_dict())
     elif isinstance(spec, dict):
         raw = dict(spec)
     else:
@@ -56,12 +74,15 @@ def _parameter_spec_dto(spec: Any) -> ParameterSpecDTO:
             "has_default": bool(getattr(spec, "has_default", False)),
             "minimum": getattr(spec, "minimum", None),
             "maximum": getattr(spec, "maximum", None),
+            "description": getattr(spec, "description", None),
+            "label": getattr(spec, "label", None),
+            "enum": getattr(spec, "enum", None),
         }
     return ParameterSpecDTO(
-        type=str(raw.get("type", "string")),
+        type=str(raw.get("type") or "string"),
         required=bool(raw.get("required", False)),
         default=raw.get("default"),
-        has_default=bool(raw.get("has_default", raw.get("default") is not None)),
+        has_default=bool(raw.get("has_default", "default" in raw)),
         minimum=raw.get("minimum"),
         maximum=raw.get("maximum"),
         description=raw.get("description"),
@@ -71,29 +92,34 @@ def _parameter_spec_dto(spec: Any) -> ParameterSpecDTO:
 
 
 def list_indicator_catalog() -> list[IndicatorCatalogItem]:
-    """Return registered indicator metadata plus calculation/factor catalog entries."""
+    """List indicators + parameterized calculations + formal factors."""
 
     items: list[IndicatorCatalogItem] = []
     seen: set[str] = set()
 
-    for definition in list_indicators():
+    for item in list_indicators():
+        code = getattr(item, "code", None) or getattr(item, "indicator_id", None)
+        if not code or code in seen:
+            continue
         items.append(
             IndicatorCatalogItem(
-                code=definition.code,
-                name=definition.name,
-                layer=definition.layer.value if hasattr(definition.layer, "value") else str(definition.layer),
-                scope=definition.scope.value if hasattr(definition.scope, "value") else str(definition.scope),
-                frequency=(
-                    definition.frequency.value
-                    if hasattr(definition.frequency, "value")
-                    else str(definition.frequency)
+                code=str(code),
+                name=str(getattr(item, "name", code)),
+                layer=str(getattr(getattr(item, "layer", None), "value", getattr(item, "layer", "basic"))),
+                scope=str(getattr(getattr(item, "scope", None), "value", getattr(item, "scope", "stock"))),
+                frequency=str(
+                    getattr(
+                        getattr(item, "update_frequency", None),
+                        "value",
+                        getattr(item, "frequency", "after_close"),
+                    )
                 ),
-                description=getattr(definition, "description", "") or "",
+                description=str(getattr(item, "description", "") or ""),
             )
         )
-        seen.add(definition.code)
+        seen.add(str(code))
 
-    for code, calc in sorted(CALCULATION_REGISTRY.items()):
+    for code, calc in CALCULATION_REGISTRY.items():
         if code in seen:
             continue
         items.append(
@@ -132,6 +158,11 @@ def _strategy_to_catalog_item(definition: Any) -> StrategyCatalogItem:
         key: _parameter_spec_dto(spec)
         for key, spec in (definition.parameter_schema or {}).items()
     }
+    # Hide research-only explicit dates JSON from product forms.
+    if code == "cross_sectional_momentum_long_only":
+        schema.pop("explicit_dates_json", None)
+        schema.pop("score_column", None)
+
     indicator_requests: list[dict[str, Any]] = []
     for request in definition.indicator_requests or ():
         if hasattr(request, "to_dict"):
@@ -147,6 +178,7 @@ def _strategy_to_catalog_item(definition: Any) -> StrategyCatalogItem:
                 }
             )
 
+    product_supported = code in PRODUCT_SUPPORTED_STRATEGY_CODES
     return StrategyCatalogItem(
         code=code,
         name=definition.name,
@@ -163,6 +195,13 @@ def _strategy_to_catalog_item(definition: Any) -> StrategyCatalogItem:
         required_indicators=list(definition.required_indicators or ()),
         parameter_schema=schema,
         indicator_requests=indicator_requests,
+        product_supported=product_supported,
+        requires_historical_universe=code in _REQUIRES_HISTORICAL_UNIVERSE,
+        supported_universe_modes=_SUPPORTED_UNIVERSE_MODES.get(code, ["tickers"]),
+        supported_entry_timings=_SUPPORTED_ENTRY_TIMINGS.get(
+            code, ["next_open", "same_close", "next_close"]
+        ),
+        requires_portfolio_config=True,
     )
 
 

@@ -1,33 +1,33 @@
-import type { ParameterSchema, StrategyParamValues } from '@/types/strategy';
 import type { BacktestWorkflowFormState } from './form-model';
-import { parseTickers } from './form-model';
+import { isCrossSectionalStrategy, parseTickers } from './form-model';
+import type { ParameterSchema, StrategyParamValues } from '@/types/strategy';
 
 export type FieldErrors = Record<string, string>;
+
+function isInteger(n: number): boolean {
+  return Number.isFinite(n) && Math.floor(n) === n;
+}
 
 export function validateStrategyParams(
   schema: ParameterSchema,
   values: StrategyParamValues,
 ): FieldErrors {
   const errors: FieldErrors = {};
-
   for (const [key, spec] of Object.entries(schema)) {
-    const label = spec.label ?? key;
-    const raw = values[key];
-
-    if (spec.required && (raw === null || raw === undefined || raw === '')) {
+    const label = spec.label || key;
+    const value = values[key];
+    if (spec.required && (value === null || value === undefined || value === '')) {
       errors[`param.${key}`] = `${label}为必填项`;
       continue;
     }
-
-    if (raw === null || raw === undefined || raw === '') continue;
-
+    if (value === null || value === undefined || value === '') continue;
     if (spec.type === 'number' || spec.type === 'integer') {
-      const num = typeof raw === 'number' ? raw : Number(raw);
-      if (Number.isNaN(num)) {
+      const num = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(num)) {
         errors[`param.${key}`] = `${label}必须是数字`;
         continue;
       }
-      if (spec.type === 'integer' && !Number.isInteger(num)) {
+      if (spec.type === 'integer' && !isInteger(num)) {
         errors[`param.${key}`] = `${label}必须是整数`;
       }
       if (spec.minimum != null && num < spec.minimum) {
@@ -56,6 +56,7 @@ export function validateWorkflowForm(
   schema: ParameterSchema | null,
 ): FieldErrors {
   const errors: FieldErrors = {};
+  const crossSectional = isCrossSectionalStrategy(form.strategyCode);
 
   if (!form.strategyCode) {
     errors.strategyCode = '请选择策略';
@@ -66,14 +67,27 @@ export function validateWorkflowForm(
     errors.endDate = '结束日期不能早于开始日期';
   }
 
-  const universeMode =
-    form.universePreset === 'CUSTOM' || form.universeMode === 'tickers'
-      ? 'tickers'
-      : 'preset';
-  if (universeMode === 'tickers') {
-    const tickers = parseTickers(form.tickersText);
-    if (tickers.length === 0) {
-      errors.tickersText = '请至少输入一只股票代码';
+  if (crossSectional) {
+    if (!form.indexCode.trim()) {
+      errors.indexCode = '请选择或填写指数代码';
+    }
+    if (form.entryTiming !== 'next_open') {
+      errors.entryTiming = '横截面动量仅支持次日开盘成交';
+    }
+    const topN = form.strategyParams.top_n;
+    if (typeof topN === 'number' && topN > form.maxPositions) {
+      errors['param.top_n'] = `Top N 不能大于最大持仓数（${form.maxPositions}）`;
+    }
+  } else {
+    const universeMode =
+      form.universePreset === 'CUSTOM' || form.universeMode === 'tickers'
+        ? 'tickers'
+        : 'preset';
+    if (universeMode === 'tickers') {
+      const tickers = parseTickers(form.tickersText);
+      if (tickers.length === 0) {
+        errors.tickersText = '请至少输入一只股票代码';
+      }
     }
   }
 
