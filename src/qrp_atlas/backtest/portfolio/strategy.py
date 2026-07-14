@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -308,6 +308,88 @@ def run_strategy_portfolio_backtest(
         target_weights,
         config,
     )
+    return StrategyPortfolioBacktestRun(
+        strategy_result=strategy_result,
+        target_weights=target_weights,
+        portfolio_result=portfolio_result,
+    )
+
+
+def run_event_drift_portfolio_backtest(
+    events: pd.DataFrame,
+    price_df: pd.DataFrame,
+    config: PortfolioBacktestConfig,
+    *,
+    trading_days: Sequence[Any] | None = None,
+    parameters: Mapping[str, Any] | None = None,
+    version: str | None = None,
+    cash_buffer: float = 0.0,
+    strategy_code: str = "event_drift_basic",
+) -> StrategyPortfolioBacktestRun:
+    """Stable public closed-loop for earnings-forecast event drift.
+
+    Unlike ``run_strategy_portfolio_backtest``, this path does **not** call
+    ``prepare_strategy_data`` on a price panel. Event strategies consume an
+    EventFrame prepared by 05-A as_of queries / EventFrame projection, then the
+    registered strategy and portfolio engine.
+
+    Contracts enforced by this runner:
+    - execution price must be open (entry and exit at open)
+    - ``config.max_positions`` is injected into strategy runtime_context so
+      capacity is applied at entry after same-day exits (no delayed entry /
+      early displacement backlog)
+
+    Capacity ownership:
+    - strategy: selection + hold window + entry-time max_positions gate
+    - ``config.max_weight_per_asset`` + adapter: concurrent equal-weight
+    """
+    if events is None or not isinstance(events, pd.DataFrame):
+        raise ValueError("events must be a pandas DataFrame")
+    if price_df is None or not isinstance(price_df, pd.DataFrame):
+        raise ValueError("price_df must be a pandas DataFrame")
+
+    price_field = str(getattr(config.execution, "price_field", "") or "").strip().lower()
+    if price_field != "open":
+        raise ValueError(
+            "run_event_drift_portfolio_backtest requires "
+            "config.execution.price_field == 'open' "
+            f"(got {config.execution.price_field!r}); "
+            "event entry/exit are defined at open"
+        )
+
+    strategy = get_strategy(strategy_code, version)
+    resolved_parameters = resolve_parameters(strategy.definition, parameters or {})
+
+    open_dates: list[Any]
+    if trading_days is not None:
+        open_dates = list(trading_days)
+    elif "trade_date" in price_df.columns:
+        open_dates = sorted({str(pd.Timestamp(v).date()) for v in price_df["trade_date"].tolist()})
+    else:
+        raise ValueError("trading_days is required when price_df has no trade_date column")
+
+    strategy_result = strategy.run(
+        StrategyInput(
+            prepared_data=events.copy(),
+            parameters=resolved_parameters,
+            initial_positions={},
+            runtime_context={
+                "open_dates": open_dates,
+                "trading_days": open_dates,
+                # Single source of truth: portfolio config capacity.
+                "max_positions": int(config.max_positions),
+            },
+        )
+    )
+    target_weights = strategy_decisions_to_target_weights(
+        strategy_result,
+        max_positions=config.max_positions,
+        max_weight_per_asset=config.max_weight_per_asset,
+        default_weight=None,
+        cash_buffer=cash_buffer,
+        emit_unchanged_snapshots=True,
+    )
+    portfolio_result = PortfolioBacktestEngine().run(price_df, target_weights, config)
     return StrategyPortfolioBacktestRun(
         strategy_result=strategy_result,
         target_weights=target_weights,

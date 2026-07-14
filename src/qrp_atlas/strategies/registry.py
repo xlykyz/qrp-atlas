@@ -72,6 +72,7 @@ def _build_default_registry() -> StrategyRegistry:
         MultifactorLongOnlyStrategy,
     )
     from .builtin.system_b_basic import SystemBBasicStrategy
+    from .builtin.event_drift import EventDriftBasicStrategy
 
     registry = StrategyRegistry()
     registry.register(SystemBBasicStrategy())
@@ -81,6 +82,7 @@ def _build_default_registry() -> StrategyRegistry:
     registry.register(RollingZscoreMeanReversionStrategy())
     registry.register(CrossSectionalMomentumLongOnlyStrategy())
     registry.register(MultifactorLongOnlyStrategy())
+    registry.register(EventDriftBasicStrategy())
     return registry
 
 

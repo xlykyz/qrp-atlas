@@ -35,6 +35,15 @@ from .pipeline import (
     CrossSectionResearchResult,
     run_cross_section_research,
 )
+from .event_study import (
+    DEFAULT_EVENT_HORIZONS,
+    EarningsForecastEventStudyResult,
+    EventStudyError,
+    compute_event_forward_returns,
+    event_forward_return_column,
+    run_earnings_forecast_event_study,
+    summarize_event_groups,
+)
 
 __all__ = [
     "DEFAULT_FORWARD_HORIZONS",
@@ -52,4 +61,11 @@ __all__ = [
     "forward_return_column",
     "run_cross_section_research",
     "summarize_information_coefficient",
+    "DEFAULT_EVENT_HORIZONS",
+    "EarningsForecastEventStudyResult",
+    "EventStudyError",
+    "compute_event_forward_returns",
+    "event_forward_return_column",
+    "run_earnings_forecast_event_study",
+    "summarize_event_groups",
 ]
