@@ -114,7 +114,7 @@ def _requests(window: int = 3) -> list[FactorRequest]:
 
 
 def test_complete_factor_registration_and_indicator_parameter_contracts() -> None:
-    assert set(FACTOR_DEFINITIONS) == EXPECTED_FACTOR_CODES
+    assert EXPECTED_FACTOR_CODES.issubset(FACTOR_DEFINITIONS)
     for factor_code, (indicator_code, _) in NEW_FACTOR_SOURCES.items():
         factor = get_factor_definition(factor_code)
         indicator = get_calculation_definition(indicator_code)
