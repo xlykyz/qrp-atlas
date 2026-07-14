@@ -64,6 +64,8 @@ from .fields import (
     EPS, BPS, CFPS, ROE, ROA, GROSSPROFIT_MARGIN, NETPROFIT_MARGIN, DEBT_TO_ASSETS,
     CURRENT_RATIO, QUICK_RATIO, ASSET_ID, INDUSTRY_CODE, INDUSTRY_NAME, EFFECTIVE_FROM,
     EFFECTIVE_TO, INDEX_CODE, SNAPSHOT_DATE, WEIGHT,
+    FIRST_ANNOUNCEMENT_DATE, FORECAST_TYPE, PROFIT_CHANGE_MIN, PROFIT_CHANGE_MAX,
+    NET_PROFIT_MIN, NET_PROFIT_MAX, LAST_PARENT_NET, SUMMARY, CHANGE_REASON,
 )
 
 
@@ -311,6 +313,22 @@ TUSHARE_INDEX_WEIGHT: Dict[str, str] = {
     "weight": WEIGHT,
 }
 
+
+TUSHARE_FORECAST: Dict[str, str] = {
+    "ts_code": TICKER,
+    "ann_date": ANNOUNCEMENT_DATE,
+    "end_date": REPORT_PERIOD,
+    "type": FORECAST_TYPE,
+    "p_change_min": PROFIT_CHANGE_MIN,
+    "p_change_max": PROFIT_CHANGE_MAX,
+    "net_profit_min": NET_PROFIT_MIN,
+    "net_profit_max": NET_PROFIT_MAX,
+    "last_parent_net": LAST_PARENT_NET,
+    "first_ann_date": FIRST_ANNOUNCEMENT_DATE,
+    "summary": SUMMARY,
+    "change_reason": CHANGE_REASON,
+}
+
 SOURCE_MAPPINGS = {
     "akshare_daily_bar": AKSHARE_DAILY_BAR,
     "akshare_realtime": AKSHARE_REALTIME,
@@ -326,6 +344,7 @@ SOURCE_MAPPINGS = {
     "tushare_fina_indicator": TUSHARE_FINA_INDICATOR,
     "tushare_index_member_all": TUSHARE_INDEX_MEMBER_ALL,
     "tushare_index_weight": TUSHARE_INDEX_WEIGHT,
+    "tushare_forecast": TUSHARE_FORECAST,
 }
 
 

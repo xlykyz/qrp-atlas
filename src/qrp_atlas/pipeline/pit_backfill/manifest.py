@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import tempfile
@@ -37,22 +36,24 @@ def utc_now_iso() -> str:
 
 
 class _ManifestFileLock:
+    """Cross-platform exclusive lock for manifest read-modify-write."""
+
     def __init__(self, path: Path):
         self.path = Path(path)
-        self._fd = None
+        self._lock = None
 
     def __enter__(self):
+        from filelock import FileLock as _FileLock
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = open(self.path, "a+", encoding="utf-8")
-        fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+        self._lock = _FileLock(str(self.path), timeout=-1)
+        self._lock.acquire()
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        try:
-            fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._fd.close()
-            self._fd = None
+        if self._lock is not None:
+            self._lock.release(force=True)
+            self._lock = None
 
 
 @dataclass

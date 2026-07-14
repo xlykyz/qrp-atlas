@@ -392,3 +392,242 @@ def summarize_index_components(components: pd.DataFrame) -> dict[str, Any]:
         "snapshot_date": snap,
         "index_code": code,
     }
+
+
+EARNINGS_FORECAST_EVENT_TABLE = "earnings_forecast_event"
+EARNINGS_FORECAST_EVENT_COLUMNS = (
+    "ticker",
+    "event_type",
+    "event_series_id",
+    "report_period",
+    "announcement_date",
+    "first_announcement_date",
+    "published_at",
+    "time_precision",
+    "available_trade_date",
+    "forecast_type",
+    "profit_change_min",
+    "profit_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "last_parent_net",
+    "summary",
+    "change_reason",
+    "source",
+    "source_record_id",
+    "revision_id",
+    "ingested_at",
+)
+
+# Stable 05-B input projection (no strategy fields).
+EARNINGS_FORECAST_EVENT_FRAME_COLUMNS = (
+    "ticker",
+    "event_type",
+    "event_series_id",
+    "report_period",
+    "announcement_date",
+    "available_trade_date",
+    "forecast_type",
+    "profit_change_min",
+    "profit_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "source_record_id",
+    "revision_id",
+)
+
+
+
+def _select_latest_disclosure_per_series(records: pd.DataFrame) -> pd.DataFrame:
+    """Keep the latest formal disclosure per event_series_id.
+
+    Ordering (ascending; last wins):
+    1. available_trade_date
+    2. announcement_date  (formal disclosure recency; required tie-break when
+       weekend/holiday announcements share the same next open trade date)
+    3. ingested_at
+    4. revision_id
+    5. stable source row order
+    """
+    if records is None or records.empty:
+        return records.copy().reset_index(drop=True) if records is not None else pd.DataFrame()
+    if "event_series_id" not in records.columns:
+        raise ValueError("records missing required column: event_series_id")
+
+    work = records.copy()
+    order_col = "__ef_series_order"
+    work[order_col] = range(len(work))
+
+    sort_cols: list[str] = ["event_series_id"]
+    temp_cols = [order_col]
+
+    avail_col = "__ef_available_trade_date"
+    work[avail_col] = pd.to_datetime(work["available_trade_date"], errors="coerce")
+    sort_cols.append(avail_col)
+    temp_cols.append(avail_col)
+
+    ann_col = "__ef_announcement_date"
+    if "announcement_date" not in work.columns:
+        raise ValueError("records missing required column: announcement_date")
+    work[ann_col] = pd.to_datetime(work["announcement_date"], errors="coerce")
+    sort_cols.append(ann_col)
+    temp_cols.append(ann_col)
+
+    if "ingested_at" in work.columns:
+        ing_col = "__ef_ingested_at"
+        work[ing_col] = pd.to_datetime(work["ingested_at"], errors="coerce")
+        sort_cols.append(ing_col)
+        temp_cols.append(ing_col)
+
+    if "revision_id" in work.columns:
+        rev_col = "__ef_revision_id"
+        work[rev_col] = work["revision_id"].map(lambda v: "" if pd.isna(v) else str(v))
+        sort_cols.append(rev_col)
+        temp_cols.append(rev_col)
+
+    ordered = work.sort_values([*sort_cols, order_col], kind="mergesort", na_position="first")
+    selected = ordered.drop_duplicates(subset=["event_series_id"], keep="last")
+    return selected.drop(columns=temp_cols).reset_index(drop=True)
+
+
+def to_earnings_forecast_event_frame(records: pd.DataFrame) -> pd.DataFrame:
+    """Project earnings forecast rows to the stable 05-B event frame columns."""
+    if records is None or records.empty:
+        return pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_FRAME_COLUMNS))
+    out = records.copy()
+    for col in EARNINGS_FORECAST_EVENT_FRAME_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+    return out.loc[:, list(EARNINGS_FORECAST_EVENT_FRAME_COLUMNS)].reset_index(drop=True)
+
+
+def query_earnings_forecast_as_of(
+    *,
+    as_of_date: Any,
+    tickers: str | Sequence[str] | None = None,
+    report_period: Any = None,
+    report_period_start: Any = None,
+    report_period_end: Any = None,
+    forecast_type: str | Sequence[str] | None = None,
+    include_all_disclosures: bool = False,
+    include_all_revisions: bool = False,
+    as_event_frame: bool = False,
+    db_path: Any = None,
+    con: Any = None,
+) -> pd.DataFrame:
+    """Point-in-time query for earnings_forecast_event.
+
+    Market-time rule (formal disclosure availability):
+    - Only rows with ``available_trade_date <= as_of_date`` are eligible.
+    - ``available_trade_date`` is derived from announcement date and does **not**
+      encode technical-revision knowledge time.
+
+    Revision / disclosure selection:
+    - Default: one row per ``event_series_id`` — the latest formal disclosure
+      available as of the date (by ``announcement_date``, after market
+      availability filtering), using its current canonical technical revision.
+    - ``include_all_disclosures=True``: every formal disclosure
+      (``source_record_id``) that is market-available, each with its current
+      canonical technical revision.
+    - ``include_all_revisions=True``: every market-available technical revision
+      for every formal disclosure. This is an audit surface, not research
+      knowledge-as-of history.
+
+    Important boundary:
+    - Source does not provide a reliable revision publication timestamp.
+    - Therefore this API does **not** claim that later technical revisions are
+      invisible to earlier research ``as_of`` dates.
+    - Do **not** filter by ``ingested_at <= as_of_date``; backfilled historical
+      data would otherwise disappear.
+    - Canonical revision means the current best version stored for that
+      disclosure under append-only retention (latest by available ordering /
+      ingested_at / revision_id via ``select_latest_available_records``).
+    """
+    as_of = _require_as_of_date(as_of_date)
+
+    clauses: list[str] = ["available_trade_date <= ?"]
+    params: list[Any] = [as_of]
+
+    ticker_list = _as_list(tickers)
+    if ticker_list is not None and len(ticker_list) == 0:
+        empty = pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_COLUMNS))
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+    if ticker_list:
+        placeholders = ", ".join("?" * len(ticker_list))
+        clauses.append(f"ticker IN ({placeholders})")
+        params.extend(ticker_list)
+
+    if report_period is not None:
+        clauses.append("report_period = ?")
+        params.append(_normalize_date(report_period))
+    if report_period_start is not None:
+        clauses.append("report_period >= ?")
+        params.append(_normalize_date(report_period_start))
+    if report_period_end is not None:
+        clauses.append("report_period <= ?")
+        params.append(_normalize_date(report_period_end))
+
+    forecast_types = _as_list(forecast_type)
+    if forecast_types is not None and len(forecast_types) == 0:
+        empty = pd.DataFrame(columns=list(EARNINGS_FORECAST_EVENT_COLUMNS))
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+    if forecast_types:
+        placeholders = ", ".join("?" * len(forecast_types))
+        clauses.append(f"forecast_type IN ({placeholders})")
+        params.extend(forecast_types)
+
+    where_sql = " WHERE " + " AND ".join(clauses)
+    raw = _read_table(
+        table_name=EARNINGS_FORECAST_EVENT_TABLE,
+        db_path=db_path,
+        con=con,
+        where_sql=where_sql,
+        params=params,
+        order_by=(
+            "ticker, report_period, announcement_date, available_trade_date, "
+            "source_record_id, revision_id"
+        ),
+    )
+    if raw.empty:
+        empty = raw.reset_index(drop=True)
+        return to_earnings_forecast_event_frame(empty) if as_event_frame else empty
+
+    if include_all_revisions:
+        # Audit mode: keep every market-available technical revision.
+        selected = raw.reset_index(drop=True)
+    else:
+        # Canonical technical revision per formal disclosure.
+        selected = select_latest_available_records(
+            raw,
+            as_of_date=as_of,
+            entity_keys=["source_record_id"],
+            available_date_col="available_trade_date",
+            published_at_col="published_at" if "published_at" in raw.columns else None,
+            ingested_at_col="ingested_at" if "ingested_at" in raw.columns else None,
+            revision_col="revision_id" if "revision_id" in raw.columns else None,
+        )
+        if not include_all_disclosures:
+            # Research default: latest formal disclosure per event series.
+            # Explicit announcement_date ordering is required: multiple weekend /
+            # holiday announcements can share the same available_trade_date, and
+            # published_at is always NULL for this dataset. Without this key,
+            # revision_id hash could incorrectly pick the earlier announcement.
+            selected = _select_latest_disclosure_per_series(selected)
+
+    sort_cols = [
+        c
+        for c in (
+            "ticker",
+            "report_period",
+            "announcement_date",
+            "available_trade_date",
+            "source_record_id",
+            "revision_id",
+        )
+        if c in selected.columns
+    ]
+    if sort_cols:
+        selected = selected.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+    if as_event_frame:
+        return to_earnings_forecast_event_frame(selected)
+    return selected

@@ -16,10 +16,12 @@ from .factor_data import prepare_financial_factor_panel
 from .point_in_time import select_latest_available_records
 from .pit_queries import (
     IndustryMembershipConflictError,
+    query_earnings_forecast_as_of,
     query_financial_as_of,
     query_index_components_as_of,
     query_industry_as_of,
     summarize_index_components,
+    to_earnings_forecast_event_frame,
 )
 from .portfolio import (
     PortfolioBacktestConfig,
@@ -73,6 +75,7 @@ __all__ = [
     "prepare_cross_section_exposure_panel",
     "prepare_financial_factor_panel",
     "prepare_strategy_data",
+    "query_earnings_forecast_as_of",
     "query_financial_as_of",
     "query_index_components_as_of",
     "query_industry_as_of",
@@ -80,6 +83,7 @@ __all__ = [
     "run_strategy_portfolio_backtest",
     "select_latest_available_records",
     "summarize_index_components",
+    "to_earnings_forecast_event_frame",
     "strategy_decisions_to_target_weights",
     "CrossSectionResearchError",
     "CrossSectionResearchResult",

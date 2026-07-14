@@ -170,43 +170,47 @@ def ensure_load_backup(
 
 
 class FileLock:
-    """Exclusive flock-based lock."""
+    """Cross-platform exclusive file lock (process-level).
+
+    Implemented with the ``filelock`` package so Windows and Linux share the
+    same exclusive, inter-process lock semantics without importing ``fcntl``.
+    """
 
     def __init__(self, path: str | Path, *, timeout_s: float | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.timeout_s = timeout_s
-        self._fd: int | None = None
+        # Soft timeout: None means wait forever (filelock uses -1).
+        timeout = -1 if timeout_s is None else float(timeout_s)
+        from filelock import FileLock as _FileLock
+
+        self._lock = _FileLock(str(self.path), timeout=timeout)
+        self._held = False
 
     def acquire(self) -> None:
-        import fcntl
+        from filelock import Timeout as FileLockTimeout
 
-        self._fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
-        start = time.time()
-        while True:
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                os.ftruncate(self._fd, 0)
-                os.write(
-                    self._fd,
-                    f"pid={os.getpid()} time={datetime.now().isoformat()}\n".encode(),
-                )
-                return
-            except BlockingIOError:
-                if self.timeout_s is not None and (time.time() - start) >= self.timeout_s:
-                    raise TimeoutError(f"Could not acquire lock: {self.path}")
-                time.sleep(0.5)
+        try:
+            self._lock.acquire()
+        except FileLockTimeout as exc:
+            raise TimeoutError(f"Could not acquire lock: {self.path}") from exc
+        self._held = True
+        try:
+            # Best-effort holder metadata; lock validity does not depend on it.
+            self.path.write_text(
+                f"pid={os.getpid()} time={datetime.now().isoformat()}\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def release(self) -> None:
-        import fcntl
-
-        if self._fd is None:
+        if not self._held:
             return
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            self._lock.release(force=True)
         finally:
-            os.close(self._fd)
-            self._fd = None
+            self._held = False
 
     def __enter__(self) -> "FileLock":
         self.acquire()
