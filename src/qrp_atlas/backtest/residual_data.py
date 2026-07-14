@@ -113,8 +113,13 @@ def _simple_returns(closes: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(closes, errors="coerce").astype("float64")
     prev = numeric.shift(1)
     returns = numeric / prev - 1.0
-    valid = prev.gt(0) & numeric.map(lambda value: bool(pd.notna(value) and math.isfinite(float(value))))
-    return returns.where(valid).astype("float64")
+    current_ok = numeric.map(
+        lambda value: bool(pd.notna(value) and math.isfinite(float(value)) and float(value) > 0.0)
+    )
+    previous_ok = prev.map(
+        lambda value: bool(pd.notna(value) and math.isfinite(float(value)) and float(value) > 0.0)
+    )
+    return returns.where(current_ok & previous_ok).astype("float64")
 
 
 def prepare_market_residual_panel(

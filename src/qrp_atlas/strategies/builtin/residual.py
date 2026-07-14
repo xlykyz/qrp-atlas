@@ -12,6 +12,14 @@ from qrp_atlas.contracts import TICKER, TRADE_DATE
 from qrp_atlas.indicators import IndicatorParameterBinding, IndicatorRequest
 from qrp_atlas.indicators.stock.residual import (
     BENCHMARK_ID,
+    DIAGNOSTIC_CODE,
+    REASON_INSUFFICIENT_HISTORY as DIAG_INSUFFICIENT_HISTORY,
+    REASON_MISSING_BENCHMARK as DIAG_MISSING_BENCHMARK,
+    REASON_MISSING_CURRENT_RETURN as DIAG_MISSING_CURRENT_RETURN,
+    REASON_NON_FINITE_INPUT as DIAG_NON_FINITE_INPUT,
+    REASON_OK as DIAG_OK,
+    REASON_RANK_DEFICIENT as DIAG_RANK_DEFICIENT,
+    REASON_ZERO_BENCHMARK_VARIANCE as DIAG_ZERO_BENCHMARK_VARIANCE,
     RESIDUAL_RETURN,
     RESIDUAL_ZSCORE,
     ROLLING_ALPHA,
@@ -47,6 +55,15 @@ REASON_MISSING_BENCHMARK = "MISSING_BENCHMARK"
 REASON_INVALID_INDICATOR = "INVALID_INDICATOR"
 REASON_POSITION_CONTINUES = "POSITION_CONTINUES"
 REASON_ENTRY_CONDITION_NOT_MET = "ENTRY_CONDITION_NOT_MET"
+
+_DIAG_TO_REASON = {
+    DIAG_INSUFFICIENT_HISTORY: REASON_INSUFFICIENT_HISTORY,
+    DIAG_MISSING_BENCHMARK: REASON_MISSING_BENCHMARK,
+    DIAG_MISSING_CURRENT_RETURN: REASON_INVALID_INDICATOR,
+    DIAG_NON_FINITE_INPUT: REASON_INVALID_INDICATOR,
+    DIAG_ZERO_BENCHMARK_VARIANCE: REASON_INVALID_INDICATOR,
+    DIAG_RANK_DEFICIENT: REASON_INVALID_INDICATOR,
+}
 
 
 def _integer(default: int, minimum: int = 1, maximum: int = 10000) -> ParameterSpec:
@@ -85,6 +102,24 @@ def _finite_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _diagnostic_code(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text or None
+
+
+def _reason_from_diagnostic(diagnostic: str | None) -> str | None:
+    if diagnostic is None or diagnostic == DIAG_OK:
+        return None
+    return _DIAG_TO_REASON.get(diagnostic, REASON_INVALID_INDICATOR)
 
 
 class MarketResidualMeanReversionStrategy:
@@ -173,25 +208,34 @@ class MarketResidualMeanReversionStrategy:
             r2 = _finite_or_none(getattr(row, ROLLING_R2, None))
             residual = _finite_or_none(getattr(row, RESIDUAL_RETURN, None))
             zscore = _finite_or_none(getattr(row, RESIDUAL_ZSCORE, None))
+            diagnostic = _diagnostic_code(getattr(row, DIAGNOSTIC_CODE, None))
+            if diagnostic is None and hasattr(row, "diagnostic_code"):
+                diagnostic = _diagnostic_code(getattr(row, "diagnostic_code"))
+
             row_benchmark = getattr(row, BENCHMARK_ID, None) if hasattr(row, BENCHMARK_ID) else None
             evidence_benchmark = (
                 None
-                if row_benchmark is None or (isinstance(row_benchmark, float) and math.isnan(row_benchmark))
+                if row_benchmark is None
+                or (isinstance(row_benchmark, float) and math.isnan(row_benchmark))
                 else str(row_benchmark)
             )
             if evidence_benchmark is None and benchmark_id is not None:
                 evidence_benchmark = str(benchmark_id)
 
-            relationship_valid = (
+            indicators_valid = (
                 alpha is not None
                 and beta is not None
                 and r2 is not None
                 and residual is not None
                 and zscore is not None
-                and r2 >= min_r2
+                and (diagnostic in (None, DIAG_OK))
             )
-            history_ready = alpha is not None and beta is not None and r2 is not None
-            missing_benchmark = residual is None and history_ready and zscore is None
+            relationship_valid = indicators_valid and r2 >= min_r2
+            failure_reason = _reason_from_diagnostic(diagnostic)
+            if failure_reason is None and not indicators_valid:
+                failure_reason = REASON_INVALID_INDICATOR
+            if indicators_valid and r2 is not None and r2 < min_r2:
+                failure_reason = REASON_RELATIONSHIP_INVALID
 
             evidence = {
                 "signal_date": trade_date,
@@ -201,6 +245,7 @@ class MarketResidualMeanReversionStrategy:
                 "residual_return": residual,
                 "residual_zscore": zscore,
                 "benchmark_id": evidence_benchmark,
+                "indicator_diagnostic_code": diagnostic,
                 "entry_zscore": entry_z,
                 "exit_zscore": exit_z,
                 "min_r2": min_r2,
@@ -219,14 +264,7 @@ class MarketResidualMeanReversionStrategy:
 
                 if not relationship_valid:
                     action = StrategyAction.EXIT
-                    if not history_ready:
-                        reason = REASON_INSUFFICIENT_HISTORY
-                    elif missing_benchmark:
-                        reason = REASON_MISSING_BENCHMARK
-                    elif residual is None or zscore is None or alpha is None or beta is None:
-                        reason = REASON_INVALID_INDICATOR
-                    else:
-                        reason = REASON_RELATIONSHIP_INVALID
+                    reason = failure_reason or REASON_INVALID_INDICATOR
                     positions[asset_id] = False
                     hold_days.pop(asset_id, None)
                 elif next_hold >= max_hold_days:
@@ -245,18 +283,18 @@ class MarketResidualMeanReversionStrategy:
             else:
                 if not relationship_valid:
                     action = StrategyAction.NO_ACTION
-                    if not history_ready:
-                        reason = REASON_INSUFFICIENT_HISTORY
-                    elif missing_benchmark:
-                        reason = REASON_MISSING_BENCHMARK
+                    reason = failure_reason or REASON_ENTRY_CONDITION_NOT_MET
+                    if reason in {
+                        REASON_INSUFFICIENT_HISTORY,
+                        REASON_MISSING_BENCHMARK,
+                        REASON_INVALID_INDICATOR,
+                        REASON_RELATIONSHIP_INVALID,
+                    }:
                         diagnostics.append(f"{asset_id}|{trade_date}|{reason}")
-                    else:
-                        reason = REASON_ENTRY_CONDITION_NOT_MET
                 elif zscore is not None and zscore <= entry_z:
                     action = StrategyAction.ENTER
                     reason = REASON_RESIDUAL_EXTREME_ENTRY
                     positions[asset_id] = True
-                    # Hold counter increments on subsequent bars; ENTER day starts at 0.
                     hold_days[asset_id] = 0
                     evidence["hold_days"] = 0
                 else:

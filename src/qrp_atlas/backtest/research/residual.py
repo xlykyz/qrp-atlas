@@ -263,14 +263,30 @@ def run_market_residual_mean_reversion_backtest(
 ) -> ResidualStrategyBacktestRun:
     """Public long-only residual mean-reversion portfolio loop.
 
-    Chain:
-    prices + benchmark
-    -> prepare_market_residual_panel
-    -> market_residual_mean_reversion decisions
-    -> strategy_decisions_to_target_weights
-    -> next-open execution shift
-    -> PortfolioBacktestEngine
+    Fixed execution contract for 06-A:
+
+    ```text
+    signal T after close
+    → next market session T+1
+    → open execution
+    ```
+
+    ``entry_timing`` must be ``next_open`` and ``config.execution.price_field``
+    must be ``open``. Callers are rejected explicitly rather than rewritten.
     """
+
+    timing = str(entry_timing or "").strip()
+    if timing != "next_open":
+        raise ResidualResearchError(
+            "run_market_residual_mean_reversion_backtest only supports "
+            "entry_timing='next_open' (signal T -> next session open)"
+        )
+    price_field = str(getattr(config.execution, "price_field", "") or "").strip()
+    if price_field != "open":
+        raise ResidualResearchError(
+            "run_market_residual_mean_reversion_backtest requires "
+            "config.execution.price_field='open' to match next-open execution"
+        )
 
     strategy = get_strategy(STRATEGY_CODE, version or STRATEGY_VERSION)
     resolved = resolve_parameters(strategy.definition, parameters or {})
@@ -352,7 +368,7 @@ def run_market_residual_mean_reversion_backtest(
     trade_dates = market_trade_dates(formal_prices)
     execution_targets, skipped = shift_target_weights_to_execution_dates(
         signal_targets,
-        entry_timing=entry_timing,
+        entry_timing="next_open",
         trade_dates=trade_dates,
         end_date=end_date,
     )
@@ -367,7 +383,8 @@ def run_market_residual_mean_reversion_backtest(
         "strategy_code": strategy.definition.code,
         "strategy_version": strategy.definition.version,
         "benchmark_id": preparation.metadata.get("benchmark_id", benchmark_id),
-        "entry_timing": entry_timing,
+        "entry_timing": "next_open",
+        "execution_price_field": "open",
         "start_date": start_date,
         "end_date": end_date,
         "parameters": dict(resolved),
@@ -377,7 +394,7 @@ def run_market_residual_mean_reversion_backtest(
         ).get("calculation_version"),
         "signal_semantics": {
             "signal_date": "strategy decision date after close",
-            "execution_date": "next market session under next_open",
+            "execution_date": "next market session open",
             "benchmark_in_portfolio": False,
             "position_style": "long_only_equities",
         },
