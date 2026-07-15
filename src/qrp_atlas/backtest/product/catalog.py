@@ -9,6 +9,7 @@ from qrp_atlas.indicators.parameterized import CALCULATION_REGISTRY
 from qrp_atlas.indicators.cross_section import list_factors
 from qrp_atlas.strategies import get_strategy, list_strategies
 from qrp_atlas.strategies.registry import StrategyNotFoundError
+from qrp_atlas.strategies.declarative.store import semver_key
 
 from .schemas import IndicatorCatalogItem, ParameterSpecDTO, StrategyCatalogItem
 
@@ -20,6 +21,7 @@ _STRATEGY_FAMILY: dict[str, str] = {
     "rolling_zscore_mean_reversion": "mean_reversion",
     "cross_sectional_momentum_long_only": "cross_sectional",
     "multifactor_long_only": "cross_sectional",
+    "event_drift_basic": "event_driven",
 }
 
 _STRATEGY_SCOPE: dict[str, str] = {
@@ -33,6 +35,10 @@ _STRATEGY_SCOPE: dict[str, str] = {
         "信号日 T 收盘后选股，下一合法交易日 open 成交。"
     ),
     "multifactor_long_only": "多因子选股；07-B1 暂不作为产品入口。",
+    "event_drift_basic": (
+        "业绩预告事件漂移；基于 earnings_forecast_event + EventFrame；"
+        "公告日不可成交，available_trade_date 开盘入场；产品层不做二次 next_open 偏移。"
+    ),
 }
 
 PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
@@ -43,6 +49,7 @@ PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
         "donchian_breakout",
         "rolling_zscore_mean_reversion",
         "cross_sectional_momentum_long_only",
+        "event_drift_basic",
     }
 )
 
@@ -54,10 +61,12 @@ _REQUIRES_HISTORICAL_UNIVERSE: frozenset[str] = frozenset(
 
 _SUPPORTED_UNIVERSE_MODES: dict[str, list[str]] = {
     "cross_sectional_momentum_long_only": ["index_components"],
+    "event_drift_basic": ["tickers"],
 }
 
 _SUPPORTED_ENTRY_TIMINGS: dict[str, list[str]] = {
     "cross_sectional_momentum_long_only": ["next_open"],
+    "event_drift_basic": ["next_open"],
 }
 
 
@@ -225,18 +234,91 @@ def _strategy_to_catalog_item(definition: Any) -> StrategyCatalogItem:
     )
 
 
-def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogItem]:
-    """List strategy catalog items from the live registry (no second catalog copy)."""
+def _declarative_to_catalog_item(record: Any) -> StrategyCatalogItem:
+    definition = record.definition if hasattr(record, "definition") else record.get("definition")
+    if not isinstance(definition, dict):
+        definition = {}
+    code = str(definition.get("code") or getattr(record, "code", ""))
+    version = str(definition.get("version") or getattr(record, "version", ""))
+    name = str(definition.get("name") or getattr(record, "name", code))
+    description = str(definition.get("description") or getattr(record, "description", ""))
+    params = definition.get("parameters") or definition.get("parameter_schema") or {}
+    schema = {
+        key: _parameter_spec_dto(spec)
+        for key, spec in (params.items() if isinstance(params, dict) else [])
+    }
+    return StrategyCatalogItem(
+        code=code,
+        name=name,
+        version=version,
+        family="other",
+        description=description or "User declarative strategy",
+        scope="声明式策略；白名单规则；版本不可变。",
+        strategy_type="declarative",
+        required_fields=list(definition.get("required_fields") or []),
+        required_indicators=list(definition.get("required_indicators") or []),
+        parameter_schema=schema,
+        indicator_requests=list(definition.get("indicator_requests") or []),
+        product_supported=True,
+        requires_historical_universe=False,
+        supported_universe_modes=["tickers"],
+        supported_entry_timings=["next_open", "same_close", "next_close"],
+        requires_portfolio_config=True,
+    )
+
+
+def list_strategy_catalog(
+    *, product_only: bool = True, owner_user_id: str = "local-user"
+) -> list[StrategyCatalogItem]:
+    """List strategy catalog items from the live registry + user declarative store."""
 
     items = [_strategy_to_catalog_item(definition) for definition in list_strategies()]
     if product_only:
         items = [item for item in items if item.code in PRODUCT_SUPPORTED_STRATEGY_CODES]
-    return items
+    # Merge active declarative strategies (product supported).
+    try:
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        for record in get_declarative_store().list(
+            owner_user_id=owner_user_id, include_archived=False
+        ):
+            items.append(_declarative_to_catalog_item(record))
+    except Exception:
+        # Catalog must remain available even if store is empty/unavailable.
+        pass
+    # stable unique by code@version
+    dedup: dict[tuple[str, str], StrategyCatalogItem] = {}
+    for item in items:
+        dedup[(item.code, item.version)] = item
+    return sorted(dedup.values(), key=lambda x: (x.code, semver_key(x.version)))
 
 
-def get_strategy_catalog_item(code: str, version: str | None = None) -> StrategyCatalogItem:
+def get_strategy_catalog_item(
+    code: str, version: str | None = None, *, owner_user_id: str = "local-user"
+) -> StrategyCatalogItem:
     try:
         strategy = get_strategy(code, version)
+        return _strategy_to_catalog_item(strategy.definition)
     except StrategyNotFoundError as exc:
-        raise KeyError(str(exc)) from exc
-    return _strategy_to_catalog_item(strategy.definition)
+        from qrp_atlas.strategies.declarative.store import DeclarativeStoreError, get_declarative_store
+
+        store = get_declarative_store()
+        try:
+            if version:
+                record = store.get(code, version, owner_user_id=owner_user_id)
+            else:
+                records = [
+                    r
+                    for r in store.list(
+                        owner_user_id=owner_user_id, include_archived=False
+                    )
+                    if r.code == code and r.status == "active"
+                ]
+                if not records:
+                    raise KeyError(str(exc)) from exc
+                record = sorted(records, key=lambda r: semver_key(r.version))[-1]
+        except DeclarativeStoreError as store_exc:
+            raise KeyError(str(store_exc)) from store_exc
+        if record.status in {"archived", "disabled"}:
+            raise KeyError(f"declarative strategy not active: {code}@{record.version}")
+        return _declarative_to_catalog_item(record)

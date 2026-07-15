@@ -78,6 +78,8 @@ class CreateBacktestTaskRequest(BaseModel):
     tickers: list[str] | None = None
     start_date: str
     end_date: str
+    # Optional product benchmark (index code). Missing data => diagnostics, no silent substitute.
+    benchmark_id: str | None = None
     position: BacktestPositionConfigDTO = Field(default_factory=BacktestPositionConfigDTO)
     cost: BacktestCostConfigDTO = Field(default_factory=BacktestCostConfigDTO)
     execution: BacktestExecutionConfigDTO = Field(default_factory=BacktestExecutionConfigDTO)
@@ -85,6 +87,7 @@ class CreateBacktestTaskRequest(BaseModel):
 
 class BacktestTaskRecord(BaseModel):
     task_id: str
+    owner_user_id: str = "local-user"
     run_id: str | None = None
     name: str
     strategy_code: str
@@ -96,6 +99,7 @@ class BacktestTaskRecord(BaseModel):
     tickers: list[str] = Field(default_factory=list)
     start_date: str
     end_date: str
+    benchmark_id: str | None = None
     position: BacktestPositionConfigDTO
     cost: BacktestCostConfigDTO
     execution: BacktestExecutionConfigDTO

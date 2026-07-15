@@ -78,6 +78,18 @@ export function BacktestSummaryCards({ summary, loading }: Props) {
       tone: 'negative',
     },
     {
+      label: 'Sharpe',
+      value: formatRatio(summary.sharpe ?? null),
+    },
+    {
+      label: 'Sortino',
+      value: formatRatio(summary.sortino ?? null),
+    },
+    {
+      label: 'Calmar',
+      value: formatRatio(summary.calmar ?? null),
+    },
+    {
       label: '胜率',
       value: formatPct(summary.win_rate_pct),
     },
@@ -88,6 +100,17 @@ export function BacktestSummaryCards({ summary, loading }: Props) {
     {
       label: '交易笔数',
       value: formatInt(summary.trade_count),
+    },
+    {
+      label: '换手',
+      value: formatRatio(summary.turnover ?? null, 4),
+    },
+    {
+      label: '总费用',
+      value: formatRatio(summary.total_cost ?? null, 2),
+      hint: summary.commission != null
+        ? `佣金 ${summary.commission} / 印花税 ${summary.stamp_tax} / 滑点 ${summary.slippage_cost}`
+        : undefined,
     },
     {
       label: '平均持有天数',

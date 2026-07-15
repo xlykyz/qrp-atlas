@@ -1,5 +1,7 @@
 # QRP v1.0 数据与模块扩充规划
 
+> 任务 00 状态校准：2026-07-15。财务/行业/指数与 `earnings_forecast_event` 已落地；泛化 `corporate_event` 不再作为 v1.0 唯一验收对象。
+
 ## 一、规划原则
 
 本规划严格沿用已封版架构，不新增顶级业务模块：
@@ -108,7 +110,21 @@ source
 
 ### 2.4 结构化事件数据
 
-第一阶段建议建立统一事件事实表：
+#### v1.0 当前标准（已实现）
+
+v1.0 第一类标准事件不是泛化 `corporate_event`，而是：
+
+```text
+earnings_forecast_event
++ EventFrame
++ query_earnings_forecast_as_of / to_earnings_forecast_event_frame
+```
+
+已覆盖公告日、available_trade_date、revision、source 与 as_of 查询。产品化入口见任务 07-B2。
+
+#### v1.1 可扩展统一事件主表（非 v1.0 阻塞）
+
+后续可建立统一事件事实表：
 
 ```text
 corporate_event

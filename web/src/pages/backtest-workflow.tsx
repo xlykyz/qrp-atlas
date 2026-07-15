@@ -9,6 +9,7 @@ import { SchemaParamForm } from '@/features/backtest-workflow/components/schema-
 import { BacktestConfigForm } from '@/features/backtest-workflow/components/backtest-config-form';
 import { TaskList } from '@/features/backtest-workflow/components/task-list';
 import { RunComparePanel } from '@/features/backtest-workflow/components/run-compare-panel';
+import { DeclarativeEditorPanel } from '@/features/declarative-strategy/declarative-editor';
 import { useStrategyCatalog } from '@/features/backtest-workflow/hooks/use-strategy-catalog';
 import { useBacktestTasks } from '@/features/backtest-workflow/hooks/use-backtest-tasks';
 import { useRunCompare } from '@/features/backtest-workflow/hooks/use-run-compare';
@@ -214,6 +215,13 @@ export default function BacktestWorkflowPage() {
                 选择策略后将根据 parameter schema 动态生成参数表单。
               </div>
             )}
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+              声明式策略
+            </h2>
+            <DeclarativeEditorPanel />
           </section>
 
           <section>

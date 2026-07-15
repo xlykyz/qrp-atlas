@@ -9,8 +9,18 @@ import { RiskDistribution } from '@/components/backtest/risk-distribution';
 import { SkippedTable } from '@/components/backtest/skipped-table';
 import { TradesTable } from '@/components/backtest/trades-table';
 import {
+  BenchmarkPanel,
+  ExposuresPanel,
+  ReproPanel,
+  RollingPanel,
+} from '@/components/backtest/product-analytics-panels';
+import {
+  getBacktestBenchmark,
   getBacktestConfig,
   getBacktestEquity,
+  getBacktestExposures,
+  getBacktestReproducibility,
+  getBacktestRolling,
   getBacktestRuns,
   getBacktestSkipped,
   getBacktestSummary,
@@ -31,11 +41,15 @@ import type {
   BacktestRun,
   BacktestSummary,
   BacktestTrade,
+  BenchmarkArtifact,
   EquityPoint,
+  ExposureArtifact,
+  ReproducibilityArtifact,
+  RollingPerformancePoint,
   SkippedTrade,
 } from '@/types/backtest';
 
-type Tab = 'trades' | 'risk' | 'skipped' | 'config';
+type Tab = 'trades' | 'risk' | 'skipped' | 'config' | 'analytics';
 
 type ResultState<T> = {
   data: T | null;
@@ -71,6 +85,10 @@ export default function BacktestAnalysis() {
   const [trades, setTrades] = useState<ResultState<BacktestTrade[]>>(initialState());
   const [skipped, setSkipped] = useState<ResultState<SkippedTrade[]>>(initialState());
   const [config, setConfig] = useState<ResultState<BacktestConfigSnapshot>>(initialState());
+  const [rolling, setRolling] = useState<ResultState<RollingPerformancePoint[]>>(initialState());
+  const [benchmark, setBenchmark] = useState<ResultState<BenchmarkArtifact>>(initialState());
+  const [exposures, setExposures] = useState<ResultState<ExposureArtifact>>(initialState());
+  const [repro, setRepro] = useState<ResultState<ReproducibilityArtifact>>(initialState());
 
   useEffect(() => {
     setPageTitle('回测分析');
@@ -178,6 +196,10 @@ export default function BacktestAnalysis() {
             trades: () => getBacktestTrades(selectedRunId),
             skipped: () => getBacktestSkipped(selectedRunId),
             config: () => getBacktestConfig(selectedRunId),
+            rolling: () => getBacktestRolling(selectedRunId),
+            benchmark: () => getBacktestBenchmark(selectedRunId),
+            exposures: () => getBacktestExposures(selectedRunId),
+            repro: () => getBacktestReproducibility(selectedRunId),
           };
 
     const fetchOne = async <T,>(
@@ -199,13 +221,27 @@ export default function BacktestAnalysis() {
       }
     };
 
-    Promise.all([
+    const jobs = [
       fetchOne(api.summary, setSummary),
       fetchOne(api.equity, setEquity),
       fetchOne(api.trades, setTrades),
       fetchOne(api.skipped, setSkipped),
       fetchOne(api.config, setConfig),
-    ]);
+    ];
+    if (source === 'http') {
+      jobs.push(
+        fetchOne(api.rolling!, setRolling),
+        fetchOne(api.benchmark!, setBenchmark),
+        fetchOne(api.exposures!, setExposures),
+        fetchOne(api.repro!, setRepro),
+      );
+    } else {
+      setRolling({ data: null, loading: false, error: null });
+      setBenchmark({ data: null, loading: false, error: null });
+      setExposures({ data: null, loading: false, error: null });
+      setRepro({ data: null, loading: false, error: null });
+    }
+    Promise.all(jobs);
 
     return () => {
       cancelled = true;
@@ -217,6 +253,7 @@ export default function BacktestAnalysis() {
     { key: 'risk', label: '风险分布' },
     { key: 'skipped', label: 'Skipped 记录' },
     { key: 'config', label: '配置快照' },
+    { key: 'analytics', label: '分析扩展' },
   ];
 
   return (
@@ -309,6 +346,14 @@ export default function BacktestAnalysis() {
                 loading={config.loading}
                 error={config.error}
               />
+            )}
+            {activeTab === 'analytics' && (
+              <div className="space-y-4">
+                <BenchmarkPanel data={benchmark.data} loading={benchmark.loading} error={benchmark.error} />
+                <RollingPanel data={rolling.data} loading={rolling.loading} error={rolling.error} />
+                <ExposuresPanel data={exposures.data} loading={exposures.loading} error={exposures.error} />
+                <ReproPanel data={repro.data} loading={repro.loading} error={repro.error} />
+              </div>
             )}
           </section>
         </>

@@ -66,7 +66,9 @@ class BacktestTaskStore:
         )
         tmp.replace(path)
 
-    def create(self, request: CreateBacktestTaskRequest) -> BacktestTaskRecord:
+    def create(
+        self, request: CreateBacktestTaskRequest, *, owner_user_id: str = "local-user"
+    ) -> BacktestTaskRecord:
         with self._lock:
             task_id = f"task_{uuid.uuid4().hex[:12]}"
             created_at = _utc_now()
@@ -78,6 +80,7 @@ class BacktestTaskStore:
             snapshot = request.model_dump(mode="json")
             record = BacktestTaskRecord(
                 task_id=task_id,
+                owner_user_id=owner_user_id,
                 run_id=None,
                 name=name,
                 strategy_code=request.strategy_code,
@@ -89,6 +92,7 @@ class BacktestTaskStore:
                 tickers=tickers,
                 start_date=request.start_date,
                 end_date=request.end_date,
+                benchmark_id=request.benchmark_id,
                 position=request.position,
                 cost=request.cost,
                 execution=request.execution,
@@ -102,21 +106,28 @@ class BacktestTaskStore:
             self._write_atomic(self._path(task_id), record.model_dump(mode="json"))
             return record
 
-    def get(self, task_id: str) -> BacktestTaskRecord:
+    def get(
+        self, task_id: str, *, owner_user_id: str | None = None
+    ) -> BacktestTaskRecord:
         with self._lock:
             path = self._path(task_id)
             if not path.exists():
                 raise KeyError(f"task not found: {task_id}")
             data = json.loads(path.read_text(encoding="utf-8"))
-            return BacktestTaskRecord.model_validate(data)
+            record = BacktestTaskRecord.model_validate(data)
+            if owner_user_id is not None and record.owner_user_id != owner_user_id:
+                raise KeyError(f"task not found: {task_id}")
+            return record
 
-    def list(self) -> list[BacktestTaskRecord]:
+    def list(self, *, owner_user_id: str | None = None) -> list[BacktestTaskRecord]:
         with self._lock:
             records: list[BacktestTaskRecord] = []
             for path in sorted(self.root.glob("task_*.json"), reverse=True):
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    records.append(BacktestTaskRecord.model_validate(data))
+                    record = BacktestTaskRecord.model_validate(data)
+                    if owner_user_id is None or record.owner_user_id == owner_user_id:
+                        records.append(record)
                 except Exception:
                     continue
             records.sort(key=lambda item: item.created_at, reverse=True)
