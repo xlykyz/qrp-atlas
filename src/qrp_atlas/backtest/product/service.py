@@ -1,4 +1,4 @@
-"""Product orchestration for classic and cross-sectional backtest tasks."""
+"""Product orchestration for classic, cross-sectional, and event backtest tasks."""
 
 from __future__ import annotations
 
@@ -28,6 +28,12 @@ from .cross_section import (
     is_cross_sectional_product_strategy,
     resolve_cross_section_product_params,
     run_cross_sectional_momentum_product_backtest,
+)
+from .event import (
+    EventProductError,
+    is_event_product_strategy,
+    resolve_event_product_params,
+    run_event_drift_product_backtest,
 )
 from .schemas import (
     BacktestTaskRecord,
@@ -146,6 +152,17 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
             )
         tickers = []
         universe_preset = None
+    elif is_event_product_strategy(strategy_code):
+        if universe_mode != "tickers":
+            raise BacktestTaskValidationError(
+                "event_drift_basic requires universe_mode=tickers"
+            )
+        if not tickers:
+            raise BacktestTaskValidationError(
+                "tickers required when universe_mode is tickers for event_drift_basic"
+            )
+        universe_preset = None
+        index_code = None
     elif universe_mode == "tickers":
         if not tickers:
             raise BacktestTaskValidationError("tickers required when universe_mode is tickers")
@@ -184,7 +201,32 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
         )
 
     # Cross-sectional product: only next_open; apply portfolio SSOT into strategy params.
-    if is_cross_sectional_product_strategy(strategy_code):
+    if is_event_product_strategy(strategy_code):
+        if entry_timing != "next_open":
+            raise BacktestTaskValidationError(
+                "event_drift_basic only supports entry_timing=next_open"
+            )
+        try:
+            resolved = resolve_event_product_params(
+                CreateBacktestTaskRequest(
+                    name=request.name,
+                    strategy_code=strategy_code,
+                    strategy_version=strategy.definition.version,
+                    strategy_params=dict(resolved),
+                    universe_mode=universe_mode,
+                    universe_preset=universe_preset,
+                    index_code=index_code,
+                    tickers=tickers,
+                    start_date=start_date,
+                    end_date=end_date,
+                    position=position,
+                    cost=cost,
+                    execution=request.execution.model_copy(update={"entry_timing": entry_timing}),
+                )
+            )
+        except EventProductError as exc:
+            raise BacktestTaskValidationError(str(exc)) from exc
+    elif is_cross_sectional_product_strategy(strategy_code):
         if entry_timing != "next_open":
             raise BacktestTaskValidationError(
                 "cross_sectional_momentum_long_only only supports entry_timing=next_open"
@@ -516,6 +558,7 @@ def execute_validated_task(
 
     strategy = get_strategy(request.strategy_code, request.strategy_version)
     cross_section_meta: dict[str, Any] = {}
+    event_meta: dict[str, Any] = {}
     if is_cross_sectional_product_strategy(request.strategy_code):
         if db_path is None:
             raise BacktestTaskExecutionError(
@@ -533,6 +576,21 @@ def execute_validated_task(
         strategy_result = cs_run.strategy_result
         execution_targets = cs_run.target_weights
         portfolio_result = cs_run.portfolio_result
+    elif is_event_product_strategy(request.strategy_code):
+        if db_path is None:
+            raise BacktestTaskExecutionError(
+                "event product tasks require a market database path"
+            )
+        try:
+            event_run, skipped_signals, event_meta = run_event_drift_product_backtest(
+                request,
+                db_path=db_path,
+            )
+        except EventProductError as exc:
+            raise BacktestTaskExecutionError(str(exc)) from exc
+        strategy_result = event_run.strategy_result
+        execution_targets = event_run.target_weights
+        portfolio_result = event_run.portfolio_result
     else:
         price_df = _load_prices(request, db_path=db_path)
         strategy_result, execution_targets, portfolio_result, skipped_signals = (
@@ -596,6 +654,7 @@ def execute_validated_task(
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
         "cross_section": cross_section_meta or None,
+        "event": (event_meta or {}).get("event") if event_meta else None,
     }
 
     # Optional benchmark + price path for MAE/MFE and excess analytics.

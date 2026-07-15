@@ -26,6 +26,7 @@ export type StrategyFamily =
   | 'trend'
   | 'breakout'
   | 'cross_sectional'
+  | 'event_driven'
   | 'other';
 
 export interface StrategyCatalogItem {
