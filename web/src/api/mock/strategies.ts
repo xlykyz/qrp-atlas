@@ -253,7 +253,7 @@ export const MOCK_STRATEGIES: StrategyCatalogItem[] = [
     family: 'event_driven',
     description:
       '基于 earnings_forecast_event 的正预告漂移；available_trade_date 开盘入场，持有 hold_days 后下一开盘退出。',
-    scope: '事件驱动；需要 PIT 事件表；仅 next_open / available_trade_date open。',
+    scope: '事件驱动；正式披露 PIT；多次正式披露全保留；不宣称 technical revision knowledge-as-of；仅 next_open / available_trade_date open。',
     strategy_type: 'builtin',
     required_fields: [
       'ticker',

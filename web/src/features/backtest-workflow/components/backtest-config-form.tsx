@@ -41,7 +41,9 @@ export function BacktestConfigForm({ form, errors = {}, disabled, onChange }: Pr
         <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
           事件时间语义：公告日（announcement_date）仅作证据；入场日为 available_trade_date
           的开盘价。同日公告不可同日成交；产品层不二次计算 available_trade_date，也不做二次
-          next_open 偏移。仅使用任务结束日 as-of 可见的 earnings_forecast_event。
+          next_open 偏移。同一事件系列的多次正式披露全部保留；每次披露使用任务运行时库中
+          的 canonical technical revision，并写入 source_record_id/revision_id 快照，不宣称
+          technical revision knowledge-as-of 隔离。仅使用任务结束日 as-of 可见的正式披露。
         </div>
       ) : null}
 

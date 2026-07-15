@@ -154,7 +154,8 @@ def _make_event_db(tmp_path: Path) -> Path:
             "revision_id": "rev-s1-v1",
             "ingested_at": datetime(2024, 3, 15, 20, 0, 0),
         },
-        # technical revision later; later as_of may see it, earlier product end should still be consistent via as_of
+        # canonical technical revision for the first formal disclosure (same source_record_id)
+        # Product uses current canonical revision at runtime; does NOT claim revision knowledge-as-of.
         {
             "ticker": "000001.SZ",
             "event_type": "earnings_forecast",
@@ -177,6 +178,54 @@ def _make_event_db(tmp_path: Path) -> Path:
             "source_record_id": "src-s1-v1",
             "revision_id": "rev-s1-v2",
             "ingested_at": datetime(2024, 4, 1, 12, 0, 0),
+        },
+        # second formal disclosure for the same series (must remain tradable; not folded away)
+        {
+            "ticker": "000001.SZ",
+            "event_type": "earnings_forecast",
+            "event_series_id": "s1",
+            "report_period": date(2023, 12, 31),
+            "announcement_date": date(2024, 3, 25),
+            "first_announcement_date": date(2024, 3, 15),
+            "published_at": datetime(2024, 3, 25, 18, 0, 0),
+            "time_precision": "date",
+            "available_trade_date": date(2024, 3, 26),
+            "forecast_type": "预增",
+            "profit_change_min": 35.0,
+            "profit_change_max": 55.0,
+            "net_profit_min": 130.0,
+            "net_profit_max": 160.0,
+            "last_parent_net": None,
+            "summary": "second formal disclosure",
+            "change_reason": None,
+            "source": "test",
+            "source_record_id": "src-s1-d2",
+            "revision_id": "rev-s1-d2-v1",
+            "ingested_at": datetime(2024, 3, 25, 20, 0, 0),
+        },
+        # non-canonical earlier revision for second disclosure (must collapse to one revision)
+        {
+            "ticker": "000001.SZ",
+            "event_type": "earnings_forecast",
+            "event_series_id": "s1",
+            "report_period": date(2023, 12, 31),
+            "announcement_date": date(2024, 3, 25),
+            "first_announcement_date": date(2024, 3, 15),
+            "published_at": datetime(2024, 3, 25, 18, 0, 0),
+            "time_precision": "date",
+            "available_trade_date": date(2024, 3, 26),
+            "forecast_type": "预增",
+            "profit_change_min": 30.0,
+            "profit_change_max": 50.0,
+            "net_profit_min": 120.0,
+            "net_profit_max": 150.0,
+            "last_parent_net": None,
+            "summary": "older technical revision of second disclosure",
+            "change_reason": None,
+            "source": "test",
+            "source_record_id": "src-s1-d2",
+            "revision_id": "rev-s1-d2-v0",
+            "ingested_at": datetime(2024, 3, 25, 19, 0, 0),
         },
         # future event relative to early windows
         {
@@ -424,6 +473,81 @@ def test_event_task_end_to_end_and_reload(tmp_path: Path):
     assert summary is not None
     config = loader.load_config(task.run_id)
     assert config["event"]["event_type"] == "earnings_forecast"
+
+
+
+
+def test_multiple_formal_disclosures_same_series_are_retained(tmp_path: Path):
+    """Same event_series_id with two formal disclosures must both enter the product path."""
+
+    db = _make_event_db(tmp_path)
+    _, run_dir = execute_validated_task(
+        _request(
+            start_date="2024-03-18",
+            end_date="2024-04-05",
+            tickers=["000001.SZ"],
+        ),
+        runs_dir=tmp_path / "runs",
+        db_path=db,
+        run_id="evt_multi_disc",
+    )
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    event_meta = config["event"]
+    assert event_meta["query_mode"]["include_all_disclosures"] is True
+    assert event_meta["query_mode"]["include_all_revisions"] is False
+    assert event_meta["time_semantics"]["formal_disclosure_pit"] is True
+    assert event_meta["time_semantics"]["technical_revision_knowledge_as_of"] is False
+
+    source_ids = set(event_meta.get("source_record_ids") or [])
+    assert "src-s1-v1" in source_ids
+    assert "src-s1-d2" in source_ids
+    assert event_meta.get("disclosure_count_by_series", {}).get("s1") == 2
+    assert event_meta["selected_event_rows"] >= 2
+
+    used = event_meta.get("used_events") or []
+    used_sources = {item["source_record_id"] for item in used}
+    assert "src-s1-v1" in used_sources
+    assert "src-s1-d2" in used_sources
+    # one row per formal disclosure
+    assert len([u for u in used if u["source_record_id"] == "src-s1-d2"]) == 1
+    d2 = next(u for u in used if u["source_record_id"] == "src-s1-d2")
+    # canonical revision only (not the older v0 technical revision)
+    assert d2["revision_id"] == "rev-s1-d2-v1"
+    # first disclosure still present even though a later formal disclosure exists
+    d1 = next(u for u in used if u["source_record_id"] == "src-s1-v1")
+    assert d1["available_trade_date"] == "2024-03-18"
+    assert d2["available_trade_date"] == "2024-03-26"
+
+    fills = json.loads((run_dir / "fills.json").read_text(encoding="utf-8"))
+    buy_dates = sorted(
+        {
+            f["trade_date"]
+            for f in fills
+            if str(f.get("side", "")).lower() in {"buy", "long"}
+            and str(f.get("asset_id")) == "000001.SZ"
+        }
+    )
+    # Both available_trade_dates should be executable entries in formal window.
+    assert "2024-03-18" in buy_dates
+    assert "2024-03-26" in buy_dates
+
+
+def test_product_does_not_claim_technical_revision_knowledge_as_of(tmp_path: Path):
+    db = _make_event_db(tmp_path)
+    _, run_dir = execute_validated_task(
+        _request(start_date="2024-03-18", end_date="2024-03-29", tickers=["000001.SZ"]),
+        runs_dir=tmp_path / "runs",
+        db_path=db,
+        run_id="evt_rev_claim",
+    )
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    semantics = config["event"]["time_semantics"]
+    assert semantics["formal_disclosure_pit"] is True
+    assert semantics["technical_revision_knowledge_as_of"] is False
+    assert "canonical technical revision" in semantics["technical_revision_policy"]
+    # Snapshot actual ids used; first disclosure must use canonical rev-s1-v2 at runtime
+    used = {u["source_record_id"]: u["revision_id"] for u in config["event"]["used_events"]}
+    assert used.get("src-s1-v1") == "rev-s1-v2"
 
 
 def test_classic_and_cs_still_in_catalog():

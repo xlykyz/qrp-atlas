@@ -135,10 +135,22 @@ def _query_product_events(
     *,
     db_path: Path,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Load PIT events visible as of the request end date.
+    """Load market-available formal disclosures as of the request end date.
 
     Product path never recomputes available_trade_date. Entry timing is already
     encoded in the event frame from 05-A.
+
+    Disclosure selection:
+    - ``include_all_disclosures=True`` so multiple formal disclosures under the
+      same ``event_series_id`` remain tradable history (disclosure 1 then 2).
+    - ``include_all_revisions=False`` so each formal disclosure keeps only its
+      current canonical technical revision stored in the DB at task runtime.
+
+    Technical-revision boundary (honest product claim):
+    - Formal disclosure market timing has PIT isolation via available_trade_date.
+    - Source data does not provide reliable technical-revision publication times,
+      so product runs do **not** claim technical-revision knowledge-as-of isolation.
+    - Snapshots record the actual ``source_record_id`` / ``revision_id`` used.
     """
 
     tickers = list(request.tickers or []) or None
@@ -146,6 +158,8 @@ def _query_product_events(
         events = query_earnings_forecast_as_of(
             as_of_date=request.end_date,
             tickers=tickers,
+            include_all_disclosures=True,
+            include_all_revisions=False,
             as_event_frame=True,
             db_path=db_path,
         )
@@ -158,16 +172,34 @@ def _query_product_events(
         "query_tickers": tickers,
         "raw_event_rows": int(len(events)),
         "event_type": "earnings_forecast",
+        "query_mode": {
+            "include_all_disclosures": True,
+            "include_all_revisions": False,
+            "reason": (
+                "keep every market-available formal disclosure; one canonical "
+                "technical revision per source_record_id"
+            ),
+        },
         "time_semantics": {
             "announcement_date": "evidence only; cannot trade same day",
             "available_trade_date": "entry trade date from 05-A (strictly next open after announcement)",
             "entry_price": "open on available_trade_date",
             "product_recomputes_available_trade_date": False,
             "product_second_next_open_shift": False,
+            "formal_disclosure_pit": True,
+            "technical_revision_knowledge_as_of": False,
+            "technical_revision_policy": (
+                "use current canonical technical revision stored for each "
+                "source_record_id at task runtime; snapshot source_record_id "
+                "and revision_id; do not claim revision publication-time isolation"
+            ),
         },
     }
     if events is None or events.empty:
         diagnostics["selected_event_rows"] = 0
+        diagnostics["source_record_ids"] = []
+        diagnostics["revision_ids"] = []
+        diagnostics["event_series_ids"] = []
         return to_earnings_forecast_event_frame(pd.DataFrame()), diagnostics
 
     work = events.copy()
@@ -183,9 +215,51 @@ def _query_product_events(
     rejected_same_day = int(same_day.sum())
     if rejected_same_day:
         work = work.loc[~same_day].copy()
+
+    # One canonical revision per formal disclosure should already hold from the
+    # query layer; re-assert for product diagnostics/audit.
+    if "source_record_id" in work.columns and not work.empty:
+        before = int(len(work))
+        work = (
+            work.sort_values(
+                [c for c in ("source_record_id", "revision_id", "ingested_at") if c in work.columns],
+                kind="mergesort",
+            )
+            .drop_duplicates(subset=["source_record_id"], keep="last")
+            .reset_index(drop=True)
+        )
+        diagnostics["collapsed_extra_revisions_per_source_record"] = before - int(len(work))
+    else:
+        diagnostics["collapsed_extra_revisions_per_source_record"] = 0
+
+    source_ids = sorted({str(v) for v in work.get("source_record_id", pd.Series(dtype=str)).dropna().tolist()})
+    revision_ids = sorted({str(v) for v in work.get("revision_id", pd.Series(dtype=str)).dropna().tolist()})
+    series_ids = sorted({str(v) for v in work.get("event_series_id", pd.Series(dtype=str)).dropna().tolist()})
+    disclosure_count_by_series: dict[str, int] = {}
+    if "event_series_id" in work.columns and not work.empty:
+        disclosure_count_by_series = {
+            str(k): int(v)
+            for k, v in work.groupby("event_series_id", dropna=False).size().items()
+        }
+
     diagnostics["rejected_same_day_or_not_after_announcement"] = rejected_same_day
     diagnostics["selected_event_rows"] = int(len(work))
     diagnostics["event_tickers"] = sorted({str(t) for t in work.get("ticker", pd.Series(dtype=str)).tolist()})
+    diagnostics["source_record_ids"] = source_ids
+    diagnostics["revision_ids"] = revision_ids
+    diagnostics["event_series_ids"] = series_ids
+    diagnostics["disclosure_count_by_series"] = disclosure_count_by_series
+    diagnostics["used_events"] = [
+        {
+            "ticker": str(row.ticker),
+            "event_series_id": str(getattr(row, "event_series_id", "") or ""),
+            "source_record_id": str(getattr(row, "source_record_id", "") or ""),
+            "revision_id": str(getattr(row, "revision_id", "") or ""),
+            "announcement_date": str(row.announcement_date),
+            "available_trade_date": str(row.available_trade_date),
+        }
+        for row in work.itertuples(index=False)
+    ]
     return work.reset_index(drop=True), diagnostics
 
 
