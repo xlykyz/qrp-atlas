@@ -149,16 +149,25 @@ def _financial_panel(
 def test_list_and_get_factor_definitions() -> None:
     codes = [item.code for item in list_factors()]
     assert codes == [
+        "amihud_illiquidity",
         "average_traded_amount",
         "average_turnover",
         "book_to_price",
         "distance_to_high",
+        "downside_volatility",
         "high_low_range_volatility",
         "intermediate_momentum",
         "log_market_cap",
         "momentum",
+        "price_efficiency",
+        "price_volume_correlation",
+        "realized_volatility",
+        "relative_volume",
         "roe",
+        "rolling_max_drawdown",
         "short_term_reversal",
+        "trend_r_squared",
+        "trend_slope",
         "turnover_change",
     ]
     momentum = get_factor_definition("momentum")

@@ -57,6 +57,7 @@ from qrp_atlas.contracts import (
     TOTAL_MV,
     TRADE_DATE,
     TURNOVER,
+    VOLUME,
 )
 from qrp_atlas.indicators.cross_section.conventions import (
     CrossSectionFrameError,
@@ -601,6 +602,30 @@ _SIZE_FIELD = {
 }
 
 
+_INDICATOR_WINDOW = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+}
+_LINEAR_TREND_PARAMETERS = _INDICATOR_WINDOW
+_PRICE_EFFICIENCY_PARAMETERS = _INDICATOR_WINDOW
+_REALIZED_VOLATILITY_PARAMETERS = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+    "annualization": FactorParameterSpec(
+        "number", 252.0, True, 0.000001, 100000.0
+    ),
+}
+_DOWNSIDE_VOLATILITY_PARAMETERS = {
+    **_REALIZED_VOLATILITY_PARAMETERS,
+    "target": FactorParameterSpec("number", 0.0, True, -1000.0, 1000.0),
+}
+_ROLLING_MAX_DRAWDOWN_PARAMETERS = _INDICATOR_WINDOW
+_RELATIVE_VOLUME_PARAMETERS = _INDICATOR_WINDOW
+_AMIHUD_PARAMETERS = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+    "scale": FactorParameterSpec("number", 1.0, True, 0.000001, 1e20),
+}
+_PRICE_VOLUME_CORRELATION_PARAMETERS = _INDICATOR_WINDOW
+
+
 FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
     "momentum": FactorDefinition(
         code="momentum",
@@ -684,6 +709,206 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         nan_semantics=(
             "NaN until every high in the full lookback window is finite and "
             "positive, or when T close is non-positive/non-finite."
+        ),
+    ),
+    "trend_slope": FactorDefinition(
+        code="trend_slope",
+        name="Normalized linear trend slope",
+        family="trend",
+        description=(
+            "Scale-free rolling OLS slope of close on bar position, reusing the "
+            "linear_regression_trend indicator's normalized_slope output."
+        ),
+        formula=(
+            "OLS_slope(close[T-window+1:T] ~ 0..window-1) / "
+            "mean(abs(close[T-window+1:T]))"
+        ),
+        direction="higher = stronger positive price trend; lower = stronger negative trend",
+        time_semantics=(
+            "The inclusive window ends at T and contains no future bar; known after "
+            "the T close and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_LINEAR_TREND_PARAMETERS,
+        default_output="trend_slope",
+        nan_semantics=(
+            "NaN until a full finite window exists, or when the mean absolute close "
+            "is zero; non-finite values are never filled."
+        ),
+    ),
+    "trend_r_squared": FactorDefinition(
+        code="trend_r_squared",
+        name="Linear trend fit R-squared",
+        family="trend",
+        description="Rolling coefficient of determination of close on bar position.",
+        formula="R^2 from OLS(close[T-window+1:T] ~ 0..window-1)",
+        direction="higher = price path is better explained by a linear trend, regardless of sign",
+        time_semantics=(
+            "The inclusive regression window ends at T; known after the T close and "
+            "intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_LINEAR_TREND_PARAMETERS,
+        default_output="trend_r_squared",
+        nan_semantics=(
+            "NaN until a full finite window exists or when close is constant so total "
+            "variation is zero."
+        ),
+    ),
+    "price_efficiency": FactorDefinition(
+        code="price_efficiency",
+        name="Kaufman price efficiency ratio",
+        family="trend",
+        description="Absolute net price movement divided by total path length.",
+        formula=(
+            "abs(close[T]-close[T-window]) / "
+            "sum(abs(close[i]-close[i-1]), i=T-window+1..T)"
+        ),
+        direction="higher = more directional and efficient price path",
+        time_semantics=(
+            "Uses window+1 closes ending at T; known after T close and intended for "
+            "T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_PRICE_EFFICIENCY_PARAMETERS,
+        default_output="price_efficiency",
+        nan_semantics=(
+            "NaN until window+1 finite closes exist or when total path length is zero; "
+            "no zero fill."
+        ),
+    ),
+    "realized_volatility": FactorDefinition(
+        code="realized_volatility",
+        name="Annualized realized volatility",
+        family="risk",
+        description="Population standard deviation of rolling simple returns, annualized.",
+        formula=(
+            "std_pop(close[i]/close[i-1]-1, i=T-window+1..T) * "
+            "sqrt(annualization)"
+        ),
+        direction="higher = greater realized return variability / risk",
+        time_semantics=(
+            "Uses window returns formed from window+1 closes through T; known after "
+            "T close and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_REALIZED_VOLATILITY_PARAMETERS,
+        default_output="realized_volatility",
+        nan_semantics=(
+            "NaN until a full return window exists or when any required close is "
+            "non-positive/non-finite; uses population ddof=0."
+        ),
+    ),
+    "downside_volatility": FactorDefinition(
+        code="downside_volatility",
+        name="Annualized downside volatility",
+        family="risk",
+        description="Root mean square downside deviation below a configurable target.",
+        formula=(
+            "sqrt(mean(min(return[i]-target, 0)^2, i=T-window+1..T)) * "
+            "sqrt(annualization)"
+        ),
+        direction="higher = greater downside deviation / risk",
+        time_semantics=(
+            "Uses window simple returns through T; known after T close and intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_DOWNSIDE_VOLATILITY_PARAMETERS,
+        default_output="downside_volatility",
+        nan_semantics=(
+            "NaN until a full return window exists or when a required close is "
+            "non-positive/non-finite; returns above target contribute zero downside."
+        ),
+    ),
+    "rolling_max_drawdown": FactorDefinition(
+        code="rolling_max_drawdown",
+        name="Rolling maximum drawdown",
+        family="risk",
+        description="Worst peak-to-trough drawdown inside an inclusive close window.",
+        formula=(
+            "min(close[i] / max(close[T-window+1:i]) - 1, "
+            "i=T-window+1..T)"
+        ),
+        direction="more negative = deeper drawdown / greater risk; zero = no drawdown",
+        time_semantics=(
+            "The inclusive window ends at T; known after T close and intended for "
+            "T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_ROLLING_MAX_DRAWDOWN_PARAMETERS,
+        default_output="rolling_max_drawdown",
+        nan_semantics=(
+            "NaN until a full window of strictly positive finite closes exists; "
+            "invalid windows are not partially evaluated."
+        ),
+    ),
+    "relative_volume": FactorDefinition(
+        code="relative_volume",
+        name="Relative volume",
+        family="liquidity",
+        description="Current volume relative to the mean of the prior window bars.",
+        formula="volume[T] / mean(volume[T-window:T-1])",
+        direction="higher = stronger current trading activity relative to recent history",
+        time_semantics=(
+            "The baseline explicitly excludes T while the numerator uses T volume; "
+            "known after T and intended for T+1 or later use."
+        ),
+        inputs=(VOLUME,),
+        parameter_schema=_RELATIVE_VOLUME_PARAMETERS,
+        default_output="relative_volume",
+        nan_semantics=(
+            "NaN until all prior-window volumes and T volume are finite/non-negative, "
+            "or when the prior mean is zero; a valid zero T volume yields zero."
+        ),
+    ),
+    "amihud_illiquidity": FactorDefinition(
+        code="amihud_illiquidity",
+        name="Amihud illiquidity",
+        family="liquidity",
+        description="Rolling mean absolute return per unit of positive traded amount.",
+        formula=(
+            "mean(abs(close[i]/close[i-1]-1) / amount[i], "
+            "i=T-window+1..T) * scale"
+        ),
+        direction="higher = larger price impact per traded amount / lower liquidity",
+        time_semantics=(
+            "Uses window returns and same-day amounts through T; known after T close "
+            "and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE, AMOUNT),
+        parameter_schema=_AMIHUD_PARAMETERS,
+        default_output="amihud_illiquidity",
+        nan_semantics=(
+            "NaN until a full window exists or when a required close/amount is "
+            "non-positive or non-finite; zero amount never becomes infinity."
+        ),
+    ),
+    "price_volume_correlation": FactorDefinition(
+        code="price_volume_correlation",
+        name="Price-volume correlation",
+        family="liquidity",
+        description=(
+            "Rolling Pearson correlation between simple close returns and volume "
+            "percentage changes."
+        ),
+        formula=(
+            "corr(close[i]/close[i-1]-1, volume[i]/volume[i-1]-1, "
+            "i=T-window+1..T)"
+        ),
+        direction=(
+            "positive = price and volume changes move together; negative = they move oppositely"
+        ),
+        time_semantics=(
+            "Uses window paired changes through T; known after T close and intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE, VOLUME),
+        parameter_schema=_PRICE_VOLUME_CORRELATION_PARAMETERS,
+        default_output="price_volume_correlation",
+        nan_semantics=(
+            "NaN until a full finite paired-change window exists, when prior volume "
+            "is zero, or when either series has zero variance."
         ),
     ),
     "high_low_range_volatility": FactorDefinition(
@@ -951,10 +1176,19 @@ def _compute_one_factor(
         "intermediate_momentum",
         "short_term_reversal",
         "distance_to_high",
+        "trend_slope",
+        "trend_r_squared",
+        "price_efficiency",
+        "realized_volatility",
+        "downside_volatility",
+        "rolling_max_drawdown",
         "high_low_range_volatility",
         "average_turnover",
         "turnover_change",
+        "relative_volume",
         "average_traded_amount",
+        "amihud_illiquidity",
+        "price_volume_correlation",
     }:
         if prices is None:
             raise FactorRequestError(f"{code} requires a prices panel")
@@ -963,6 +1197,7 @@ def _compute_one_factor(
             compute_average_turnover_factor,
             compute_distance_to_high_factor,
             compute_high_low_range_volatility_factor,
+            _compute_indicator_backed_market_factor,
             compute_intermediate_momentum_factor,
             compute_short_term_reversal_factor,
             compute_turnover_change_factor,
@@ -988,6 +1223,24 @@ def _compute_one_factor(
                 prices,
                 universe=universe,
                 lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code in {
+            "trend_slope",
+            "trend_r_squared",
+            "price_efficiency",
+            "realized_volatility",
+            "downside_volatility",
+            "rolling_max_drawdown",
+            "relative_volume",
+            "amihud_illiquidity",
+            "price_volume_correlation",
+        }:
+            return _compute_indicator_backed_market_factor(
+                prices,
+                universe=universe,
+                factor_code=code,
+                parameters=params,
                 output_column=output,
             )
         if code == "high_low_range_volatility":
