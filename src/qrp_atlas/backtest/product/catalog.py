@@ -20,6 +20,7 @@ _STRATEGY_FAMILY: dict[str, str] = {
     "rolling_zscore_mean_reversion": "mean_reversion",
     "cross_sectional_momentum_long_only": "cross_sectional",
     "multifactor_long_only": "cross_sectional",
+    "event_drift_basic": "event_driven",
 }
 
 _STRATEGY_SCOPE: dict[str, str] = {
@@ -33,6 +34,10 @@ _STRATEGY_SCOPE: dict[str, str] = {
         "信号日 T 收盘后选股，下一合法交易日 open 成交。"
     ),
     "multifactor_long_only": "多因子选股；07-B1 暂不作为产品入口。",
+    "event_drift_basic": (
+        "业绩预告事件漂移；基于 earnings_forecast_event + EventFrame；"
+        "公告日不可成交，available_trade_date 开盘入场；产品层不做二次 next_open 偏移。"
+    ),
 }
 
 PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
@@ -43,6 +48,7 @@ PRODUCT_SUPPORTED_STRATEGY_CODES: frozenset[str] = frozenset(
         "donchian_breakout",
         "rolling_zscore_mean_reversion",
         "cross_sectional_momentum_long_only",
+        "event_drift_basic",
     }
 )
 
@@ -54,10 +60,12 @@ _REQUIRES_HISTORICAL_UNIVERSE: frozenset[str] = frozenset(
 
 _SUPPORTED_UNIVERSE_MODES: dict[str, list[str]] = {
     "cross_sectional_momentum_long_only": ["index_components"],
+    "event_drift_basic": ["tickers"],
 }
 
 _SUPPORTED_ENTRY_TIMINGS: dict[str, list[str]] = {
     "cross_sectional_momentum_long_only": ["next_open"],
+    "event_drift_basic": ["next_open"],
 }
 
 

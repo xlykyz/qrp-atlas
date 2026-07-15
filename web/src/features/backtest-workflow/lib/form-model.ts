@@ -14,6 +14,7 @@ export interface BacktestWorkflowFormState {
   universeMode: UniverseMode;
   universePreset: string;
   indexCode: string;
+  benchmarkId: string;
   tickersText: string;
   startDate: string;
   endDate: string;
@@ -50,6 +51,10 @@ export function isCrossSectionalStrategy(code: string): boolean {
   return code === 'cross_sectional_momentum_long_only';
 }
 
+export function isEventStrategy(code: string): boolean {
+  return code === 'event_drift_basic';
+}
+
 export function defaultParamsFromSchema(schema: ParameterSchema): StrategyParamValues {
   const values: StrategyParamValues = {};
   for (const [key, spec] of Object.entries(schema)) {
@@ -75,6 +80,7 @@ export function createDefaultFormState(): BacktestWorkflowFormState {
     universeMode: 'tickers',
     universePreset: 'CUSTOM',
     indexCode: '000300.SH',
+    benchmarkId: '',
     tickersText: '000001.SZ, 600519.SH',
     startDate: '2024-01-01',
     endDate: '2024-12-31',
@@ -103,11 +109,14 @@ export function formStateToCreateRequest(
   form: BacktestWorkflowFormState,
 ): CreateBacktestTaskRequest {
   const crossSectional = isCrossSectionalStrategy(form.strategyCode);
+  const eventStrategy = isEventStrategy(form.strategyCode);
   const tickers = parseTickers(form.tickersText);
 
   let universeMode: UniverseMode;
   if (crossSectional) {
     universeMode = 'index_components';
+  } else if (eventStrategy) {
+    universeMode = 'tickers';
   } else if (form.universePreset === 'CUSTOM' || form.universeMode === 'tickers') {
     universeMode = 'tickers';
   } else if (form.universeMode === 'index_components') {
@@ -123,10 +132,12 @@ export function formStateToCreateRequest(
     strategy_params: { ...form.strategyParams },
     universe_mode: universeMode,
     universe_preset: universeMode === 'preset' ? form.universePreset : undefined,
-    index_code: universeMode === 'index_components' ? form.indexCode.trim().toUpperCase() : undefined,
+    index_code:
+      universeMode === 'index_components' ? form.indexCode.trim().toUpperCase() : undefined,
     tickers: universeMode === 'tickers' ? tickers : undefined,
     start_date: form.startDate,
     end_date: form.endDate,
+    benchmark_id: form.benchmarkId.trim() ? form.benchmarkId.trim().toUpperCase() : undefined,
     position: {
       initial_cash: form.initialCash,
       max_positions: form.maxPositions,
@@ -138,7 +149,7 @@ export function formStateToCreateRequest(
       slippage_bps: form.slippageBps,
     },
     execution: {
-      entry_timing: crossSectional ? 'next_open' : form.entryTiming,
+      entry_timing: crossSectional || eventStrategy ? 'next_open' : form.entryTiming,
     },
   };
 }
