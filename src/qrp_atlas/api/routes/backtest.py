@@ -218,3 +218,32 @@ def api_compare_runs_get(run_ids: list[str] = Query(default=[])):
     if len(run_ids) > 10:
         raise HTTPException(status_code=400, detail="compare supports at most 10 runs")
     return compare_runs(run_ids)
+
+
+class ReplayBody(BaseModel):
+    new_run_id: str | None = None
+
+
+@router.post("/runs/{run_id}/replay")
+def api_replay_run(run_id: str, body: ReplayBody | None = None):
+    """Re-execute a product run from its locked reproducibility snapshot."""
+
+    from qrp_atlas.backtest.product.service import (
+        BacktestTaskExecutionError,
+        get_product_service,
+        replay_product_run,
+    )
+
+    service = get_product_service()
+    payload = body or ReplayBody()
+    try:
+        return replay_product_run(
+            run_id,
+            runs_dir=service.runs_dir,
+            db_path=service.db_path,
+            new_run_id=payload.new_run_id,
+        )
+    except BacktestTaskExecutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _map_errors(exc)

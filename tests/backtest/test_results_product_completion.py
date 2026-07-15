@@ -7,12 +7,14 @@ import math
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import PortfolioBacktestConfig, PortfolioExecutionRule
 from qrp_atlas.backtest.portfolio.engine import PortfolioBacktestEngine
 from qrp_atlas.backtest.results.analytics import (
     align_benchmark_series,
+    benchmark_summary,
     calmar_ratio,
     daily_returns_from_equity,
     json_safe,
@@ -385,3 +387,49 @@ def test_missing_benchmark_is_diagnostic_not_silent(tmp_path: Path):
     bench = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
     assert "benchmark_missing" in bench["diagnostics"] or "benchmark_requested_but_data_missing" in bench["diagnostics"]
     assert all(p.get("benchmark_level") is None for p in bench["points"])
+
+
+def test_excess_metrics_relative_not_simple_diff():
+    """Portfolio +10%,0% vs benchmark 0%,+10% must not yield negative relative excess."""
+
+    dates = ["2024-01-02", "2024-01-03"]
+    # levels so returns: day0=0 by convention first point, day1 from levels
+    # align_benchmark uses level ratios; inject portfolio_returns directly.
+    bench = pd.DataFrame({"trade_date": dates, "close": [100.0, 110.0]})  # +10% on second day
+    # First day b_ret treated as 0 when prev_level None; second day +10%.
+    port_rets = [0.10, 0.0]
+    aligned, diag = align_benchmark_series(dates, bench, portfolio_returns=port_rets)
+    assert not any("gap" in d for d in diag)
+    # day0: active = (1.1)/(1.0)-1 = 0.1
+    assert aligned[0]["daily_active_return"] == pytest.approx(0.1)
+    # day1: active = (1.0)/(1.1)-1 ≈ -0.0909
+    assert aligned[1]["daily_active_return"] == pytest.approx((1.0 / 1.1) - 1.0)
+    # cumulative: port = 1.1*1.0-1 = 0.1; bench = 0 then 0.1
+    assert aligned[1]["portfolio_cumulative_return"] == pytest.approx(0.1)
+    assert aligned[1]["benchmark_cumulative_return"] == pytest.approx(0.1)
+    assert aligned[1]["excess_percentage_point"] == pytest.approx(0.0)
+    assert aligned[1]["relative_return"] == pytest.approx(0.0)
+    summary = benchmark_summary(aligned)
+    assert summary["full_range_excess_available"] is True
+    assert summary["excess_percentage_point"] == pytest.approx(0.0)
+    assert summary["relative_return"] == pytest.approx(0.0)
+    assert summary["excess_total_return"] == pytest.approx(0.0)
+
+
+def test_excess_full_range_none_when_benchmark_gaps():
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    bench = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-04"], "close": [100.0, 110.0]})
+    port_rets = [0.01, 0.01, 0.01]
+    aligned, diag = align_benchmark_series(dates, bench, portfolio_returns=port_rets)
+    assert any("benchmark_gap:2024-01-03" in d for d in diag)
+    assert any("full_range_excess_unavailable" in d for d in diag)
+    summary = benchmark_summary(aligned)
+    assert summary["full_range_excess_available"] is False
+    assert summary["excess_percentage_point"] is None
+    assert summary["relative_return"] is None
+    assert summary["excess_total_return"] is None
+    assert summary["excess_total_return_pct"] is None
+    # per-date active still present on covered days
+    assert aligned[0]["daily_active_return"] is not None
+    assert aligned[1]["daily_active_return"] is None
+    assert aligned[2]["daily_active_return"] is not None

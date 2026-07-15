@@ -61,6 +61,20 @@ MOMENTUM_FACTOR_CODE = "momentum"
 DEFAULT_SCORE_COLUMN = "momentum"
 
 
+
+def _finalize_cs_meta(
+    meta: dict[str, Any],
+    *,
+    price_df: pd.DataFrame | None = None,
+    assets: list[str] | None = None,
+) -> dict[str, Any]:
+    out = dict(meta)
+    if price_df is not None:
+        out["price_frame"] = price_df
+    if assets is not None:
+        out["traded_or_universe_assets"] = list(assets)
+    return out
+
 class CrossSectionProductError(ValueError):
     """Raised when the cross-sectional product path cannot run."""
 
@@ -521,7 +535,7 @@ def run_cross_sectional_momentum_product_backtest(
             "market_trade_date_count": len(formal_calendar),
             "mapping_calendar_extra_days": max(0, len(mapping_calendar) - len(base_calendar)),
         }
-        return run, skipped_signals, meta
+        return run, skipped_signals, _finalize_cs_meta(meta, assets=list(union_assets) if "union_assets" in locals() else [])
 
     price_start = (
         pd.Timestamp(request.start_date) - pd.Timedelta(days=warmup_calendar_days)
@@ -644,4 +658,4 @@ def run_cross_sectional_momentum_product_backtest(
         "market_trade_date_count": len(market_trade_dates(formal_prices)),
         "mapping_calendar_extra_days": max(0, len(mapping_calendar) - len(base_calendar)),
     }
-    return run, skipped_signals, meta
+    return run, skipped_signals, _finalize_cs_meta(meta, price_df=price_df, assets=list(union_assets))

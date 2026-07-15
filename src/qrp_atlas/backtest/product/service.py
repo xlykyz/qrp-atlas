@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from qrp_atlas.backtest.data import load_index_prices, load_stock_prices
+from qrp_atlas.backtest.exposure_data import prepare_cross_section_exposure_panel
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import PortfolioBacktestConfig, PortfolioExecutionRule
 from qrp_atlas.backtest.portfolio.strategy import strategy_decisions_to_target_weights
@@ -219,6 +220,7 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
                     tickers=tickers,
                     start_date=start_date,
                     end_date=end_date,
+                    benchmark_id=request.benchmark_id,
                     position=position,
                     cost=cost,
                     execution=request.execution.model_copy(update={"entry_timing": entry_timing}),
@@ -243,6 +245,7 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
                 tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
+                benchmark_id=request.benchmark_id,
                 position=position,
                 cost=cost,
                 execution=request.execution.model_copy(update={"entry_timing": entry_timing}),
@@ -250,6 +253,10 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
             resolved = resolve_cross_section_product_params(draft)
         except CrossSectionProductError as exc:
             raise BacktestTaskValidationError(str(exc)) from exc
+
+    benchmark_id = (request.benchmark_id or None)
+    if benchmark_id is not None:
+        benchmark_id = str(benchmark_id).strip().upper() or None
 
     return CreateBacktestTaskRequest(
         name=request.name,
@@ -262,6 +269,7 @@ def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktes
         tickers=tickers,
         start_date=start_date,
         end_date=end_date,
+        benchmark_id=benchmark_id,
         position=position,
         cost=cost,
         execution=request.execution.model_copy(update={"entry_timing": entry_timing}),
@@ -436,7 +444,7 @@ def _load_benchmark_frame(
         return None, benchmark_id, diagnostics
     try:
         frame = load_index_prices(
-            index_codes=[benchmark_id],
+            codes=[benchmark_id],
             start_date=request.start_date,
             end_date=request.end_date,
             db_path=db_path,
@@ -454,6 +462,29 @@ def _load_benchmark_frame(
     return work, benchmark_id, diagnostics
 
 
+def _data_fingerprint(frame: Any, *, cols: list[str] | None = None) -> dict[str, Any] | None:
+    """Deterministic lightweight fingerprint for a price/event frame."""
+
+    if frame is None or getattr(frame, "empty", True):
+        return None
+    import hashlib
+    import json
+
+    work = frame.copy()
+    use_cols = [c for c in (cols or list(work.columns)) if c in work.columns]
+    if not use_cols:
+        use_cols = list(work.columns)
+    work = work[use_cols]
+    # stable string rows
+    payload = work.astype(str).sort_values(by=list(work.columns)).to_csv(index=False)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return {
+        "row_count": int(len(work)),
+        "columns": list(use_cols),
+        "sha256": digest,
+    }
+
+
 def _build_reproducibility_snapshot(
     request: CreateBacktestTaskRequest,
     *,
@@ -462,18 +493,34 @@ def _build_reproducibility_snapshot(
     cross_section_meta: dict[str, Any] | None = None,
     event_meta: dict[str, Any] | None = None,
     benchmark_id: str | None = None,
+    resolved_universe_assets: list[str] | None = None,
+    price_frame: Any | None = None,
+    benchmark_frame: Any | None = None,
 ) -> dict[str, Any]:
     definition = strategy.definition.to_dict() if hasattr(strategy.definition, "to_dict") else {}
+    # strip non-serializable frames from nested meta copies
+    cs_meta = None
+    if cross_section_meta:
+        cs_meta = {
+            k: v
+            for k, v in cross_section_meta.items()
+            if k not in {"price_frame"}
+        }
+    event_payload = None
+    if event_meta:
+        event_payload = (event_meta or {}).get("event") if isinstance(event_meta, dict) else event_meta
+    assets = list(resolved_universe_assets or request.tickers or [])
     return {
         "strategy_code": strategy.definition.code,
         "strategy_version": strategy.definition.version,
-        "benchmark_id": getattr(request, "benchmark_id", None),
         "strategy_definition_snapshot": definition,
         "strategy_params": dict(request.strategy_params or {}),
         "indicator_requests": definition.get("indicator_requests") or [],
         "universe": {
             "mode": request.universe_mode,
-            "tickers": list(request.tickers or []),
+            "requested_tickers": list(request.tickers or []),
+            "resolved_assets": assets,
+            "resolved_asset_count": len(assets),
             "index_code": request.index_code,
             "universe_preset": request.universe_preset,
         },
@@ -489,14 +536,30 @@ def _build_reproducibility_snapshot(
         },
         "pit": {
             "available_date_semantics": "product uses historical membership/events available as of formal dates",
-            "cross_section": (cross_section_meta or None),
-            "event": ((event_meta or {}).get("event") if event_meta else None),
+            "cross_section": cs_meta,
+            "event": event_payload,
+        },
+        "data_fingerprints": {
+            "prices": _data_fingerprint(
+                price_frame,
+                cols=["trade_date", "asset_id", "ticker", "open", "high", "low", "close"],
+            ),
+            "benchmark": _data_fingerprint(
+                benchmark_frame,
+                cols=["trade_date", "asset_id", "ticker", "close", "open"],
+            ),
         },
         "execution": request.execution.model_dump(mode="json"),
         "cost": request.cost.model_dump(mode="json"),
         "position": request.position.model_dump(mode="json"),
         "benchmark_id": benchmark_id,
         "product_request": request.model_dump(mode="json"),
+        "replay": {
+            "supported": True,
+            "entry": "POST /api/backtest/runs/{run_id}/replay",
+            "uses_locked_snapshot": True,
+            "does_not_use_current_registry_defaults": True,
+        },
     }
 
 
@@ -504,20 +567,18 @@ def _build_exposure_payload(
     request: CreateBacktestTaskRequest,
     *,
     portfolio_result: Any,
-    cross_section_meta: dict[str, Any] | None,
+    execution_targets: Any = None,
+    cross_section_meta: dict[str, Any] | None = None,
+    db_path: Path | None = None,
+    price_frame: Any | None = None,
 ) -> dict[str, Any]:
-    if not is_cross_sectional_product_strategy(request.strategy_code):
-        return {
-            "available": False,
-            "reason": "exposures_only_for_cross_sectional_product_runs",
-            "industry": [],
-            "market_cap": [],
-        }
-    if cross_section_meta and isinstance(cross_section_meta.get("exposures"), dict):
-        payload = dict(cross_section_meta["exposures"])
-        payload.setdefault("available", True)
-        return payload
-    mcap_rows: list[dict[str, Any]] = []
+    """Industry / market-cap exposures for product runs.
+
+    Position concentration is stored separately and never labeled as market_cap.
+    """
+
+    # Always compute concentration from snapshots.
+    concentration_rows: list[dict[str, Any]] = []
     for snap in getattr(portfolio_result, "snapshots", []) or []:
         positions = getattr(snap, "positions", None) or []
         weights = []
@@ -530,20 +591,171 @@ def _build_exposure_payload(
             weights.append(float(w))
         if not weights:
             continue
-        mcap_rows.append(
+        concentration_rows.append(
             {
-                "trade_date": getattr(snap, "trade_date", None) or (snap.get("trade_date") if isinstance(snap, dict) else None),
+                "trade_date": getattr(snap, "trade_date", None)
+                or (snap.get("trade_date") if isinstance(snap, dict) else None),
                 "position_count": len(weights),
                 "max_weight": max(weights),
                 "sum_weight": sum(weights),
             }
         )
+
+    if not is_cross_sectional_product_strategy(request.strategy_code):
+        return {
+            "available": False,
+            "industry_available": False,
+            "market_cap_available": False,
+            "reason": "industry_market_cap_exposures_require_cross_sectional_product_run",
+            "industry": [],
+            "market_cap": [],
+            "position_concentration": concentration_rows,
+            "note": "Non-CS runs expose position concentration only.",
+        }
+
+    if cross_section_meta and isinstance(cross_section_meta.get("exposures"), dict):
+        payload = dict(cross_section_meta["exposures"])
+        payload.setdefault("position_concentration", concentration_rows)
+        payload.setdefault("available", True)
+        return payload
+
+    industry_rows: list[dict[str, Any]] = []
+    market_cap_rows: list[dict[str, Any]] = []
+    industry_available = False
+    market_cap_available = False
+    reason = None
+
+    # Build signal-date holdings from execution targets when possible.
+    holdings: list[tuple[str, str, float]] = []  # trade_date, asset, weight
+    if execution_targets is not None and hasattr(execution_targets, "empty") and not execution_targets.empty:
+        work = execution_targets.copy()
+        for col in ("trade_date", "asset_id", "target_weight"):
+            if col not in work.columns:
+                holdings = []
+                break
+        else:
+            for row in work.itertuples(index=False):
+                w = float(getattr(row, "target_weight"))
+                if w <= 0:
+                    continue
+                holdings.append((str(getattr(row, "trade_date")), str(getattr(row, "asset_id")), w))
+
+    if not holdings:
+        reason = "no_positive_target_weights_for_exposure"
+    else:
+        import math
+        import pandas as pd
+        from collections import defaultdict
+
+        dates = sorted({d for d, _, _ in holdings})
+        assets = sorted({a for _, a, _ in holdings})
+        uni_rows = [{"trade_date": d, "asset_id": a} for d in dates for a in assets]
+        universe = pd.DataFrame(uni_rows)
+
+        # Market-cap exposure from same-day size fields (no forward fill).
+        size_panel = None
+        if price_frame is not None and not getattr(price_frame, "empty", True):
+            pf = price_frame.copy()
+            if "asset_id" not in pf.columns and "ticker" in pf.columns:
+                pf["asset_id"] = pf["ticker"]
+            if "trade_date" in pf.columns and "asset_id" in pf.columns:
+                size_cols = [c for c in ("market_cap", "float_cap") if c in pf.columns]
+                if size_cols:
+                    size_panel = pf[["trade_date", "asset_id", size_cols[0]]].rename(
+                        columns={size_cols[0]: "market_cap"}
+                    )
+                    size_panel["trade_date"] = pd.to_datetime(size_panel["trade_date"]).dt.strftime("%Y-%m-%d")
+                    size_panel["asset_id"] = size_panel["asset_id"].astype(str)
+
+        mcap_acc: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        if size_panel is not None and not size_panel.empty:
+            size_lookup = {
+                (str(r.trade_date), str(r.asset_id)): float(r.market_cap)
+                for r in size_panel.itertuples(index=False)
+                if r.market_cap is not None and float(r.market_cap) > 0
+            }
+            for d, a, w in holdings:
+                mv = size_lookup.get((d, a))
+                if mv is None:
+                    continue
+                try:
+                    lm = math.log(float(mv))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(lm):
+                    mcap_acc[d].append((w, lm))
+                    market_cap_available = True
+            for d, pairs in sorted(mcap_acc.items()):
+                tw = sum(w for w, _ in pairs) or 1.0
+                wmean = sum(w * lm for w, lm in pairs) / tw
+                market_cap_rows.append(
+                    {
+                        "trade_date": d,
+                        "weighted_log_market_cap": wmean,
+                        "covered_weight": tw,
+                        "name_count": len(pairs),
+                    }
+                )
+
+        # Industry weights via PIT panel when membership data is available.
+        if db_path is None:
+            if not market_cap_available:
+                reason = "market_database_required_for_pit_industry_exposures"
+            else:
+                reason = "industry_unavailable_without_market_database"
+        else:
+            try:
+                panel = prepare_cross_section_exposure_panel(
+                    universe,
+                    db_path=db_path,
+                    size_panel=size_panel,
+                )
+                ind_acc: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+                for d, a, w in holdings:
+                    sub = panel[
+                        (panel["trade_date"].astype(str) == d)
+                        & (panel["asset_id"].astype(str) == a)
+                    ]
+                    if sub.empty:
+                        continue
+                    ind = sub.iloc[0].get("industry_code")
+                    if ind is not None and str(ind) not in {"", "nan", "None", "<NA>"}:
+                        ind_acc[d][str(ind)] += w
+                        industry_available = True
+                for d, mapping in sorted(ind_acc.items()):
+                    total = sum(mapping.values()) or 1.0
+                    for ind, w in sorted(mapping.items()):
+                        industry_rows.append(
+                            {
+                                "trade_date": d,
+                                "industry_code": ind,
+                                "weight": w,
+                                "weight_share": w / total,
+                            }
+                        )
+                if not industry_available and not market_cap_available:
+                    reason = "pit_exposure_panel_unavailable_or_empty"
+                elif not industry_available:
+                    reason = "industry_membership_unavailable_position_and_market_cap_only"
+            except Exception as exc:  # noqa: BLE001
+                if market_cap_available:
+                    reason = f"industry_exposure_unavailable:{exc}"
+                else:
+                    reason = f"exposure_build_failed:{exc}"
+
+    available = bool(industry_available or market_cap_available)
     return {
-        "available": bool(mcap_rows),
-        "reason": None if mcap_rows else "no_positions_for_exposure_summary",
-        "industry": [],
-        "market_cap": mcap_rows,
-        "note": "Product package stores position concentration; full industry panel may be attached by CS meta when available.",
+        "available": available,
+        "industry_available": industry_available,
+        "market_cap_available": market_cap_available,
+        "reason": reason,
+        "industry": industry_rows,
+        "market_cap": market_cap_rows,
+        "position_concentration": concentration_rows,
+        "note": (
+            "industry/market_cap use PIT exposure panel when available; "
+            "position_concentration is separate and not market-cap exposure."
+        ),
     }
 
 
@@ -653,26 +865,64 @@ def execute_validated_task(
         "benchmark_id": getattr(request, "benchmark_id", None),
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
-        "cross_section": cross_section_meta or None,
+        "cross_section": (
+            {
+                k: v
+                for k, v in (cross_section_meta or {}).items()
+                if k not in {"price_frame"}
+            }
+            or None
+        ),
         "event": (event_meta or {}).get("event") if event_meta else None,
     }
 
-    # Optional benchmark + price path for MAE/MFE and excess analytics.
+    # MAE/MFE prices: prefer assets that actually traded (fills/orders/trades).
+    # Path-local frames (classic price_df / CS price_frame) are fallbacks only.
     price_frame_for_analytics = locals().get("price_df")
     if price_frame_for_analytics is None and cross_section_meta:
         price_frame_for_analytics = cross_section_meta.get("price_frame")
-    if price_frame_for_analytics is None and db_path is not None:
-        try:
-            # Best-effort reload for MAE/MFE when path did not keep price_df.
-            if request.tickers:
-                price_frame_for_analytics = load_stock_prices(
-                    tickers=list(request.tickers),
-                    start_date=request.start_date,
-                    end_date=request.end_date,
+    traded_assets: list[str] = sorted(
+        {
+            str(getattr(f, "asset_id", "") or "")
+            for f in portfolio_result.fills
+            if getattr(f, "asset_id", None)
+        }
+        | {
+            str(getattr(o, "asset_id", "") or "")
+            for o in portfolio_result.orders
+            if getattr(o, "asset_id", None)
+        }
+    )
+    traded_assets = [a for a in traded_assets if a]
+    # Always try to load OHLC for traded assets when a market DB is available so
+    # CS/event paths are not blocked by missing price_frame or empty request.tickers.
+    if db_path is not None:
+        assets_to_load = traded_assets or list(request.tickers or [])
+        if not assets_to_load and cross_section_meta:
+            assets_to_load = list(cross_section_meta.get("traded_or_universe_assets") or [])
+        if assets_to_load:
+            try:
+                import pandas as pd
+
+                start = request.start_date
+                end = request.end_date
+                if portfolio_result.snapshots:
+                    start = min(start, portfolio_result.snapshots[0].trade_date)
+                    end = max(end, portfolio_result.snapshots[-1].trade_date)
+                # small buffer so hold windows at range edges still have OHLC
+                start_buf = (pd.Timestamp(start) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+                end_buf = (pd.Timestamp(end) + pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+                loaded = load_stock_prices(
+                    tickers=assets_to_load,
+                    start_date=start_buf,
+                    end_date=end_buf,
                     db_path=db_path,
                 )
-        except Exception:  # noqa: BLE001
-            price_frame_for_analytics = None
+                if loaded is not None and not getattr(loaded, "empty", True):
+                    price_frame_for_analytics = loaded
+            except Exception:  # noqa: BLE001
+                # keep any path-local frame already captured
+                pass
 
     benchmark_frame, benchmark_id, benchmark_load_diag = _load_benchmark_frame(
         request, db_path=db_path
@@ -682,6 +932,9 @@ def execute_validated_task(
             **config_overlay,
             "benchmark_load_diagnostics": benchmark_load_diag,
         }
+    resolved_universe_assets = traded_assets or list(
+        (cross_section_meta or {}).get("traded_or_universe_assets") or request.tickers or []
+    )
     repro_snapshot = _build_reproducibility_snapshot(
         request,
         strategy=strategy,
@@ -689,11 +942,17 @@ def execute_validated_task(
         cross_section_meta=cross_section_meta,
         event_meta=locals().get("event_meta") if "event_meta" in locals() else None,
         benchmark_id=benchmark_id,
+        resolved_universe_assets=resolved_universe_assets,
+        price_frame=price_frame_for_analytics,
+        benchmark_frame=benchmark_frame,
     )
     exposure_payload = _build_exposure_payload(
         request,
         portfolio_result=portfolio_result,
+        execution_targets=execution_targets,
         cross_section_meta=cross_section_meta,
+        db_path=db_path,
+        price_frame=price_frame_for_analytics,
     )
 
     try:
@@ -718,6 +977,197 @@ def execute_validated_task(
         raise BacktestTaskExecutionError(f"failed to persist backtest results: {exc}") from exc
 
     return resolved_run_id, run_dir
+
+
+
+def replay_product_run(
+    run_id: str,
+    *,
+    runs_dir: Path | None = None,
+    db_path: Path | None = None,
+    new_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Re-execute a product run from its locked reproducibility snapshot.
+
+    Uses snapshot product_request / strategy version / params rather than current
+    registry defaults. Compares business fields of equity/summary/orders/fills.
+    """
+
+    from qrp_atlas.backtest.results.loader import BacktestRunsLoader
+
+    root = Path(runs_dir) if runs_dir is not None else default_product_runs_dir()
+    loader = BacktestRunsLoader(root)
+    repro = loader.load_reproducibility(run_id)
+    if not repro:
+        # fallback config
+        cfg = loader.load_config(run_id)
+        repro = cfg.get("reproducibility") if isinstance(cfg, dict) else None
+    if not isinstance(repro, dict):
+        raise BacktestTaskExecutionError(f"run {run_id} has no reproducibility snapshot")
+    req_payload = repro.get("product_request")
+    if not isinstance(req_payload, dict):
+        raise BacktestTaskExecutionError(f"run {run_id} reproducibility lacks product_request")
+    # lock strategy identity from snapshot, not registry-latest defaults
+    if repro.get("strategy_code"):
+        req_payload = {**req_payload, "strategy_code": repro["strategy_code"]}
+    if repro.get("strategy_version"):
+        req_payload = {**req_payload, "strategy_version": repro["strategy_version"]}
+    if isinstance(repro.get("strategy_params"), dict):
+        req_payload = {**req_payload, "strategy_params": dict(repro["strategy_params"])}
+
+    request = CreateBacktestTaskRequest.model_validate(req_payload)
+    replay_id = new_run_id or f"replay_{run_id}"
+    # overwrite false: if exists, create unique
+    if (root / replay_id).exists():
+        replay_id = f"replay_{run_id}_{uuid.uuid4().hex[:8]}"
+    new_id, new_dir = execute_validated_task(
+        request,
+        run_id=replay_id,
+        runs_dir=root,
+        db_path=db_path,
+    )
+    old_summary = loader.load_summary(run_id)
+    new_loader = BacktestRunsLoader(root)
+    new_summary = new_loader.load_summary(new_id)
+    old_equity = loader.load_equity(run_id)
+    new_equity = new_loader.load_equity(new_id)
+    old_fills = loader.load_fills(run_id)
+    new_fills = new_loader.load_fills(new_id)
+    old_orders = loader.load_orders(run_id)
+    new_orders = new_loader.load_orders(new_id)
+
+    def _strip_non_business_fills(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for r in rows or []:
+            item = {
+                k: r.get(k)
+                for k in (
+                    "trade_date",
+                    "asset_id",
+                    "side",
+                    "quantity",
+                    "price",
+                    "amount",
+                    "commission",
+                    "stamp_tax",
+                    "slippage_cost",
+                )
+                if k in r
+            }
+            out.append(item)
+        return out
+
+    def _strip_equity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {"date": r.get("date"), "equity": r.get("equity"), "drawdown_pct": r.get("drawdown_pct")}
+            for r in rows or []
+        ]
+
+    business_keys = [
+        "total_return_pct",
+        "annual_return_pct",
+        "max_drawdown_pct",
+        "final_equity",
+        "turnover",
+        "total_cost",
+        "trade_count",
+    ]
+
+    def _num_close(a, b) -> bool:
+        if a == b:
+            return True
+        try:
+            if a is None or b is None:
+                return a is None and b is None
+            return abs(float(a) - float(b)) < 1e-9
+        except (TypeError, ValueError):
+            return False
+
+    summary_match = all(_num_close(old_summary.get(k), new_summary.get(k)) for k in business_keys)
+    equity_match = _strip_equity(old_equity) == _strip_equity(new_equity)
+    fills_match = _strip_non_business_fills(old_fills) == _strip_non_business_fills(new_fills)
+    orders_match = _strip_non_business_fills(old_orders) == _strip_non_business_fills(new_orders)
+
+    def _strip_trades(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        keys = (
+            "asset_id",
+            "signal_date",
+            "entry_date",
+            "entry_price",
+            "exit_date",
+            "exit_price",
+            "holding_days",
+            "return_pct",
+            "status",
+            "exit_reason",
+        )
+        out = []
+        for r in rows or []:
+            out.append({k: r.get(k) for k in keys})
+        return out
+
+    old_trades = loader.load_trades(run_id)
+    new_trades = new_loader.load_trades(new_id)
+    trades_match = _strip_trades(old_trades) == _strip_trades(new_trades)
+
+    # targets / decisions are recovered from execution artifacts when present
+    old_snaps = loader.load_snapshots(run_id)
+    new_snaps = new_loader.load_snapshots(new_id)
+
+    def _strip_targets_from_snaps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for r in rows or []:
+            positions = r.get("positions") or []
+            out.append(
+                {
+                    "trade_date": r.get("trade_date") or r.get("date"),
+                    "positions": sorted(
+                        [
+                            {
+                                "asset_id": p.get("asset_id") if isinstance(p, dict) else getattr(p, "asset_id", None),
+                                "weight": p.get("weight") if isinstance(p, dict) else getattr(p, "weight", None),
+                            }
+                            for p in positions
+                        ],
+                        key=lambda x: str(x.get("asset_id") or ""),
+                    ),
+                }
+            )
+        return out
+
+    targets_match = _strip_targets_from_snaps(old_snaps) == _strip_targets_from_snaps(new_snaps)
+
+    old_hash = repro.get("snapshot_hash")
+    new_repro = new_loader.load_reproducibility(new_id) or {}
+    all_business = (
+        summary_match
+        and equity_match
+        and fills_match
+        and orders_match
+        and trades_match
+        and targets_match
+    )
+    return {
+        "source_run_id": run_id,
+        "replay_run_id": new_id,
+        "replay_dir": str(new_dir),
+        "source_snapshot_hash": old_hash,
+        "replay_snapshot_hash": new_repro.get("snapshot_hash"),
+        "source_resolved_universe": (repro.get("universe") or {}).get("resolved_assets"),
+        "replay_resolved_universe": (new_repro.get("universe") or {}).get("resolved_assets"),
+        "source_data_fingerprints": repro.get("data_fingerprints"),
+        "replay_data_fingerprints": new_repro.get("data_fingerprints"),
+        "match": {
+            "summary_business_fields": summary_match,
+            "equity": equity_match,
+            "fills": fills_match,
+            "orders": orders_match,
+            "trades": trades_match,
+            "targets_from_snapshots": targets_match,
+            "all_business": all_business,
+        },
+        "allowed_to_differ": ["run_id", "created_at", "replay_run_id", "name"],
+    }
 
 
 class BacktestProductService:

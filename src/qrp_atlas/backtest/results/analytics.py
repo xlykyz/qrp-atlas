@@ -229,6 +229,7 @@ def rolling_performance(
     return out
 
 
+
 def align_benchmark_series(
     portfolio_dates: Sequence[str],
     benchmark: pd.DataFrame,
@@ -239,40 +240,65 @@ def align_benchmark_series(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Align benchmark to portfolio dates without fill across gaps.
 
-    Returns (aligned points, diagnostics). Missing benchmark dates become None
-    values with an explicit diagnostic; no silent replacement / no gap fill.
+    No forward/backward fill. Gap dates break benchmark cumulative chains.
 
-    Each point includes:
-    - benchmark_level
-    - benchmark_return (daily simple return)
-    - benchmark_cumulative_return (from first available level; resets after gaps)
-    - excess_return (portfolio daily return - benchmark daily return when both finite)
+    Per-date fields:
+    - daily_active_return = (1+p)/(1+b)-1
+    - excess_return: alias of daily_active_return
+    - excess_percentage_point / relative_return only meaningful with continuous coverage
     """
 
     diagnostics: list[str] = []
-    port_rets = list(portfolio_returns) if portfolio_returns is not None else [None] * len(portfolio_dates)
-    if len(port_rets) < len(portfolio_dates):
-        port_rets = port_rets + [None] * (len(portfolio_dates) - len(port_rets))
+    n = len(portfolio_dates)
+    port_rets: list[float | None] = list(portfolio_returns) if portfolio_returns is not None else [None] * n
+    if len(port_rets) < n:
+        port_rets = port_rets + [None] * (n - len(port_rets))
 
-    if benchmark is None or benchmark.empty:
+    def _empty(date: str, port_ret: float | None, port_cum: float | None) -> dict[str, Any]:
+        return {
+            "date": date,
+            "benchmark_level": None,
+            "benchmark_return": None,
+            "benchmark_cumulative_return": None,
+            "portfolio_return": port_ret,
+            "portfolio_cumulative_return": port_cum,
+            "daily_active_return": None,
+            "excess_return": None,
+            "excess_percentage_point": None,
+            "relative_return": None,
+        }
+
+    # portfolio cumulative chain (independent of benchmark)
+    port_cums: list[float | None] = []
+    growth = 1.0
+    for i, pr in enumerate(port_rets):
+        if i == 0:
+            growth = 1.0 + (pr if pr is not None else 0.0)
+            port_cums.append(growth - 1.0)
+            continue
+        if pr is None:
+            port_cums.append(None)
+        else:
+            growth *= 1.0 + pr
+            port_cums.append(growth - 1.0)
+
+    if benchmark is None or getattr(benchmark, "empty", True):
         diagnostics.append("benchmark_missing")
         return (
-            [
-                {
-                    "date": d,
-                    "benchmark_level": None,
-                    "benchmark_return": None,
-                    "benchmark_cumulative_return": None,
-                    "portfolio_return": _finite(port_rets[i]) if i < len(port_rets) else None,
-                    "excess_return": None,
-                }
-                for i, d in enumerate(portfolio_dates)
-            ],
+            [_empty(str(d), _finite(port_rets[i]), _finite(port_cums[i])) for i, d in enumerate(portfolio_dates)],
             diagnostics,
         )
 
     work = benchmark.copy()
-    work[date_col] = pd.to_datetime(work[date_col]).dt.strftime("%Y-%m-%d")
+    def _as_date_str(v: Any) -> str:
+        try:
+            ts = pd.Timestamp(v)
+            if pd.isna(ts):
+                return str(v)
+            return ts.strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            return str(v)
+    work[date_col] = work[date_col].map(_as_date_str)
     work = work.sort_values(date_col)
     values = {
         str(r[date_col]): _finite(r[value_col])
@@ -281,87 +307,108 @@ def align_benchmark_series(
 
     aligned: list[dict[str, Any]] = []
     prev_level: float | None = None
-    base_level: float | None = None
+    segment_base: float | None = None
+    continuous_from_start = True
+
     for i, date in enumerate(portfolio_dates):
+        date = str(date)
+        port_ret = _finite(port_rets[i])
+        port_cum = _finite(port_cums[i])
         level = values.get(date)
-        port_ret = _finite(port_rets[i]) if i < len(port_rets) else None
         if level is None:
             diagnostics.append(f"benchmark_gap:{date}")
-            aligned.append(
-                {
-                    "date": date,
-                    "benchmark_level": None,
-                    "benchmark_return": None,
-                    "benchmark_cumulative_return": None,
-                    "portfolio_return": port_ret,
-                    "excess_return": None,
-                }
-            )
-            # gap breaks cumulative chain; do not forward/back fill
+            continuous_from_start = False
             prev_level = None
+            segment_base = None
+            aligned.append(_empty(date, port_ret, port_cum))
             continue
-        if prev_level is None or prev_level == 0:
+
+        if prev_level is None:
             b_ret = 0.0
+            segment_base = level
         else:
             b_ret = level / prev_level - 1.0
-        if base_level is None:
-            base_level = level
-        cum = level / base_level - 1.0 if base_level else None
-        excess = None
-        if port_ret is not None and b_ret is not None:
-            excess = port_ret - b_ret
+        b_cum = (level / segment_base - 1.0) if segment_base else None
+
+        if port_ret is not None and (1.0 + b_ret) != 0.0:
+            daily_active = (1.0 + port_ret) / (1.0 + b_ret) - 1.0
+        else:
+            daily_active = None
+
+        excess_pp = None
+        relative = None
+        if continuous_from_start and port_cum is not None and b_cum is not None:
+            excess_pp = port_cum - b_cum
+            if (1.0 + b_cum) != 0.0:
+                relative = (1.0 + port_cum) / (1.0 + b_cum) - 1.0
+
         aligned.append(
             {
                 "date": date,
                 "benchmark_level": level,
                 "benchmark_return": _finite(b_ret),
-                "benchmark_cumulative_return": _finite(cum),
+                "benchmark_cumulative_return": _finite(b_cum),
                 "portfolio_return": port_ret,
-                "excess_return": _finite(excess),
+                "portfolio_cumulative_return": port_cum,
+                "daily_active_return": _finite(daily_active),
+                "excess_return": _finite(daily_active),
+                "excess_percentage_point": _finite(excess_pp),
+                "relative_return": _finite(relative),
             }
         )
         prev_level = level
 
-    if any(item["benchmark_level"] is None for item in aligned):
+    full_range = bool(aligned) and all(p.get("benchmark_level") is not None for p in aligned)
+    if not full_range:
         diagnostics.append("benchmark_has_gaps_no_fill")
-    if all(item["benchmark_level"] is None for item in aligned):
+        diagnostics.append("full_range_excess_unavailable_due_to_benchmark_gaps")
+        # ensure full-range fields null when gaps exist (already null after gap break)
+        for p in aligned:
+            if not full_range:
+                # keep per-date active return; null full-range only at summary
+                pass
+    if all(p.get("benchmark_level") is None for p in aligned):
         diagnostics.append("benchmark_unavailable_for_range")
     return aligned, diagnostics
 
 
 def benchmark_summary(aligned: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Summarize aligned benchmark/excess series for product summary artifact."""
+    """Summarize aligned benchmark/excess series.
+
+    Full-range cumulative excess requires continuous benchmark coverage.
+    With gaps: full-range excess totals are None (never sum across gaps).
+    """
 
     b_rets = [_finite(p.get("benchmark_return")) for p in aligned]
-    e_rets = [_finite(p.get("excess_return")) for p in aligned]
+    active_rets = [_finite(p.get("daily_active_return", p.get("excess_return"))) for p in aligned]
     finite_b = [v for v in b_rets if v is not None]
-    finite_e = [v for v in e_rets if v is not None]
-    cum_vals = [
-        _finite(p.get("benchmark_cumulative_return"))
-        for p in aligned
-        if p.get("benchmark_cumulative_return") is not None
-    ]
-    total_b = cum_vals[-1] if cum_vals else None
-    # compound excess approx via daily excess when continuous finite
-    total_e = None
-    if finite_e:
-        growth = 1.0
-        ok = True
-        for v in e_rets:
-            if v is None:
-                ok = False
-                break
-            growth *= 1.0 + v
-        total_e = growth - 1.0 if ok else sum(finite_e)
+    finite_a = [v for v in active_rets if v is not None]
+    full_range = bool(aligned) and all(p.get("benchmark_level") is not None for p in aligned)
+    last = aligned[-1] if aligned else {}
+    total_b = _finite(last.get("benchmark_cumulative_return")) if full_range else None
+    total_p = _finite(last.get("portfolio_cumulative_return")) if full_range else None
+    excess_pp = _finite((total_p - total_b) if (full_range and total_p is not None and total_b is not None) else None)
+    relative = None
+    if full_range and total_p is not None and total_b is not None and (1.0 + total_b) != 0.0:
+        relative = (1.0 + total_p) / (1.0 + total_b) - 1.0
     return {
-        "benchmark_total_return": _finite(total_b),
+        "benchmark_total_return": total_b,
         "benchmark_total_return_pct": _finite(None if total_b is None else total_b * 100.0),
-        "excess_total_return": _finite(total_e),
-        "excess_total_return_pct": _finite(None if total_e is None else total_e * 100.0),
+        "portfolio_total_return": total_p,
+        "portfolio_total_return_pct": _finite(None if total_p is None else total_p * 100.0),
+        "excess_percentage_point": excess_pp,
+        "excess_percentage_point_pct": _finite(None if excess_pp is None else excess_pp * 100.0),
+        "relative_return": _finite(relative),
+        "relative_return_pct": _finite(None if relative is None else relative * 100.0),
+        # Compatible keys: geometric relative excess only when full-range continuous.
+        "excess_total_return": _finite(relative),
+        "excess_total_return_pct": _finite(None if relative is None else relative * 100.0),
+        "full_range_excess_available": full_range,
         "benchmark_observation_count": len(finite_b),
-        "excess_observation_count": len(finite_e),
+        "daily_active_observation_count": len(finite_a),
         "benchmark_sharpe": sharpe_ratio(b_rets),
-        "excess_sharpe": sharpe_ratio(e_rets),
+        "daily_active_sharpe": sharpe_ratio(active_rets),
+        "excess_sharpe": sharpe_ratio(active_rets),
     }
 
 

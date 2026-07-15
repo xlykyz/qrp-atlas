@@ -374,9 +374,15 @@ class BacktestRunWriter:
                 **summary,
                 "benchmark_id": benchmark_id,
                 "benchmark_total_return_pct": bench_sum.get("benchmark_total_return_pct"),
+                "portfolio_total_return_pct": bench_sum.get("portfolio_total_return_pct"),
+                "excess_percentage_point_pct": bench_sum.get("excess_percentage_point_pct"),
+                "relative_return_pct": bench_sum.get("relative_return_pct"),
+                # geometric relative return; None when benchmark gaps break full-range chain
                 "excess_total_return_pct": bench_sum.get("excess_total_return_pct"),
+                "full_range_excess_available": bench_sum.get("full_range_excess_available"),
                 "benchmark_sharpe": bench_sum.get("benchmark_sharpe"),
                 "excess_sharpe": bench_sum.get("excess_sharpe"),
+                "daily_active_sharpe": bench_sum.get("daily_active_sharpe"),
             }
             costs = {
                 "commission": float(result.summary["commission"]),
@@ -389,9 +395,12 @@ class BacktestRunWriter:
             }
             exposure_payload = exposures if exposures is not None else {
                 "available": False,
+                "industry_available": False,
+                "market_cap_available": False,
                 "reason": "exposures_not_provided",
                 "industry": [],
                 "market_cap": [],
+                "position_concentration": [],
             }
             repro = {
                 "strategy_name": strategy_name,

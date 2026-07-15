@@ -51,9 +51,14 @@ class BacktestSummary(BaseModel):
     final_equity: Optional[float] = None
     benchmark_id: Optional[str] = None
     benchmark_total_return_pct: Optional[float] = None
+    portfolio_total_return_pct: Optional[float] = None
+    excess_percentage_point_pct: Optional[float] = None
+    relative_return_pct: Optional[float] = None
     excess_total_return_pct: Optional[float] = None
+    full_range_excess_available: Optional[bool] = None
     benchmark_sharpe: Optional[float] = None
     excess_sharpe: Optional[float] = None
+    daily_active_sharpe: Optional[float] = None
 
 
 class EquityPoint(BaseModel):
@@ -131,12 +136,18 @@ class RollingPerformancePoint(BaseModel):
 
 
 class BenchmarkPoint(BaseModel):
+    model_config = {"extra": "allow"}
+
     date: str
     benchmark_level: float | None = None
     benchmark_return: float | None = None
     benchmark_cumulative_return: float | None = None
     portfolio_return: float | None = None
+    portfolio_cumulative_return: float | None = None
+    daily_active_return: float | None = None
     excess_return: float | None = None
+    excess_percentage_point: float | None = None
+    relative_return: float | None = None
 
 
 class BenchmarkArtifact(BaseModel):
@@ -147,10 +158,15 @@ class BenchmarkArtifact(BaseModel):
 
 
 class ExposureArtifact(BaseModel):
+    model_config = {"extra": "allow"}
+
     available: bool = False
+    industry_available: bool = False
+    market_cap_available: bool = False
     reason: str | None = None
     industry: list[dict[str, Any]] = []
     market_cap: list[dict[str, Any]] = []
+    position_concentration: list[dict[str, Any]] = []
     note: str | None = None
 
 
