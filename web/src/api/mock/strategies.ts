@@ -245,6 +245,53 @@ export const MOCK_STRATEGIES: StrategyCatalogItem[] = [
       },
     },
   },
+
+  {
+    code: 'event_drift_basic',
+    name: '业绩预告事件漂移',
+    version: '1.0.2',
+    family: 'event_driven',
+    description:
+      '基于 earnings_forecast_event 的正预告漂移；available_trade_date 开盘入场，持有 hold_days 后下一开盘退出。',
+    scope: '事件驱动；正式披露 PIT；多次正式披露全保留；不宣称 technical revision knowledge-as-of；仅 next_open / available_trade_date open。',
+    strategy_type: 'builtin',
+    required_fields: [
+      'ticker',
+      'announcement_date',
+      'available_trade_date',
+      'forecast_type',
+      'profit_change_min',
+      'profit_change_max',
+      'event_series_id',
+      'source_record_id',
+    ],
+    required_indicators: [],
+    product_supported: true,
+    requires_historical_universe: false,
+    supported_universe_modes: ['tickers'],
+    supported_entry_timings: ['next_open'],
+    requires_portfolio_config: true,
+    parameter_schema: {
+      hold_days: {
+        type: 'integer',
+        required: false,
+        default: 5,
+        minimum: 1,
+        maximum: 120,
+        label: '持有交易日数',
+        description: '含入场日为第 1 日；退出为 hold_days 后的下一开盘。',
+      },
+      min_profit_change_midpoint: {
+        type: 'number',
+        required: false,
+        default: 0,
+        minimum: -1000,
+        maximum: 1000,
+        label: '最小预告变动中点',
+        description: 'profit_change_midpoint 下限过滤。',
+      },
+    },
+  },
 ];
 
 export function getMockStrategy(code: string, version?: string): StrategyCatalogItem | undefined {

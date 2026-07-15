@@ -50,6 +50,10 @@ export function isCrossSectionalStrategy(code: string): boolean {
   return code === 'cross_sectional_momentum_long_only';
 }
 
+export function isEventStrategy(code: string): boolean {
+  return code === 'event_drift_basic';
+}
+
 export function defaultParamsFromSchema(schema: ParameterSchema): StrategyParamValues {
   const values: StrategyParamValues = {};
   for (const [key, spec] of Object.entries(schema)) {
@@ -103,11 +107,14 @@ export function formStateToCreateRequest(
   form: BacktestWorkflowFormState,
 ): CreateBacktestTaskRequest {
   const crossSectional = isCrossSectionalStrategy(form.strategyCode);
+  const eventStrategy = isEventStrategy(form.strategyCode);
   const tickers = parseTickers(form.tickersText);
 
   let universeMode: UniverseMode;
   if (crossSectional) {
     universeMode = 'index_components';
+  } else if (eventStrategy) {
+    universeMode = 'tickers';
   } else if (form.universePreset === 'CUSTOM' || form.universeMode === 'tickers') {
     universeMode = 'tickers';
   } else if (form.universeMode === 'index_components') {
@@ -123,7 +130,8 @@ export function formStateToCreateRequest(
     strategy_params: { ...form.strategyParams },
     universe_mode: universeMode,
     universe_preset: universeMode === 'preset' ? form.universePreset : undefined,
-    index_code: universeMode === 'index_components' ? form.indexCode.trim().toUpperCase() : undefined,
+    index_code:
+      universeMode === 'index_components' ? form.indexCode.trim().toUpperCase() : undefined,
     tickers: universeMode === 'tickers' ? tickers : undefined,
     start_date: form.startDate,
     end_date: form.endDate,
@@ -138,7 +146,7 @@ export function formStateToCreateRequest(
       slippage_bps: form.slippageBps,
     },
     execution: {
-      entry_timing: crossSectional ? 'next_open' : form.entryTiming,
+      entry_timing: crossSectional || eventStrategy ? 'next_open' : form.entryTiming,
     },
   };
 }
