@@ -13,6 +13,7 @@ class BacktestRunMeta(BaseModel):
     """单次回测运行的元信息。"""
 
     run_id: str
+    owner_user_id: str | None = None
     name: str
     strategy_name: str
     universe: str

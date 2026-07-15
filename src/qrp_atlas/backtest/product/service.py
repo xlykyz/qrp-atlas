@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -94,22 +95,64 @@ def _normalize_tickers(values: list[str] | None) -> list[str]:
     return cleaned
 
 
-def validate_create_request(request: CreateBacktestTaskRequest) -> CreateBacktestTaskRequest:
+
+
+def _resolve_product_strategy(
+    strategy_code: str, strategy_version: str, *, owner_user_id: str = "local-user"
+):
+    """Resolve builtin registry strategy or declarative store strategy."""
+
+    try:
+        return get_strategy(strategy_code, strategy_version)
+    except StrategyNotFoundError:
+        from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        record = get_declarative_store().get(
+            strategy_code, strategy_version, owner_user_id=owner_user_id
+        )
+        return DeclarativeStrategy.from_dict(record.definition)
+
+
+def validate_create_request(
+    request: CreateBacktestTaskRequest, *, owner_user_id: str = "local-user"
+) -> CreateBacktestTaskRequest:
     """Validate and normalize a create-task request (backend is authoritative)."""
 
     strategy_code = str(request.strategy_code or "").strip()
     strategy_version = str(request.strategy_version or "").strip()
     if not strategy_code:
         raise BacktestTaskValidationError("strategy_code is required")
-    if strategy_code not in PRODUCT_SUPPORTED_STRATEGY_CODES:
-        raise BacktestTaskValidationError(
-            f"strategy not supported by product path: {strategy_code}"
-        )
     if not strategy_version:
         raise BacktestTaskValidationError("strategy_version is required")
 
+    declarative_strategy = None
+    if strategy_code not in PRODUCT_SUPPORTED_STRATEGY_CODES:
+        try:
+            from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+            from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+            record = get_declarative_store().get(
+                strategy_code, strategy_version, owner_user_id=owner_user_id
+            )
+            if record.status != "active":
+                raise BacktestTaskValidationError(
+                    f"declarative strategy is not active: {strategy_code}@{strategy_version}"
+                )
+            declarative_strategy = DeclarativeStrategy.from_dict(record.definition)
+        except BacktestTaskValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise BacktestTaskValidationError(
+                f"strategy not supported by product path: {strategy_code}"
+            ) from exc
+
     try:
-        strategy = get_strategy(strategy_code, strategy_version)
+        strategy = (
+            declarative_strategy
+            if declarative_strategy is not None
+            else get_strategy(strategy_code, strategy_version)
+        )
     except StrategyNotFoundError as exc:
         raise BacktestTaskValidationError(str(exc)) from exc
 
@@ -357,10 +400,17 @@ def _formal_price_frame(price_df: pd.DataFrame, start_date: str, end_date: str) 
 def _run_product_portfolio(
     request: CreateBacktestTaskRequest,
     price_df: pd.DataFrame,
+    *,
+    strategy: Any | None = None,
+    owner_user_id: str = "local-user",
 ) -> tuple[Any, pd.DataFrame, Any, list[dict[str, str]]]:
     """Prepare warmup-isolated decisions and execute on formal range only."""
 
-    strategy = get_strategy(request.strategy_code, request.strategy_version)
+    strategy = strategy or _resolve_product_strategy(
+        request.strategy_code,
+        request.strategy_version,
+        owner_user_id=owner_user_id,
+    )
     resolved = dict(request.strategy_params)
     prepared_full = prepare_strategy_data(price_df, strategy.definition, resolved)
 
@@ -778,10 +828,15 @@ def execute_validated_task(
     run_id: str | None = None,
     runs_dir: Path | None = None,
     db_path: Path | None = None,
+    owner_user_id: str = "local-user",
 ) -> tuple[str, Path]:
     """Run strategy + portfolio engine and persist a standard results package."""
 
-    strategy = get_strategy(request.strategy_code, request.strategy_version)
+    strategy = _resolve_product_strategy(
+        request.strategy_code,
+        request.strategy_version,
+        owner_user_id=owner_user_id,
+    )
     cross_section_meta: dict[str, Any] = {}
     event_meta: dict[str, Any] = {}
     if is_cross_sectional_product_strategy(request.strategy_code):
@@ -819,7 +874,12 @@ def execute_validated_task(
     else:
         price_df = _load_prices(request, db_path=db_path)
         strategy_result, execution_targets, portfolio_result, skipped_signals = (
-            _run_product_portfolio(request, price_df)
+            _run_product_portfolio(
+                request,
+                price_df,
+                strategy=strategy,
+                owner_user_id=owner_user_id,
+            )
         )
 
     execution_signal_map: dict[tuple[str, str], str] = {}
@@ -850,6 +910,28 @@ def execute_validated_task(
     writer_root = Path(runs_dir) if runs_dir is not None else default_product_runs_dir()
     writer = BacktestRunWriter(writer_root)
 
+    strategy_definition_snapshot = strategy.definition.to_dict()
+    declarative_record_snapshot = None
+    from qrp_atlas.strategies.declarative.evaluator import DeclarativeStrategy
+    from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+    if isinstance(strategy, DeclarativeStrategy):
+        rec = get_declarative_store().get(
+            strategy.definition.code,
+            strategy.definition.version,
+            owner_user_id=owner_user_id,
+        )
+        declarative_record_snapshot = {
+            "code": rec.code,
+            "version": rec.version,
+            "owner_user_id": rec.owner_user_id,
+            "status": rec.status,
+            "created_at": rec.created_at,
+            "referenced_by_runs": True,
+            "definition": rec.definition,
+        }
+        strategy_definition_snapshot = dict(rec.definition)
+
     config_overlay = {
         "product_request": request.model_dump(mode="json"),
         "entry_timing": request.execution.entry_timing,
@@ -875,6 +957,8 @@ def execute_validated_task(
         },
         "strategy_code": strategy.definition.code,
         "strategy_version": strategy.definition.version,
+        "strategy_definition_snapshot": strategy_definition_snapshot,
+        "declarative_strategy_snapshot": declarative_record_snapshot,
         "benchmark_id": getattr(request, "benchmark_id", None),
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
@@ -982,6 +1066,7 @@ def execute_validated_task(
             strategy_name=f"{strategy.definition.code}@{strategy.definition.version}",
             universe=_universe_label(request),
             name=portfolio_result.config.name,
+            owner_user_id=owner_user_id,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             overwrite=False,
             config_overlay=config_overlay,
@@ -997,6 +1082,22 @@ def execute_validated_task(
     except Exception as exc:  # noqa: BLE001
         raise BacktestTaskExecutionError(f"failed to persist backtest results: {exc}") from exc
 
+    if declarative_record_snapshot is not None:
+        from qrp_atlas.strategies.declarative.store import get_declarative_store
+
+        try:
+            get_declarative_store().mark_referenced(
+                strategy.definition.code,
+                strategy.definition.version,
+                owner_user_id=owner_user_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if run_dir.exists():
+                shutil.rmtree(run_dir)
+            raise BacktestTaskExecutionError(
+                f"failed to lock declarative strategy reference: {exc}"
+            ) from exc
+
     return resolved_run_id, run_dir
 
 
@@ -1007,6 +1108,7 @@ def replay_product_run(
     runs_dir: Path | None = None,
     db_path: Path | None = None,
     new_run_id: str | None = None,
+    owner_user_id: str = "local-user",
 ) -> dict[str, Any]:
     """Re-execute a locked request against current strategy code and current data."""
 
@@ -1014,6 +1116,9 @@ def replay_product_run(
 
     root = Path(runs_dir) if runs_dir is not None else default_product_runs_dir()
     loader = BacktestRunsLoader(root)
+    source_meta = loader.load_run_meta(run_id)
+    if str(source_meta.get("owner_user_id") or "local-user") != owner_user_id:
+        raise BacktestTaskExecutionError(f"run not found: {run_id}")
     repro = loader.load_reproducibility(run_id)
     if not repro:
         # fallback config
@@ -1042,6 +1147,7 @@ def replay_product_run(
         run_id=replay_id,
         runs_dir=root,
         db_path=db_path,
+        owner_user_id=owner_user_id,
     )
     old_summary = loader.load_summary(run_id)
     new_loader = BacktestRunsLoader(root)
@@ -1212,19 +1318,23 @@ class BacktestProductService:
         self.execute_inline = execute_inline
         self._bg_lock = threading.Lock()
 
-    def create_task(self, request: CreateBacktestTaskRequest) -> CreateBacktestTaskResponse:
-        validated = validate_create_request(request)
-        record = self.task_store.create(validated)
+    def create_task(
+        self, request: CreateBacktestTaskRequest, *, owner_user_id: str = "local-user"
+    ) -> CreateBacktestTaskResponse:
+        validated = validate_create_request(request, owner_user_id=owner_user_id)
+        record = self.task_store.create(validated, owner_user_id=owner_user_id)
         if self.execute_inline:
             self._run_task(record.task_id)
             record = self.task_store.get(record.task_id)
         return CreateBacktestTaskResponse(task=record)
 
-    def list_tasks(self) -> list[BacktestTaskRecord]:
-        return self.task_store.list()
+    def list_tasks(self, *, owner_user_id: str = "local-user") -> list[BacktestTaskRecord]:
+        return self.task_store.list(owner_user_id=owner_user_id)
 
-    def get_task(self, task_id: str) -> BacktestTaskRecord:
-        return self.task_store.get(task_id)
+    def get_task(
+        self, task_id: str, *, owner_user_id: str = "local-user"
+    ) -> BacktestTaskRecord:
+        return self.task_store.get(task_id, owner_user_id=owner_user_id)
 
     def _run_task(self, task_id: str) -> BacktestTaskRecord:
         with self._bg_lock:
@@ -1238,6 +1348,7 @@ class BacktestProductService:
                     request,
                     runs_dir=self.runs_dir,
                     db_path=self.db_path,
+                    owner_user_id=record.owner_user_id,
                 )
                 return self.task_store.update(
                     task_id,

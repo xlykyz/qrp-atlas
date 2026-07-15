@@ -87,6 +87,7 @@ class CreateBacktestTaskRequest(BaseModel):
 
 class BacktestTaskRecord(BaseModel):
     task_id: str
+    owner_user_id: str = "local-user"
     run_id: str | None = None
     name: str
     strategy_code: str

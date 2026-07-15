@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from qrp_atlas.contracts import TICKER, TRADE_DATE
+from qrp_atlas.indicators import indicator_output_fields
 
 from ..models import (
     StrategyAction,
@@ -33,6 +34,8 @@ class DeclarativeStrategy:
         validate_definition(self.definition)
         self._validate_condition(spec.entry)
         self._validate_condition(spec.exit)
+        if spec.hold is not None:
+            self._validate_condition(spec.hold)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "DeclarativeStrategy":
@@ -46,6 +49,7 @@ class DeclarativeStrategy:
                 )
             self._validate_reference(condition.left)
             self._validate_reference(condition.right)
+            self._validate_comparison_types(condition)
             return
         operator, children = condition
         if operator not in {"all", "any", "not"}:
@@ -57,6 +61,44 @@ class DeclarativeStrategy:
         for child in children:
             self._validate_condition(child)
 
+    def _validate_comparison_types(self, comparison: Comparison) -> None:
+        left_type = self._reference_type(comparison.left)
+        right_type = self._reference_type(comparison.right)
+        known = {value for value in (left_type, right_type) if value is not None}
+        if comparison.operator in {"gt", "gte", "lt", "lte"}:
+            if "boolean" in known or "null" in known:
+                raise StrategyValidationError(
+                    f"operator {comparison.operator!r} does not support boolean/null operands"
+                )
+            if len(known) > 1 and known != {"number", "integer"}:
+                raise StrategyValidationError(
+                    f"operator {comparison.operator!r} has incompatible operand types: {sorted(known)}"
+                )
+        elif len(known) > 1 and known != {"number", "integer"}:
+            raise StrategyValidationError(
+                f"operator {comparison.operator!r} has incompatible operand types: {sorted(known)}"
+            )
+
+    def _reference_type(self, reference: InputReference) -> str | None:
+        if reference.source_type is SourceType.PARAMETER:
+            return self.definition.parameter_schema[reference.code or ""].type
+        if reference.source_type is not SourceType.LITERAL:
+            return None
+        value = reference.value
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        raise StrategyValidationError(
+            f"literal values must be string/number/boolean/null, got {type(value).__name__}"
+        )
+
     def _validate_reference(self, reference: InputReference) -> None:
         if reference.source_type is SourceType.FIELD:
             if reference.code not in self.definition.required_fields:
@@ -64,7 +106,10 @@ class DeclarativeStrategy:
                     f"undeclared field reference: {reference.code!r}"
                 )
         elif reference.source_type is SourceType.INDICATOR:
-            if reference.code not in self.definition.required_indicators:
+            available_outputs = set(self.definition.required_indicators) | set(
+                indicator_output_fields(self.definition.indicator_requests)
+            )
+            if reference.code not in available_outputs:
                 raise StrategyValidationError(
                     f"undeclared indicator reference: {reference.code!r}"
                 )
@@ -90,7 +135,11 @@ class DeclarativeStrategy:
                 action, reason = StrategyAction.EXIT, "DECLARATIVE_EXIT_MATCH"
                 positions[asset_id] = False
             elif held:
-                action, reason = StrategyAction.HOLD, "DECLARATIVE_POSITION_CONTINUES"
+                if self.spec.hold is not None and not self._evaluate(self.spec.hold, row, parameters):
+                    action, reason = StrategyAction.EXIT, "DECLARATIVE_HOLD_NOT_MET"
+                    positions[asset_id] = False
+                else:
+                    action, reason = StrategyAction.HOLD, "DECLARATIVE_POSITION_CONTINUES"
             elif entry_match:
                 action, reason = StrategyAction.ENTER, "DECLARATIVE_ENTRY_MATCH"
                 positions[asset_id] = True
