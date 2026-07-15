@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from qrp_atlas.backtest.data import load_stock_prices
+from qrp_atlas.backtest.data import load_index_prices, load_stock_prices
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio import PortfolioBacktestConfig, PortfolioExecutionRule
 from qrp_atlas.backtest.portfolio.strategy import strategy_decisions_to_target_weights
@@ -377,6 +377,134 @@ def _run_product_portfolio(
     return strategy_result, execution_targets, portfolio_result, skipped_signals
 
 
+
+def _load_benchmark_frame(
+    request: CreateBacktestTaskRequest,
+    *,
+    db_path: Path | None,
+) -> tuple[pd.DataFrame | None, str | None, list[str]]:
+    """Load optional index benchmark prices for product analytics."""
+
+    diagnostics: list[str] = []
+    benchmark_id = (getattr(request, "benchmark_id", None) or "").strip().upper() or None
+    if not benchmark_id:
+        return None, None, diagnostics
+    if db_path is None:
+        diagnostics.append("benchmark_requested_but_db_missing")
+        return None, benchmark_id, diagnostics
+    try:
+        frame = load_index_prices(
+            index_codes=[benchmark_id],
+            start_date=request.start_date,
+            end_date=request.end_date,
+            db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        diagnostics.append(f"benchmark_load_failed:{exc}")
+        return None, benchmark_id, diagnostics
+    if frame is None or frame.empty:
+        diagnostics.append("benchmark_empty")
+        return None, benchmark_id, diagnostics
+    # normalize columns for align_benchmark_series
+    work = frame.copy()
+    if "trade_date" not in work.columns and "date" in work.columns:
+        work = work.rename(columns={"date": "trade_date"})
+    return work, benchmark_id, diagnostics
+
+
+def _build_reproducibility_snapshot(
+    request: CreateBacktestTaskRequest,
+    *,
+    strategy: Any,
+    portfolio_result: Any,
+    cross_section_meta: dict[str, Any] | None = None,
+    event_meta: dict[str, Any] | None = None,
+    benchmark_id: str | None = None,
+) -> dict[str, Any]:
+    definition = strategy.definition.to_dict() if hasattr(strategy.definition, "to_dict") else {}
+    return {
+        "strategy_code": strategy.definition.code,
+        "strategy_version": strategy.definition.version,
+        "benchmark_id": getattr(request, "benchmark_id", None),
+        "strategy_definition_snapshot": definition,
+        "strategy_params": dict(request.strategy_params or {}),
+        "indicator_requests": definition.get("indicator_requests") or [],
+        "universe": {
+            "mode": request.universe_mode,
+            "tickers": list(request.tickers or []),
+            "index_code": request.index_code,
+            "universe_preset": request.universe_preset,
+        },
+        "date_range": {
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "effective_start_date": (
+                portfolio_result.snapshots[0].trade_date if portfolio_result.snapshots else request.start_date
+            ),
+            "effective_end_date": (
+                portfolio_result.snapshots[-1].trade_date if portfolio_result.snapshots else request.end_date
+            ),
+        },
+        "pit": {
+            "available_date_semantics": "product uses historical membership/events available as of formal dates",
+            "cross_section": (cross_section_meta or None),
+            "event": ((event_meta or {}).get("event") if event_meta else None),
+        },
+        "execution": request.execution.model_dump(mode="json"),
+        "cost": request.cost.model_dump(mode="json"),
+        "position": request.position.model_dump(mode="json"),
+        "benchmark_id": benchmark_id,
+        "product_request": request.model_dump(mode="json"),
+    }
+
+
+def _build_exposure_payload(
+    request: CreateBacktestTaskRequest,
+    *,
+    portfolio_result: Any,
+    cross_section_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not is_cross_sectional_product_strategy(request.strategy_code):
+        return {
+            "available": False,
+            "reason": "exposures_only_for_cross_sectional_product_runs",
+            "industry": [],
+            "market_cap": [],
+        }
+    if cross_section_meta and isinstance(cross_section_meta.get("exposures"), dict):
+        payload = dict(cross_section_meta["exposures"])
+        payload.setdefault("available", True)
+        return payload
+    mcap_rows: list[dict[str, Any]] = []
+    for snap in getattr(portfolio_result, "snapshots", []) or []:
+        positions = getattr(snap, "positions", None) or []
+        weights = []
+        for pos in positions:
+            w = getattr(pos, "weight", None)
+            if w is None and isinstance(pos, dict):
+                w = pos.get("weight")
+            if w is None:
+                continue
+            weights.append(float(w))
+        if not weights:
+            continue
+        mcap_rows.append(
+            {
+                "trade_date": getattr(snap, "trade_date", None) or (snap.get("trade_date") if isinstance(snap, dict) else None),
+                "position_count": len(weights),
+                "max_weight": max(weights),
+                "sum_weight": sum(weights),
+            }
+        )
+    return {
+        "available": bool(mcap_rows),
+        "reason": None if mcap_rows else "no_positions_for_exposure_summary",
+        "industry": [],
+        "market_cap": mcap_rows,
+        "note": "Product package stores position concentration; full industry panel may be attached by CS meta when available.",
+    }
+
+
 def execute_validated_task(
     request: CreateBacktestTaskRequest,
     *,
@@ -464,10 +592,50 @@ def execute_validated_task(
         },
         "strategy_code": strategy.definition.code,
         "strategy_version": strategy.definition.version,
+        "benchmark_id": getattr(request, "benchmark_id", None),
         "decision_count": len(strategy_result.decisions),
         "execution_target_rows": int(len(execution_targets)),
         "cross_section": cross_section_meta or None,
     }
+
+    # Optional benchmark + price path for MAE/MFE and excess analytics.
+    price_frame_for_analytics = locals().get("price_df")
+    if price_frame_for_analytics is None and cross_section_meta:
+        price_frame_for_analytics = cross_section_meta.get("price_frame")
+    if price_frame_for_analytics is None and db_path is not None:
+        try:
+            # Best-effort reload for MAE/MFE when path did not keep price_df.
+            if request.tickers:
+                price_frame_for_analytics = load_stock_prices(
+                    tickers=list(request.tickers),
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    db_path=db_path,
+                )
+        except Exception:  # noqa: BLE001
+            price_frame_for_analytics = None
+
+    benchmark_frame, benchmark_id, benchmark_load_diag = _load_benchmark_frame(
+        request, db_path=db_path
+    )
+    if benchmark_load_diag:
+        config_overlay = {
+            **config_overlay,
+            "benchmark_load_diagnostics": benchmark_load_diag,
+        }
+    repro_snapshot = _build_reproducibility_snapshot(
+        request,
+        strategy=strategy,
+        portfolio_result=portfolio_result,
+        cross_section_meta=cross_section_meta,
+        event_meta=locals().get("event_meta") if "event_meta" in locals() else None,
+        benchmark_id=benchmark_id,
+    )
+    exposure_payload = _build_exposure_payload(
+        request,
+        portfolio_result=portfolio_result,
+        cross_section_meta=cross_section_meta,
+    )
 
     try:
         run_dir = writer.write_portfolio_run(
@@ -481,6 +649,11 @@ def execute_validated_task(
             config_overlay=config_overlay,
             execution_signal_map=execution_signal_map,
             extra_skipped=skipped_signals,
+            price_frame=price_frame_for_analytics,
+            benchmark_frame=benchmark_frame,
+            benchmark_id=benchmark_id,
+            exposures=exposure_payload,
+            reproducibility_snapshot=repro_snapshot,
         )
     except Exception as exc:  # noqa: BLE001
         raise BacktestTaskExecutionError(f"failed to persist backtest results: {exc}") from exc

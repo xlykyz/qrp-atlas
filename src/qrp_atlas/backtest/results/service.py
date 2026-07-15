@@ -133,6 +133,25 @@ def get_diagnostics(run_id: str) -> RunDiagnostics | None:
     return RunDiagnostics.model_validate(data)
 
 
+
+def get_benchmark(run_id: str) -> BenchmarkArtifact | None:
+    data = get_loader().load_benchmark(run_id)
+    if not data:
+        return None
+    return BenchmarkArtifact.model_validate(data)
+
+
+def get_exposures(run_id: str) -> ExposureArtifact | None:
+    data = get_loader().load_exposures(run_id)
+    if not data:
+        return None
+    return ExposureArtifact.model_validate(data)
+
+
+def get_reproducibility(run_id: str) -> dict | None:
+    return get_loader().load_reproducibility(run_id)
+
+
 def compare_runs(run_ids: list[str]) -> RunCompareResponse:
     """Compare multiple product runs by meta/summary/config snapshots."""
 

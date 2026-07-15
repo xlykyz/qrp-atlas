@@ -30,6 +30,11 @@ export interface BacktestSummary {
   slippage_cost?: number | null;
   total_cost?: number | null;
   final_equity?: number | null;
+  benchmark_id?: string | null;
+  benchmark_total_return_pct?: number | null;
+  excess_total_return_pct?: number | null;
+  benchmark_sharpe?: number | null;
+  excess_sharpe?: number | null;
 }
 
 export interface EquityPoint {
@@ -64,4 +69,52 @@ export interface SkippedTrade {
 export interface BacktestConfigSnapshot {
   run_id: string;
   config: Record<string, unknown>;
+}
+
+
+export interface DailyReturnPoint {
+  date: string;
+  daily_return: number | null;
+  equity?: number | null;
+}
+
+export interface RollingPerformancePoint {
+  date: string;
+  equity?: number | null;
+  drawdown?: number | null;
+  [key: string]: number | string | null | undefined;
+}
+
+export interface BenchmarkPoint {
+  date: string;
+  benchmark_level?: number | null;
+  benchmark_return?: number | null;
+  benchmark_cumulative_return?: number | null;
+  portfolio_return?: number | null;
+  excess_return?: number | null;
+}
+
+export interface BenchmarkArtifact {
+  benchmark_id?: string | null;
+  points: BenchmarkPoint[];
+  summary?: Record<string, number | null | undefined>;
+  diagnostics?: string[];
+}
+
+export interface ExposureArtifact {
+  available: boolean;
+  reason?: string | null;
+  industry?: Array<Record<string, unknown>>;
+  market_cap?: Array<Record<string, unknown>>;
+  note?: string | null;
+}
+
+export interface ReproducibilityArtifact {
+  locked_to_run_snapshot?: boolean;
+  snapshot_hash?: string | null;
+  strategy_code?: string | null;
+  strategy_version?: string | null;
+  benchmark_id?: string | null;
+  note?: string | null;
+  [key: string]: unknown;
 }

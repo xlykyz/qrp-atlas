@@ -43,7 +43,12 @@ def json_safe(value: Any) -> Any:
 
 
 def daily_returns_from_equity(equity_curve: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Compute simple daily returns from normalized equity curve points."""
+    """Compute simple daily returns from equity curve points.
+
+    Date rows are never dropped. Transition into full loss is -1.0. After equity
+    has already reached 0, subsequent returns are None (undefined from a zero base)
+    unless equity remains exactly 0 (return 0.0).
+    """
 
     rows: list[dict[str, Any]] = []
     prev: float | None = None
@@ -54,11 +59,13 @@ def daily_returns_from_equity(equity_curve: Sequence[Mapping[str, Any]]) -> list
             rows.append({"date": date, "daily_return": None, "equity": None})
             prev = None
             continue
-        if prev is None or prev == 0:
-            daily = 0.0 if prev is not None else 0.0
+        if prev is None:
+            daily: float | None = 0.0
+        elif prev == 0.0:
+            daily = 0.0 if equity == 0.0 else None
         else:
             daily = equity / prev - 1.0
-        rows.append({"date": date, "daily_return": _finite(daily), "equity": equity})
+        rows.append({"date": date, "daily_return": _finite(daily) if daily is not None else None, "equity": equity})
         prev = equity
     return rows
 
@@ -110,11 +117,15 @@ def calmar_ratio(
     annual_return_pct: float | None,
     max_drawdown_pct: float | None,
 ) -> float | None:
+    """Calmar = annual_return_pct / abs(max_drawdown_pct).
+
+    For full-loss runs: annual_return_pct=-100 and max_drawdown_pct=-100 => -1.0.
+    """
+
     ann = _finite(annual_return_pct)
     dd = _finite(max_drawdown_pct)
     if ann is None or dd is None:
         return None
-    # max_drawdown_pct is typically negative or positive magnitude depending on source.
     magnitude = abs(dd)
     if magnitude == 0:
         return None
@@ -129,34 +140,50 @@ def rolling_performance(
 ) -> list[dict[str, Any]]:
     """Rolling return/vol/sharpe/drawdown on equity curve.
 
-    Uses simple equity ratios; no forward/backward fill across missing days.
+    Keeps every date, including equity==0 (full loss). Does not drop zero-equity
+    rows or stitch across the wipeout. After equity reaches 0, window return /
+    vol / sharpe that would require dividing by zero stay None; drawdown is -1.0.
     """
 
-    points = [
-        (str(p.get("date") or ""), _finite(p.get("equity")))
-        for p in equity_curve
-    ]
-    points = [(d, e) for d, e in points if d and e is not None and e > 0]
+    points = [(str(p.get("date") or ""), _finite(p.get("equity"))) for p in equity_curve]
+    points = [(d, e) for d, e in points if d]
     if not points:
         return []
 
-    equities = [e for _, e in points]
     dates = [d for d, _ in points]
-    daily = [0.0]
-    for i in range(1, len(equities)):
+    equities = [e for _, e in points]
+
+    daily: list[float | None] = []
+    for i, equity in enumerate(equities):
+        if i == 0:
+            daily.append(0.0 if equity is not None else None)
+            continue
         prev = equities[i - 1]
-        daily.append(equities[i] / prev - 1.0 if prev else 0.0)
+        if equity is None or prev is None:
+            daily.append(None)
+        elif prev == 0.0:
+            daily.append(0.0 if equity == 0.0 else None)
+        else:
+            daily.append(equity / prev - 1.0)
 
     out: list[dict[str, Any]] = []
+    running_peak: float | None = None
     for i, date in enumerate(dates):
-        row: dict[str, Any] = {"date": date}
-        peak = equities[0]
-        max_dd = 0.0
-        for j in range(0, i + 1):
-            peak = max(peak, equities[j])
-            if peak > 0:
-                max_dd = min(max_dd, equities[j] / peak - 1.0)
-        row["drawdown"] = _finite(max_dd)
+        row: dict[str, Any] = {"date": date, "equity": equities[i]}
+        equity = equities[i]
+        if equity is None:
+            row["drawdown"] = None
+        else:
+            if running_peak is None:
+                running_peak = equity
+            else:
+                running_peak = max(running_peak, equity)
+            if running_peak > 0:
+                row["drawdown"] = _finite(equity / running_peak - 1.0)
+            elif equity == 0.0:
+                row["drawdown"] = -1.0
+            else:
+                row["drawdown"] = None
         for window in windows:
             key = f"w{int(window)}"
             if i + 1 < window:
@@ -165,32 +192,39 @@ def rolling_performance(
                 row[f"sharpe_{key}"] = None
                 row[f"drawdown_{key}"] = None
                 continue
-            start = i + 1 - window
-            window_eq = equities[start : i + 1]
-            window_ret = daily[start + 1 : i + 1] if i > start else []
-            ret = window_eq[-1] / window_eq[0] - 1.0 if window_eq[0] else None
-            if window_ret:
-                mean = sum(window_ret) / len(window_ret)
-                var = sum((v - mean) ** 2 for v in window_ret) / max(len(window_ret) - 1, 1)
-                vol = math.sqrt(var) * math.sqrt(periods_per_year) if var > 0 else 0.0
-                sharpe = (
-                    (mean / math.sqrt(var) * math.sqrt(periods_per_year))
-                    if var > 0
-                    else None
+            window_eq = equities[i - window + 1 : i + 1]
+            window_rets = daily[i - window + 1 : i + 1]
+            start_eq = window_eq[0]
+            end_eq = window_eq[-1]
+            if start_eq is None or end_eq is None or start_eq <= 0:
+                row[f"return_{key}"] = None
+            else:
+                row[f"return_{key}"] = _finite(end_eq / start_eq - 1.0)
+            finite_rets = [r for r in window_rets if r is not None]
+            if len(finite_rets) >= 2:
+                mean = sum(finite_rets) / len(finite_rets)
+                var = sum((r - mean) ** 2 for r in finite_rets) / (len(finite_rets) - 1)
+                vol = math.sqrt(var) if var > 0 else 0.0
+                row[f"volatility_{key}"] = _finite(vol * math.sqrt(periods_per_year))
+                row[f"sharpe_{key}"] = (
+                    None if vol == 0 else _finite((mean / vol) * math.sqrt(periods_per_year))
                 )
             else:
-                vol = None
-                sharpe = None
-            peak = window_eq[0]
-            dd = 0.0
-            for eq in window_eq:
-                peak = max(peak, eq)
-                if peak > 0:
-                    dd = min(dd, eq / peak - 1.0)
-            row[f"return_{key}"] = _finite(ret)
-            row[f"volatility_{key}"] = _finite(vol)
-            row[f"sharpe_{key}"] = _finite(sharpe)
-            row[f"drawdown_{key}"] = _finite(dd)
+                row[f"volatility_{key}"] = None
+                row[f"sharpe_{key}"] = None
+            # window drawdown from first equity in window as peak seed
+            peak = None
+            max_dd = None
+            for e in window_eq:
+                if e is None:
+                    continue
+                peak = e if peak is None else max(peak, e)
+                if peak and peak > 0:
+                    dd = e / peak - 1.0
+                    max_dd = dd if max_dd is None else min(max_dd, dd)
+                elif e == 0.0:
+                    max_dd = -1.0 if max_dd is None else min(max_dd, -1.0)
+            row[f"drawdown_{key}"] = _finite(max_dd)
         out.append(row)
     return out
 
@@ -199,37 +233,58 @@ def align_benchmark_series(
     portfolio_dates: Sequence[str],
     benchmark: pd.DataFrame,
     *,
+    portfolio_returns: Sequence[float | None] | None = None,
     date_col: str = "trade_date",
     value_col: str = "close",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Align benchmark to portfolio dates without fill across gaps.
 
     Returns (aligned points, diagnostics). Missing benchmark dates become None
-    values with an explicit diagnostic; no silent replacement.
+    values with an explicit diagnostic; no silent replacement / no gap fill.
+
+    Each point includes:
+    - benchmark_level
+    - benchmark_return (daily simple return)
+    - benchmark_cumulative_return (from first available level; resets after gaps)
+    - excess_return (portfolio daily return - benchmark daily return when both finite)
     """
 
     diagnostics: list[str] = []
+    port_rets = list(portfolio_returns) if portfolio_returns is not None else [None] * len(portfolio_dates)
+    if len(port_rets) < len(portfolio_dates):
+        port_rets = port_rets + [None] * (len(portfolio_dates) - len(port_rets))
+
     if benchmark is None or benchmark.empty:
         diagnostics.append("benchmark_missing")
         return (
-            [{"date": d, "benchmark_return": None, "excess_return": None} for d in portfolio_dates],
+            [
+                {
+                    "date": d,
+                    "benchmark_level": None,
+                    "benchmark_return": None,
+                    "benchmark_cumulative_return": None,
+                    "portfolio_return": _finite(port_rets[i]) if i < len(port_rets) else None,
+                    "excess_return": None,
+                }
+                for i, d in enumerate(portfolio_dates)
+            ],
             diagnostics,
         )
 
     work = benchmark.copy()
     work[date_col] = pd.to_datetime(work[date_col]).dt.strftime("%Y-%m-%d")
     work = work.sort_values(date_col)
-    # index levels normalized to first available date in intersection
     values = {
         str(r[date_col]): _finite(r[value_col])
         for r in work[[date_col, value_col]].to_dict(orient="records")
     }
+
     aligned: list[dict[str, Any]] = []
-    base: float | None = None
-    prev_port_ret: float | None = None
-    # portfolio returns computed outside; here only benchmark return series level
-    for date in portfolio_dates:
+    prev_level: float | None = None
+    base_level: float | None = None
+    for i, date in enumerate(portfolio_dates):
         level = values.get(date)
+        port_ret = _finite(port_rets[i]) if i < len(port_rets) else None
         if level is None:
             diagnostics.append(f"benchmark_gap:{date}")
             aligned.append(
@@ -237,34 +292,91 @@ def align_benchmark_series(
                     "date": date,
                     "benchmark_level": None,
                     "benchmark_return": None,
+                    "benchmark_cumulative_return": None,
+                    "portfolio_return": port_ret,
+                    "excess_return": None,
                 }
             )
+            # gap breaks cumulative chain; do not forward/back fill
+            prev_level = None
             continue
-        if base is None:
-            base = level
+        if prev_level is None or prev_level == 0:
             b_ret = 0.0
         else:
-            b_ret = level / base - 1.0
+            b_ret = level / prev_level - 1.0
+        if base_level is None:
+            base_level = level
+        cum = level / base_level - 1.0 if base_level else None
+        excess = None
+        if port_ret is not None and b_ret is not None:
+            excess = port_ret - b_ret
         aligned.append(
             {
                 "date": date,
                 "benchmark_level": level,
                 "benchmark_return": _finite(b_ret),
+                "benchmark_cumulative_return": _finite(cum),
+                "portfolio_return": port_ret,
+                "excess_return": _finite(excess),
             }
         )
+        prev_level = level
+
     if any(item["benchmark_level"] is None for item in aligned):
         diagnostics.append("benchmark_has_gaps_no_fill")
+    if all(item["benchmark_level"] is None for item in aligned):
+        diagnostics.append("benchmark_unavailable_for_range")
     return aligned, diagnostics
+
+
+def benchmark_summary(aligned: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize aligned benchmark/excess series for product summary artifact."""
+
+    b_rets = [_finite(p.get("benchmark_return")) for p in aligned]
+    e_rets = [_finite(p.get("excess_return")) for p in aligned]
+    finite_b = [v for v in b_rets if v is not None]
+    finite_e = [v for v in e_rets if v is not None]
+    cum_vals = [
+        _finite(p.get("benchmark_cumulative_return"))
+        for p in aligned
+        if p.get("benchmark_cumulative_return") is not None
+    ]
+    total_b = cum_vals[-1] if cum_vals else None
+    # compound excess approx via daily excess when continuous finite
+    total_e = None
+    if finite_e:
+        growth = 1.0
+        ok = True
+        for v in e_rets:
+            if v is None:
+                ok = False
+                break
+            growth *= 1.0 + v
+        total_e = growth - 1.0 if ok else sum(finite_e)
+    return {
+        "benchmark_total_return": _finite(total_b),
+        "benchmark_total_return_pct": _finite(None if total_b is None else total_b * 100.0),
+        "excess_total_return": _finite(total_e),
+        "excess_total_return_pct": _finite(None if total_e is None else total_e * 100.0),
+        "benchmark_observation_count": len(finite_b),
+        "excess_observation_count": len(finite_e),
+        "benchmark_sharpe": sharpe_ratio(b_rets),
+        "excess_sharpe": sharpe_ratio(e_rets),
+    }
 
 
 def enrich_trades_mae_mfe(
     trades: list[dict[str, Any]],
     prices: pd.DataFrame | None,
+    *,
+    as_of_date: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fill MAE/MFE from daily OHLC over [entry_date, exit_date].
+    """Fill MAE/MFE from daily OHLC over the holding window.
 
-    Requires columns: asset_id/ticker, trade_date, low, high, close/open.
-    If prices are unavailable, leaves MAE/MFE as None.
+    - closed trades: [entry_date, exit_date]
+    - open trades: [entry_date, as_of_date] when as_of_date provided
+    - invalid / non-positive high-low ignored
+    - multi-fill trades already collapsed by writer trade aggregation
     """
 
     if not trades:
@@ -287,34 +399,48 @@ def enrich_trades_mae_mfe(
     out: list[dict[str, Any]] = []
     for trade in trades:
         item = dict(trade)
-        if item.get("status") != "closed":
-            out.append(item)
-            continue
         asset = str(item.get("asset_id") or "")
         entry = str(item.get("entry_date") or "")
-        exit_d = str(item.get("exit_date") or "")
+        exit_d = str(item.get("exit_date") or "") or None
+        status = str(item.get("status") or "")
         entry_price = _finite(item.get("entry_price"))
         part = grouped.get(asset)
-        if part is None or entry_price is None or not entry or not exit_d:
+        if part is None or entry_price is None or entry_price <= 0 or not entry:
             out.append(item)
             continue
-        window = part[(part["trade_date"] >= entry) & (part["trade_date"] <= exit_d)]
+        end = exit_d if status == "closed" and exit_d else (as_of_date or exit_d)
+        if not end:
+            out.append(item)
+            continue
+        window = part[(part["trade_date"] >= entry) & (part["trade_date"] <= end)]
         if window.empty:
             out.append(item)
             continue
-        low = window["low"] if "low" in window.columns else window.get("close")
-        high = window["high"] if "high" in window.columns else window.get("close")
-        if low is None or high is None:
-            out.append(item)
-            continue
-        min_low = _finite(low.min())
-        max_high = _finite(high.max())
-        if min_low is not None:
-            item["mae_pct"] = _finite((min_low / entry_price - 1.0) * 100.0)
-        if max_high is not None:
-            item["mfe_pct"] = _finite((max_high / entry_price - 1.0) * 100.0)
+        lows = []
+        highs = []
+        for _, row in window.iterrows():
+            low = _finite(row["low"] if "low" in window.columns else row.get("close"))
+            high = _finite(row["high"] if "high" in window.columns else row.get("close"))
+            if low is not None and low > 0:
+                lows.append(low)
+            if high is not None and high > 0:
+                highs.append(high)
+        if lows:
+            item["mae_pct"] = _finite((min(lows) / entry_price - 1.0) * 100.0)
+        if highs:
+            item["mfe_pct"] = _finite((max(highs) / entry_price - 1.0) * 100.0)
         out.append(item)
     return out
+
+
+def snapshot_hash(payload: Mapping[str, Any]) -> str:
+    """Deterministic content hash for reproducibility snapshots."""
+
+    import hashlib
+    import json
+
+    canonical = json.dumps(json_safe(dict(payload)), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def cost_breakdown(summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -337,6 +463,8 @@ __all__ = [
     "calmar_ratio",
     "rolling_performance",
     "align_benchmark_series",
+    "benchmark_summary",
     "enrich_trades_mae_mfe",
+    "snapshot_hash",
     "cost_breakdown",
 ]

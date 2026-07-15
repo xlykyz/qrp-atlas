@@ -49,6 +49,11 @@ class BacktestSummary(BaseModel):
     slippage_cost: Optional[float] = None
     total_cost: Optional[float] = None
     final_equity: Optional[float] = None
+    benchmark_id: Optional[str] = None
+    benchmark_total_return_pct: Optional[float] = None
+    excess_total_return_pct: Optional[float] = None
+    benchmark_sharpe: Optional[float] = None
+    excess_sharpe: Optional[float] = None
 
 
 class EquityPoint(BaseModel):
@@ -110,7 +115,10 @@ class CostBreakdown(BaseModel):
 
 
 class RollingPerformancePoint(BaseModel):
+    model_config = {"extra": "allow"}
+
     date: str
+    equity: Optional[float] = None
     drawdown: Optional[float] = None
     return_w20: Optional[float] = None
     volatility_w20: Optional[float] = None
@@ -122,6 +130,41 @@ class RollingPerformancePoint(BaseModel):
     drawdown_w60: Optional[float] = None
 
 
+class BenchmarkPoint(BaseModel):
+    date: str
+    benchmark_level: float | None = None
+    benchmark_return: float | None = None
+    benchmark_cumulative_return: float | None = None
+    portfolio_return: float | None = None
+    excess_return: float | None = None
+
+
+class BenchmarkArtifact(BaseModel):
+    benchmark_id: str | None = None
+    points: list[BenchmarkPoint] = []
+    summary: dict[str, Any] = {}
+    diagnostics: list[str] = []
+
+
+class ExposureArtifact(BaseModel):
+    available: bool = False
+    reason: str | None = None
+    industry: list[dict[str, Any]] = []
+    market_cap: list[dict[str, Any]] = []
+    note: str | None = None
+
+
+class ReproducibilityArtifact(BaseModel):
+    model_config = {"extra": "allow"}
+
+    locked_to_run_snapshot: bool = False
+    snapshot_hash: str | None = None
+    strategy_code: str | None = None
+    strategy_version: str | None = None
+    benchmark_id: str | None = None
+    note: str | None = None
+
+
 class RunDiagnostics(BaseModel):
     result_package_version: Optional[str] = None
     artifact_set: list[str] = []
@@ -130,6 +173,10 @@ class RunDiagnostics(BaseModel):
     has_snapshots: bool = False
     has_rolling_performance: bool = False
     has_daily_returns: bool = False
+    has_benchmark: bool = False
+    has_exposures: bool = False
+    benchmark_diagnostics: list[str] = []
+    full_loss: bool = False
     snapshot_count: int = 0
     order_count: int = 0
     fill_count: int = 0

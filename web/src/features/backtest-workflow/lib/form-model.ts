@@ -14,6 +14,7 @@ export interface BacktestWorkflowFormState {
   universeMode: UniverseMode;
   universePreset: string;
   indexCode: string;
+  benchmarkId: string;
   tickersText: string;
   startDate: string;
   endDate: string;
@@ -75,6 +76,7 @@ export function createDefaultFormState(): BacktestWorkflowFormState {
     universeMode: 'tickers',
     universePreset: 'CUSTOM',
     indexCode: '000300.SH',
+    benchmarkId: '',
     tickersText: '000001.SZ, 600519.SH',
     startDate: '2024-01-01',
     endDate: '2024-12-31',
@@ -127,6 +129,7 @@ export function formStateToCreateRequest(
     tickers: universeMode === 'tickers' ? tickers : undefined,
     start_date: form.startDate,
     end_date: form.endDate,
+    benchmark_id: form.benchmarkId.trim() ? form.benchmarkId.trim().toUpperCase() : undefined,
     position: {
       initial_cash: form.initialCash,
       max_positions: form.maxPositions,

@@ -232,3 +232,156 @@ def test_old_package_costs_fallback(tmp_path: Path):
         assert summary.sharpe is None  # old package may lack risk metrics
     finally:
         set_loader_for_tests(None)
+
+
+def test_full_loss_annual_and_rolling_keep_zero_dates():
+    from qrp_atlas.backtest.results.writer import _annual_return_pct
+    from qrp_atlas.backtest.results.analytics import calmar_ratio, rolling_performance, daily_returns_from_equity
+
+    class _Snap:
+        def __init__(self, d):
+            self.trade_date = d
+
+    class _Result:
+        snapshots = [_Snap("2024-01-01"), _Snap("2024-12-31")]
+        summary = {"total_return": -1.0}
+
+    assert _annual_return_pct(_Result()) == -100.0
+    assert calmar_ratio(-100.0, -100.0) == -1.0
+
+    equity = [
+        {"date": "2024-01-02", "equity": 100.0},
+        {"date": "2024-01-03", "equity": 40.0},
+        {"date": "2024-01-04", "equity": 0.0},
+        {"date": "2024-01-05", "equity": 0.0},
+    ]
+    daily = daily_returns_from_equity(equity)
+    assert [r["date"] for r in daily] == [e["date"] for e in equity]
+    assert daily[2]["daily_return"] == -1.0
+    assert daily[3]["daily_return"] == 0.0
+
+    rolling = rolling_performance(equity, windows=(2,))
+    assert [r["date"] for r in rolling] == [e["date"] for e in equity]
+    assert rolling[2]["drawdown"] == -1.0
+    # must not drop zero-equity date
+    assert rolling[2]["equity"] == 0.0
+
+
+def test_writer_benchmark_mae_and_repro_hash(tmp_path: Path):
+    engine = PortfolioBacktestEngine()
+    prices = _prices()
+    result = engine.run(
+        prices,
+        _targets(),
+        PortfolioBacktestConfig(
+            name="results-bench",
+            initial_cash=1_000_000,
+            max_positions=5,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0003, stamp_tax_rate=0.0005, slippage_bps=5),
+            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+        ),
+    )
+    # synthetic benchmark with a gap
+    bench = prices[["trade_date", "close"]].copy()
+    bench = bench[bench["trade_date"] != "2024-01-10"].copy()
+    repro = {
+        "strategy_code": "dual_sma_trend",
+        "strategy_version": "1.0.0",
+        "strategy_definition_snapshot": {"code": "dual_sma_trend", "version": "1.0.0"},
+        "strategy_params": {"fast_window": 5, "slow_window": 20},
+        "indicator_requests": [],
+        "universe": {"mode": "tickers", "tickers": ["AAA.SZ"]},
+        "date_range": {"start_date": "2024-01-02", "end_date": "2024-02-29"},
+        "execution": {"entry_timing": "next_open"},
+        "cost": {"commission_rate": 0.0003},
+        "position": {"initial_cash": 1_000_000},
+        "benchmark_id": "000300.SH",
+        "locked_to_run_snapshot": True,
+    }
+    run_dir = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_results_bench",
+        strategy_name="dual_sma_trend@1.0.0",
+        universe="AAA.SZ",
+        price_frame=prices,
+        benchmark_frame=bench,
+        benchmark_id="000300.SH",
+        exposures={"available": True, "industry": [], "market_cap": [{"trade_date": "2024-01-03", "max_weight": 0.5}]},
+        reproducibility_snapshot=repro,
+        config_overlay={"product_request": {"strategy_params": {"fast_window": 5}}},
+    )
+    for name in [
+        "benchmark.json",
+        "exposures.json",
+        "reproducibility.json",
+        "trades.json",
+        "rolling_performance.json",
+    ]:
+        assert (run_dir / name).exists(), name
+
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert "benchmark_total_return_pct" in summary
+    assert "excess_total_return_pct" in summary
+
+    bench_art = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
+    assert bench_art["benchmark_id"] == "000300.SH"
+    assert any("benchmark_gap" in d for d in bench_art["diagnostics"])
+    assert any(p.get("excess_return") is not None for p in bench_art["points"])
+
+    trades = json.loads((run_dir / "trades.json").read_text(encoding="utf-8"))
+    closed = [t for t in trades if t.get("status") == "closed"]
+    assert closed
+    assert any(t.get("mae_pct") is not None or t.get("mfe_pct") is not None for t in closed)
+
+    repro1 = json.loads((run_dir / "reproducibility.json").read_text(encoding="utf-8"))
+    assert repro1["locked_to_run_snapshot"] is True
+    assert isinstance(repro1.get("snapshot_hash"), str) and len(repro1["snapshot_hash"]) == 64
+
+    # same snapshot => same hash
+    run_dir2 = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_results_bench_2",
+        strategy_name="dual_sma_trend@1.0.0",
+        universe="AAA.SZ",
+        price_frame=prices,
+        benchmark_frame=bench,
+        benchmark_id="000300.SH",
+        exposures={"available": True, "industry": [], "market_cap": [{"trade_date": "2024-01-03", "max_weight": 0.5}]},
+        reproducibility_snapshot=repro,
+        config_overlay={"product_request": {"strategy_params": {"fast_window": 5}}},
+    )
+    repro2 = json.loads((run_dir2 / "reproducibility.json").read_text(encoding="utf-8"))
+    assert repro1["snapshot_hash"] == repro2["snapshot_hash"]
+
+    # registry-default-like param drift must not alter locked snapshot hash already stored
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["reproducibility"]["snapshot_hash"] == repro1["snapshot_hash"]
+    assert config["product_request"]["strategy_params"]["fast_window"] == 5
+
+
+def test_missing_benchmark_is_diagnostic_not_silent(tmp_path: Path):
+    engine = PortfolioBacktestEngine()
+    result = engine.run(
+        _prices(),
+        _targets(),
+        PortfolioBacktestConfig(
+            name="no-bench",
+            initial_cash=1_000_000,
+            max_positions=5,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0003, stamp_tax_rate=0.0005, slippage_bps=5),
+            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+        ),
+    )
+    run_dir = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_no_bench",
+        strategy_name="x@1",
+        universe="AAA.SZ",
+        benchmark_id="000300.SH",
+        benchmark_frame=None,
+    )
+    bench = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
+    assert "benchmark_missing" in bench["diagnostics"] or "benchmark_requested_but_data_missing" in bench["diagnostics"]
+    assert all(p.get("benchmark_level") is None for p in bench["points"])

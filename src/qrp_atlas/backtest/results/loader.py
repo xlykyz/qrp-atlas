@@ -170,3 +170,20 @@ class BacktestRunsLoader:
     def load_diagnostics(self, run_id: str):
         data = self.load_optional_json(run_id, "diagnostics.json")
         return data if isinstance(data, dict) else None
+
+    def load_benchmark(self, run_id: str):
+        data = self.load_optional_json(run_id, "benchmark.json")
+        return data if isinstance(data, dict) else None
+
+    def load_exposures(self, run_id: str):
+        data = self.load_optional_json(run_id, "exposures.json")
+        return data if isinstance(data, dict) else None
+
+    def load_reproducibility(self, run_id: str):
+        data = self.load_optional_json(run_id, "reproducibility.json")
+        if isinstance(data, dict):
+            return data
+        # fallback: config.reproducibility for older packages
+        cfg = self.load_config(run_id)
+        repro = cfg.get("reproducibility") if isinstance(cfg, dict) else None
+        return repro if isinstance(repro, dict) else None

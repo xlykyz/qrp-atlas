@@ -27,10 +27,13 @@ from qrp_atlas.backtest.results.schemas import (
 )
 from qrp_atlas.backtest.results.service import (
     compare_runs,
+    get_benchmark,
     get_config,
     get_costs,
     get_daily_returns,
     get_diagnostics,
+    get_exposures,
+    get_reproducibility,
     get_equity,
     get_fills,
     get_orders,
@@ -170,6 +173,30 @@ def api_get_costs(run_id: str):
 def api_get_diagnostics(run_id: str):
     try:
         return get_diagnostics(run_id)
+    except (RunNotFoundError, ResultFileMissingError) as e:
+        raise _map_errors(e)
+
+
+@router.get("/runs/{run_id}/benchmark")
+def api_get_benchmark(run_id: str):
+    try:
+        return get_benchmark(run_id)
+    except (RunNotFoundError, ResultFileMissingError) as e:
+        raise _map_errors(e)
+
+
+@router.get("/runs/{run_id}/exposures")
+def api_get_exposures(run_id: str):
+    try:
+        return get_exposures(run_id)
+    except (RunNotFoundError, ResultFileMissingError) as e:
+        raise _map_errors(e)
+
+
+@router.get("/runs/{run_id}/reproducibility")
+def api_get_reproducibility(run_id: str):
+    try:
+        return get_reproducibility(run_id)
     except (RunNotFoundError, ResultFileMissingError) as e:
         raise _map_errors(e)
 
