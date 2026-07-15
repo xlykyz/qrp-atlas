@@ -39,6 +39,7 @@ _RESULT_FILENAMES = (
     "config.json",
     "orders.json",
     "fills.json",
+    "targets.json",
     "snapshots.json",
     "daily_returns.json",
     "rolling_performance.json",
@@ -309,6 +310,7 @@ class BacktestRunWriter:
         benchmark_frame: Any | None = None,
         benchmark_id: str | None = None,
         exposures: dict[str, Any] | list[dict[str, Any]] | None = None,
+        execution_targets: Any | None = None,
         reproducibility_snapshot: dict[str, Any] | None = None,
     ) -> Path:
         _validate_run_id(run_id)
@@ -395,13 +397,18 @@ class BacktestRunWriter:
             }
             exposure_payload = exposures if exposures is not None else {
                 "available": False,
+                "exposure_basis": "realized_portfolio_positions",
                 "industry_available": False,
                 "market_cap_available": False,
                 "reason": "exposures_not_provided",
                 "industry": [],
                 "market_cap": [],
+                "realized_exposure": {"industry": [], "market_cap": []},
                 "position_concentration": [],
             }
+            target_rows = []
+            if execution_targets is not None and hasattr(execution_targets, "to_dict"):
+                target_rows = execution_targets.to_dict(orient="records")
             repro = {
                 "strategy_name": strategy_name,
                 "universe": universe,
@@ -427,6 +434,7 @@ class BacktestRunWriter:
                 "artifact_set": list(_RESULT_FILENAMES),
                 "has_orders": True,
                 "has_fills": True,
+                "has_targets": True,
                 "has_snapshots": True,
                 "has_rolling_performance": True,
                 "has_daily_returns": True,
@@ -455,6 +463,7 @@ class BacktestRunWriter:
                 "config.json": config_payload,
                 "orders.json": [order.to_dict() for order in result.orders],
                 "fills.json": [fill.to_dict() for fill in result.fills],
+                "targets.json": target_rows,
                 "snapshots.json": [snapshot.to_dict() for snapshot in result.snapshots],
                 "daily_returns.json": daily_rows,
                 "rolling_performance.json": rolling_rows,

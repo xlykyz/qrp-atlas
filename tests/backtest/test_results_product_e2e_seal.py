@@ -317,6 +317,7 @@ def _assert_common_package(run_dir: Path) -> dict:
         "trades.json",
         "orders.json",
         "fills.json",
+        "targets.json",
         "snapshots.json",
         "config.json",
         "daily_returns.json",
@@ -340,9 +341,8 @@ def _assert_common_package(run_dir: Path) -> dict:
     return {"summary": summary, "repro": repro}
 
 
-def test_classic_product_results_seal(tmp_path: Path):
-    db_path = _make_classic_db(tmp_path)
-    request = validate_create_request(
+def _classic_request() -> CreateBacktestTaskRequest:
+    return validate_create_request(
         CreateBacktestTaskRequest(
             name="classic seal",
             strategy_code="dual_sma_trend",
@@ -358,6 +358,11 @@ def test_classic_product_results_seal(tmp_path: Path):
             position=BacktestPositionConfigDTO(initial_cash=1_000_000, max_positions=5),
         )
     )
+
+
+def test_classic_product_results_seal(tmp_path: Path):
+    db_path = _make_classic_db(tmp_path)
+    request = _classic_request()
     run_id, run_dir = execute_validated_task(
         request,
         run_id="classic_seal",
@@ -393,10 +398,79 @@ def test_classic_product_results_seal(tmp_path: Path):
         new_run_id="classic_seal_replay",
     )
     assert replay["match"]["all_business"] is True
+    assert replay["match"]["strategy_definition_match"] is True
+    assert replay["match"]["resolved_universe_match"] is True
+    assert replay["match"]["data_fingerprints_match"] is True
+    assert replay["match"]["execution_targets_match"] is True
     assert replay["match"]["equity"] is True
     assert replay["match"]["fills"] is True
     assert replay["match"]["trades"] is True
     assert pkg["repro"]["universe"]["resolved_assets"]
+
+
+def test_replay_detects_current_price_data_change(tmp_path: Path):
+    db_path = _make_classic_db(tmp_path)
+    runs_dir = tmp_path / "runs"
+    run_id, _ = execute_validated_task(
+        _classic_request(),
+        run_id="classic_data_source",
+        runs_dir=runs_dir,
+        db_path=db_path,
+    )
+    con = duckdb.connect(str(db_path))
+    con.execute(
+        """
+        UPDATE daily_market_snapshot
+        SET close = close + 3.0
+        WHERE ticker = '000001.SZ' AND trade_date = DATE '2024-02-01'
+        """
+    )
+    con.close()
+
+    replay = replay_product_run(
+        run_id,
+        runs_dir=runs_dir,
+        db_path=db_path,
+        new_run_id="classic_data_replay",
+    )
+
+    assert replay["match"]["data_fingerprints_match"] is False
+    assert replay["match"]["all_business"] is False
+
+
+def test_replay_detects_order_fill_and_target_artifact_mismatch(tmp_path: Path):
+    db_path = _make_classic_db(tmp_path)
+    runs_dir = tmp_path / "runs"
+    run_id, run_dir = execute_validated_task(
+        _classic_request(),
+        run_id="classic_artifact_source",
+        runs_dir=runs_dir,
+        db_path=db_path,
+    )
+
+    orders = json.loads((run_dir / "orders.json").read_text(encoding="utf-8"))
+    fills = json.loads((run_dir / "fills.json").read_text(encoding="utf-8"))
+    targets = json.loads((run_dir / "targets.json").read_text(encoding="utf-8"))
+    assert orders and fills and targets
+    orders[0]["status"] = "REJECTED"
+    orders[0]["reason"] = "TEST_MISMATCH"
+    fills[0]["execution_price"] = float(fills[0]["execution_price"]) + 1.0
+    targets[0]["target_weight"] = float(targets[0]["target_weight"]) / 2.0
+    (run_dir / "orders.json").write_text(json.dumps(orders), encoding="utf-8")
+    (run_dir / "fills.json").write_text(json.dumps(fills), encoding="utf-8")
+    (run_dir / "targets.json").write_text(json.dumps(targets), encoding="utf-8")
+
+    replay = replay_product_run(
+        run_id,
+        runs_dir=runs_dir,
+        db_path=db_path,
+        new_run_id="classic_artifact_replay",
+    )
+
+    assert replay["match"]["orders_match"] is False
+    assert replay["match"]["fills_match"] is False
+    assert replay["match"]["execution_targets_match"] is False
+    assert replay["match"]["all_business"] is False
 
 
 def test_cross_section_product_results_seal_mae_mfe_and_exposures(tmp_path: Path):

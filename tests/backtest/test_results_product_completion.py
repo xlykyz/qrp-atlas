@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -25,6 +26,7 @@ from qrp_atlas.backtest.results.analytics import (
 from qrp_atlas.backtest.results.loader import BacktestRunsLoader
 from qrp_atlas.backtest.results.service import compare_runs, get_costs, get_summary
 from qrp_atlas.backtest.results.writer import BacktestRunWriter
+from qrp_atlas.backtest.product.service import _build_exposure_payload
 
 
 def _prices() -> pd.DataFrame:
@@ -82,6 +84,10 @@ def test_benchmark_alignment_no_fill():
     )
     aligned, diag = align_benchmark_series(dates, bench)
     assert aligned[1]["benchmark_level"] is None
+    assert aligned[2]["benchmark_level"] == pytest.approx(110.0)
+    assert aligned[2]["benchmark_return"] is None
+    assert aligned[2]["daily_active_return"] is None
+    assert aligned[2]["excess_return"] is None
     assert any("benchmark_gap:2024-01-03" in d for d in diag)
     assert any("no_fill" in d for d in diag)
 
@@ -122,6 +128,7 @@ def test_writer_emits_extended_package(tmp_path: Path):
         "diagnostics.json",
         "orders.json",
         "fills.json",
+        "targets.json",
         "snapshots.json",
         "config.json",
     ]:
@@ -429,7 +436,87 @@ def test_excess_full_range_none_when_benchmark_gaps():
     assert summary["relative_return"] is None
     assert summary["excess_total_return"] is None
     assert summary["excess_total_return_pct"] is None
-    # per-date active still present on covered days
+    # The first date is defined against a zero benchmark return. A benchmark
+    # reappearance after the gap has no known previous level.
     assert aligned[0]["daily_active_return"] is not None
     assert aligned[1]["daily_active_return"] is None
-    assert aligned[2]["daily_active_return"] is not None
+    assert aligned[2]["benchmark_level"] == pytest.approx(110.0)
+    assert aligned[2]["benchmark_return"] is None
+    assert aligned[2]["daily_active_return"] is None
+    assert aligned[2]["excess_return"] is None
+
+
+def test_realized_exposure_excludes_blocked_target(monkeypatch: pytest.MonkeyPatch):
+    prices = pd.DataFrame(
+        [
+            {
+                "trade_date": "2024-01-02",
+                "asset_id": "AAA.SZ",
+                "asset_name": "AAA",
+                "asset_type": "stock",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "market_cap": 100.0,
+                "is_suspended": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            },
+            {
+                "trade_date": "2024-01-02",
+                "asset_id": "BBB.SZ",
+                "asset_name": "BBB",
+                "asset_type": "stock",
+                "open": 20.0,
+                "high": 20.0,
+                "low": 20.0,
+                "close": 20.0,
+                "market_cap": 10_000.0,
+                "is_suspended": False,
+                "is_limit_up": True,
+                "is_limit_down": False,
+            },
+        ]
+    )
+    targets = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "AAA.SZ", "target_weight": 0.4},
+            {"trade_date": "2024-01-02", "asset_id": "BBB.SZ", "target_weight": 0.4},
+        ]
+    )
+    result = PortfolioBacktestEngine().run(
+        prices,
+        targets,
+        PortfolioBacktestConfig(
+            name="realized-exposure",
+            initial_cash=1_000_000,
+            max_positions=2,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0, stamp_tax_rate=0.0, slippage_bps=0.0),
+        ),
+    )
+
+    def _fake_exposure_panel(universe, **_kwargs):
+        panel = universe.copy()
+        panel["industry_code"] = panel["asset_id"].map(
+            {"AAA.SZ": "REALIZED", "BBB.SZ": "BLOCKED"}
+        )
+        return panel
+
+    monkeypatch.setattr(
+        "qrp_atlas.backtest.product.service.prepare_cross_section_exposure_panel",
+        _fake_exposure_panel,
+    )
+    payload = _build_exposure_payload(
+        SimpleNamespace(strategy_code="cross_sectional_momentum_long_only"),
+        portfolio_result=result,
+        execution_targets=targets,
+        db_path=Path("unused.duckdb"),
+        price_frame=prices,
+    )
+
+    assert payload["exposure_basis"] == "realized_portfolio_positions"
+    assert {row["industry_code"] for row in payload["industry"]} == {"REALIZED"}
+    assert all(row["name_count"] == 1 for row in payload["market_cap"])
+    assert payload["market_cap"][0]["weighted_log_market_cap"] == pytest.approx(math.log(100.0))

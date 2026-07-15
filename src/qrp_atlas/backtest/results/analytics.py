@@ -324,13 +324,16 @@ def align_benchmark_series(
             continue
 
         if prev_level is None:
-            b_ret = 0.0
+            # Only the first portfolio date may define benchmark return as zero.
+            # A level that reappears after any missing portfolio date has no known
+            # previous level, so its return and active return remain undefined.
+            b_ret = 0.0 if i == 0 else None
             segment_base = level
         else:
             b_ret = level / prev_level - 1.0
         b_cum = (level / segment_base - 1.0) if segment_base else None
 
-        if port_ret is not None and (1.0 + b_ret) != 0.0:
+        if b_ret is not None and port_ret is not None and (1.0 + b_ret) != 0.0:
             daily_active = (1.0 + port_ret) / (1.0 + b_ret) - 1.0
         else:
             daily_active = None

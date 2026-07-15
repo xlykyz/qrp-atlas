@@ -151,6 +151,10 @@ class BacktestRunsLoader:
         data = self.load_optional_json(run_id, "fills.json")
         return list(data or [])
 
+    def load_targets(self, run_id: str) -> list[dict]:
+        data = self.load_optional_json(run_id, "targets.json")
+        return list(data or [])
+
     def load_snapshots(self, run_id: str) -> list[dict]:
         data = self.load_optional_json(run_id, "snapshots.json")
         return list(data or [])
