@@ -46,6 +46,7 @@ export interface CreateBacktestTaskRequest {
   tickers?: string[];
   start_date: string;
   end_date: string;
+  benchmark_id?: string | null;
   position: BacktestPositionConfig;
   cost: BacktestCostConfig;
   execution: BacktestExecutionConfig;
@@ -61,6 +62,7 @@ export interface BacktestTask {
   universe_mode: UniverseMode;
   universe_preset: string | null;
   index_code?: string | null;
+  benchmark_id?: string | null;
   tickers: string[];
   start_date: string;
   end_date: string;

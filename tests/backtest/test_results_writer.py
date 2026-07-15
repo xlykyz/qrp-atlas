@@ -67,7 +67,7 @@ def test_writer_creates_existing_api_contract_and_audit_files(tmp_path: Path):
         created_at="2026-07-13T00:00:00+00:00",
     )
 
-    assert {path.name for path in run_dir.iterdir()} == {
+    assert {
         "run_meta.json",
         "summary.json",
         "equity.json",
@@ -77,7 +77,13 @@ def test_writer_creates_existing_api_contract_and_audit_files(tmp_path: Path):
         "orders.json",
         "fills.json",
         "snapshots.json",
-    }
+    }.issubset({path.name for path in run_dir.iterdir()})
+    assert {
+        "daily_returns.json",
+        "rolling_performance.json",
+        "costs.json",
+        "diagnostics.json",
+    }.issubset({path.name for path in run_dir.iterdir()})
 
     loader = BacktestRunsLoader(tmp_path)
     meta = BacktestRunMeta.model_validate(loader.load_run_meta("portfolio_001"))

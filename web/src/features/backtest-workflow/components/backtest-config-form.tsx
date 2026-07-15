@@ -227,6 +227,17 @@ export function BacktestConfigForm({ form, errors = {}, disabled, onChange }: Pr
       </div>
 
       <div className="grid gap-3 sm:grid-cols-3">
+        <div className="sm:col-span-3">
+          <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">
+            Benchmark 指数（可选）
+          </label>
+          <Input
+            disabled={disabled}
+            placeholder="000300.SH；缺失则 diagnostics，不静默替换"
+            value={form.benchmarkId}
+            onChange={(e) => onChange({ benchmarkId: e.target.value.toUpperCase() })}
+          />
+        </div>
         <div>
           <label className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">
             初始资金
