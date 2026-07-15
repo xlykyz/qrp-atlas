@@ -1,12 +1,12 @@
 # QRP v1.0 当前能力审计与能力矩阵
 
 > 初始审计基线：2026-07-12。
-> 任务 00 状态校准：2026-07-15，对照 main `a6df258eff6e9e5ab6399784583b4aa006329b8e`（含 PR #24 residual robustness merge）。
+> 任务 08 发布验收校准：2026-07-15，对照 main `69f31e41daebcb04d75af9ec71191ddf06e60ebb`。
 > 数据事实：用户已确认本地数据库与 `contracts` 严格一致。
 
 ## 一、审计结论
 
-QRP 后端研究闭环与主要产品主链已大部分完成：
+QRP 后端研究闭环、四类产品主链与发布级结果能力已经完成，当前进入最终发布验收：
 
 ```text
 contracts → indicators → strategies → backtest runtime / portfolio / product → results → api / web
@@ -19,15 +19,16 @@ contracts → indicators → strategies → backtest runtime / portfolio / produ
 - 经典单标的策略、横截面 long-only 策略、`event_drift_basic`、`market_residual_mean_reversion`；
 - 组合共享资金、目标权重、A 股现实成交与真实净值；
 - 代表性残差 walk-forward / 成本压力 / 参数敏感性 / 滚动表现与 OOS 结果包；
-- 真实回测产品主链（07-A）与横截面动量产品闭环（07-B1）；
-- 回测 workflow 前端、任务创建、结果分析与基础 run 比较。
+- 经典、横截面、事件与声明式四类真实回测产品链；
+- 标准结果、benchmark/excess、realized exposures、targets、reproducibility、compare 与 replay；
+- owner 隔离的策略目录、任务和结果访问；
+- 回测 workflow、分析页与声明式策略受控编辑器。
 
-### 当前真正剩余产品缺口
+### 当前剩余工作
 
-1. **07-B2**：事件驱动真实产品闭环（`event_drift_basic` 尚未进入 product catalog/service）；
-2. **07-C**：标准结果与分析产品封板（Sharpe/Sortino/Calmar、benchmark、滚动表现、完整快照与统一消费等发布能力）；
-3. **07-D**：声明式策略编辑、版本与持久化（已有 declarative 求值底座，缺产品化保存/目录/前端编辑器）；
-4. **08**：总体验收与发布候选。
+1. **08**：执行四类真实产品链、多用户隔离、历史读取、compare/replay 与完整构建测试；
+2. 输出最终验收报告、已知边界和发布候选结论；
+3. 等待独立 PR 最终复验，复验前不合并、不打正式版本标签。
 
 **本文件不宣告 v1.0 发布完成。**
 
@@ -43,10 +44,10 @@ contracts → indicators → strategies → backtest runtime / portfolio / produ
 | 06 残差与稳健性 | ✅ | 市场/行业残差研究 + residual robustness 包 |
 | 07-A 真实回测产品主链 | ✅ | product task 状态机 + 经典策略产品路径 |
 | 07-B1 横截面动量产品闭环 | ✅ | product catalog/service + 前端 workflow |
-| 07-B2 事件产品闭环 | ⛔ | 研究链路已完成，产品入口未接入 |
-| 07-C 标准结果与分析封板 | 🟡 | 基础结果包已有，发布级指标/基准/比较未封板 |
-| 07-D 声明式策略产品 | 🟡 | 受限 declarative 求值底座已有，产品化未完成 |
-| 08 总体验收与发布 | ⛔ | 前置 07-B2/C/D 未完成 |
+| 07-B2 事件产品闭环 | ✅ | PR #29 已合并，事件产品真实闭环完成 |
+| 07-C 标准结果与分析封板 | ✅ | PR #30 已合并，标准结果与复现审计封板 |
+| 07-D 声明式策略产品 | ✅ | PR #31 已合并，owner/版本/前端能力封板 |
+| 08 总体验收与发布 | 🔄 | `release/v1.0-acceptance` 独立验收中 |
 
 ## 三、现有模块真实状态
 
@@ -146,7 +147,7 @@ PIT 语义已落地：
 | 趋势/动量/突破/均值回归 | 已有 | 已完成 | 已完成 | 动态/组合可用 | 07-A 产品路径 | ✅ | 任务 01/07-A |
 | 横截面排序与调仓 | 历史股票池已有 | rank/因子/中性化完成 | CS 策略完成 | 组合回测完成 | 07-B1 产品闭环 | ✅ | 任务 04/07-B1 |
 | 多因子 long-only | 财务/行业/指数 as_of 已有 | 正式因子完成 | 已实现 | 研究闭环完成 | 研究完成；产品主推动量 | ✅ | 任务 04 |
-| 事件驱动 | `earnings_forecast_event` 已有 | 事件指标完成 | `event_drift_basic` 完成 | 组合回测完成 | 产品入口未完成 | 🟡 | 研究 ✅；07-B2 产品待做 |
+| 事件驱动 | `earnings_forecast_event` 已有 | 事件指标完成 | `event_drift_basic` 完成 | 组合回测完成 | 产品入口与标准结果完成 | ✅ | 任务 05 / 07-B2 / 07-C |
 | 残差/相对价值研究 | 指数与行业历史已有 | beta/残差完成 | 代表策略完成 | 研究+稳健性完成 | 研究级结果包 | ✅ | 任务 06；非产品主链 |
 | 完整配对多腿交易 | 不足 | 缺 | 缺 | 缺 short/多腿 | 缺 | ➡ | 不阻塞 v1.0 |
 | 监督学习复杂模型 | 部分特征 | 缺通用训练 | 无 | 缺统一框架 | 缺 | ➡ | 不阻塞 v1.0 |
@@ -156,19 +157,19 @@ PIT 语义已落地：
 | 成本与换手分析 | 已有 | n/a | n/a | summary 已有 | 可读，归因可加深 | ✅ | 基础完成；07-C 统一 |
 | 代表性残差稳健性 | 交易日已有 | n/a | residual 策略 | walk-forward 等完成 | 研究包 | ✅ | 任务 06-B |
 | 全策略通用稳健性框架 | n/a | n/a | n/a | 未做成通用产品 | 未做 | ➡ | 延后 v1.1 |
-| 策略 API 与编辑器 | n/a | 注册表可支撑 | declarative 底座已有 | 运行器已有 | workflow 部分完成 | 🟡 | 07-D 待完成 |
-| 结果可复现与发布分析 | created_at 等 | 版本快照待封板 | 策略版本已有 | config/结果已有 | 分析页基础完成 | 🟡 | 07-C 待封板 |
+| 策略 API 与编辑器 | n/a | 参数化指标请求 | 内置 + 声明式 | 统一运行器 | 受控编辑器与版本浏览 | ✅ | 07-D 已合并 |
+| 结果可复现与发布分析 | 数据指纹 | 指标请求快照 | 策略定义快照 | 标准结果 + replay | 分析页与 compare | ✅ | 07-C 已合并 |
 
 ## 五、策略族能力矩阵
 
 | 策略族 | 当前基础 | 缺口 | v1.0 代表策略 |
 |---|---|---|---|
-| 时间序列趋势/动量 | 指标、策略、组合与 07-A 产品路径已完成 | 发布级 benchmark/滚动/完整快照 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
-| 均值回归 | rolling z-score 与状态机已完成 | 同上 | `rolling_zscore_mean_reversion` |
+| 时间序列趋势/动量 | 指标、策略、组合、产品与标准结果已完成 | 非阻塞增强见 v1.1 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
+| 均值回归 | rolling z-score、状态机与产品结果已完成 | 非阻塞增强见 v1.1 | `rolling_zscore_mean_reversion` |
 | QRP 专属系统 | System B 基础策略 | 完整规则系统化非阻塞 | `system_b_basic` |
-| 横截面动量 | 研究到 07-B1 产品闭环已完成 | 结果分析封板 | `cross_sectional_momentum_long_only` |
+| 横截面动量 | 研究、产品闭环与 realized exposure 已完成 | 非阻塞增强见 v1.1 | `cross_sectional_momentum_long_only` |
 | 多因子 | 研究闭环已完成 | 非当前产品主推路径 | `multifactor_long_only` |
-| 事件驱动 | 数据/指标/策略/研究回测已完成 | **产品闭环 07-B2** | `event_drift_basic` |
+| 事件驱动 | 数据/指标/策略/研究与产品回测已完成 | 非阻塞扩展更多事件源 | `event_drift_basic` |
 | 相对价值 | 市场/行业残差与稳健性已完成 | 完整多腿执行 | `market_residual_mean_reversion` |
 | 机器学习 | 边界保留 | 复杂内置模型 | 不作为发布阻塞 |
 | RL/HFT | 无 | 基础设施不足 | 不进入 v1.0 |
@@ -185,10 +186,8 @@ PIT 语义已落地：
 
 ### 当前 P0 产品剩余
 
-- 07-B2 事件产品闭环；
-- 07-C 标准结果与分析产品封板；
-- 07-D 声明式策略产品化；
-- 08 总体验收。
+- 08 总体验收与发布候选；
+- 独立 PR 最终复验与人工发布授权。
 
 ### 不作为 v1.0 发布阻塞
 
