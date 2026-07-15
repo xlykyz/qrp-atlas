@@ -6,6 +6,15 @@ from .catalog import (
     list_indicator_catalog,
     list_strategy_catalog,
 )
+from .cross_section import (
+    CROSS_SECTIONAL_MOMENTUM_CODE,
+    run_cross_sectional_momentum_product_backtest,
+)
+from .event import (
+    EVENT_DRIFT_BASIC_CODE,
+    is_event_product_strategy,
+    run_event_drift_product_backtest,
+)
 from .schemas import (
     BacktestTaskRecord,
     CreateBacktestTaskRequest,
@@ -13,15 +22,12 @@ from .schemas import (
     IndicatorCatalogItem,
     StrategyCatalogItem,
 )
-from .cross_section import (
-    CROSS_SECTIONAL_MOMENTUM_CODE,
-    run_cross_sectional_momentum_product_backtest,
-)
 from .service import (
     BacktestProductService,
     BacktestTaskExecutionError,
     BacktestTaskValidationError,
     execute_validated_task,
+    replay_product_run,
     get_product_service,
     reset_product_service_for_tests,
     validate_create_request,
@@ -35,6 +41,9 @@ __all__ = [
     "list_strategy_catalog",
     "run_cross_sectional_momentum_product_backtest",
     "CROSS_SECTIONAL_MOMENTUM_CODE",
+    "run_event_drift_product_backtest",
+    "is_event_product_strategy",
+    "EVENT_DRIFT_BASIC_CODE",
     "get_strategy_catalog_item",
     "IndicatorCatalogItem",
     "StrategyCatalogItem",
@@ -47,6 +56,7 @@ __all__ = [
     "BacktestTaskExecutionError",
     "validate_create_request",
     "execute_validated_task",
+    "replay_product_run",
     "get_product_service",
     "reset_product_service_for_tests",
     "REASON_NO_EXECUTION_DATE_IN_RANGE",

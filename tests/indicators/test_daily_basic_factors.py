@@ -13,6 +13,7 @@ from qrp_atlas.indicators import (
     FactorRequestError,
     UnknownFactorError,
     compute_daily_basic_factor,
+    compute_log_market_cap_factor,
     generate_factor_frame,
     get_factor_definition,
     list_factors,
@@ -20,7 +21,15 @@ from qrp_atlas.indicators import (
 from qrp_atlas.indicators.cross_section.universe import build_historical_universe
 
 
-NEW_FACTORS = (
+REGISTERED_DAILY_BASIC_FACTORS = (
+    "earnings_yield_ttm",
+    "sales_to_price_ttm",
+    "dividend_yield_ttm",
+    "turnover_rate",
+    "free_float_turnover_rate",
+    "volume_ratio",
+)
+FACTOR_OUTPUTS = (
     "earnings_yield_ttm",
     "sales_to_price_ttm",
     "dividend_yield_ttm",
@@ -30,6 +39,27 @@ NEW_FACTORS = (
     "free_float_turnover_rate",
     "volume_ratio",
 )
+
+
+def _factor_requests() -> list[str | FactorRequest]:
+    return [
+        "earnings_yield_ttm",
+        "sales_to_price_ttm",
+        "dividend_yield_ttm",
+        FactorRequest(
+            "log_market_cap",
+            {"field": "total_mv"},
+            alias="log_total_market_cap",
+        ),
+        FactorRequest(
+            "log_market_cap",
+            {"field": "circ_mv"},
+            alias="log_circulating_market_cap",
+        ),
+        "turnover_rate",
+        "free_float_turnover_rate",
+        "volume_ratio",
+    ]
 
 
 def _day(value: str) -> pd.Timestamp:
@@ -93,7 +123,7 @@ def _daily_basic_panel() -> pd.DataFrame:
 
 def test_manual_formulas_and_units_for_all_daily_basic_factors() -> None:
     row = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-02"],
         asset_ids=["A"],
         daily_basic_panel=_daily_basic_panel(),
@@ -104,8 +134,8 @@ def test_manual_formulas_and_units_for_all_daily_basic_factors() -> None:
     assert row["dividend_yield_ttm"] == pytest.approx(0.035)
     assert row["log_total_market_cap"] == pytest.approx(math.log(100.0))
     assert row["log_circulating_market_cap"] == pytest.approx(math.log(40.0))
-    assert row["turnover_rate"] == pytest.approx(0.025)
-    assert row["free_float_turnover_rate"] == pytest.approx(0.05)
+    assert row["turnover_rate"] == pytest.approx(2.5)
+    assert row["free_float_turnover_rate"] == pytest.approx(5.0)
     assert row["volume_ratio"] == pytest.approx(1.2)
 
 
@@ -115,12 +145,12 @@ def test_generate_factor_frame_equals_shared_daily_basic_primitive() -> None:
         ["2024-01-02", "2024-01-03"], asset_ids=["A", "B"], source="explicit"
     )
     generated = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         universe=universe,
         daily_basic_panel=panel,
     )
 
-    for code in NEW_FACTORS:
+    for code in REGISTERED_DAILY_BASIC_FACTORS:
         direct = compute_daily_basic_factor(
             panel,
             universe=universe,
@@ -129,19 +159,32 @@ def test_generate_factor_frame_equals_shared_daily_basic_primitive() -> None:
         pd.testing.assert_frame_equal(
             generated[["trade_date", "asset_id", code]], direct
         )
+    for field, output in (
+        ("total_mv", "log_total_market_cap"),
+        ("circ_mv", "log_circulating_market_cap"),
+    ):
+        direct = compute_log_market_cap_factor(
+            panel,
+            universe=universe,
+            field=field,
+            output_column=output,
+        )
+        pd.testing.assert_frame_equal(
+            generated[["trade_date", "asset_id", output]], direct
+        )
 
 
 def test_multi_asset_isolation_unordered_input_stable_sort_and_immutability() -> None:
     panel = _daily_basic_panel().sample(frac=1.0, random_state=42).reset_index(drop=True)
     before = panel.copy(deep=True)
     combined = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-03", "2024-01-02"],
         asset_ids=["B", "A"],
         daily_basic_panel=panel,
     )
     a_only = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-03", "2024-01-02"],
         asset_ids=["A"],
         daily_basic_panel=panel.loc[panel["asset_id"] == "A"],
@@ -185,21 +228,21 @@ def test_same_day_point_window_has_no_adjacent_date_substitution_or_future_leaka
     )
 
     missing_day = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-03"],
         asset_ids=["A"],
         daily_basic_panel=panel,
     ).iloc[0]
-    assert missing_day[list(NEW_FACTORS)].isna().all()
+    assert missing_day[list(FACTOR_OUTPUTS)].isna().all()
 
     historical = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-02"],
         asset_ids=["A"],
         daily_basic_panel=panel.loc[panel["trade_date"] != "2024-01-04"],
     )
     with_future = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-02"],
         asset_ids=["A"],
         daily_basic_panel=panel,
@@ -231,7 +274,7 @@ def test_nan_inf_zero_and_negative_value_semantics() -> None:
         rows.append(row)
 
     out = generate_factor_frame(
-        list(NEW_FACTORS),
+        _factor_requests(),
         trade_dates=["2024-01-02"],
         asset_ids=["ZERO", "NEG", "INF", "NEG_INF", "NAN"],
         daily_basic_panel=pd.DataFrame(rows),
@@ -248,11 +291,15 @@ def test_nan_inf_zero_and_negative_value_semantics() -> None:
         "volume_ratio",
     ):
         assert out.loc["ZERO", code] == 0.0
-    for asset in ("NEG", "INF", "NEG_INF", "NAN"):
-        assert out.loc[asset, list(NEW_FACTORS)].isna().all()
+    assert out.loc["NEG", "earnings_yield_ttm"] == pytest.approx(-1.0)
+    assert out.loc[
+        "NEG", [code for code in FACTOR_OUTPUTS if code != "earnings_yield_ttm"]
+    ].isna().all()
+    for asset in ("INF", "NEG_INF", "NAN"):
+        assert out.loc[asset, list(FACTOR_OUTPUTS)].isna().all()
 
 
-def test_nonpositive_valuation_multiples_are_not_silently_inverted() -> None:
+def test_negative_pe_is_inverted_but_nonpositive_ps_is_not() -> None:
     panel = _daily_basic_panel()
     panel.loc[panel["asset_id"] == "A", "pe_ttm"] = -10.0
     panel.loc[panel["asset_id"] == "A", "ps_ttm"] = 0.0
@@ -262,7 +309,7 @@ def test_nonpositive_valuation_multiples_are_not_silently_inverted() -> None:
         asset_ids=["A"],
         daily_basic_panel=panel,
     ).iloc[0]
-    assert math.isnan(row["earnings_yield_ttm"])
+    assert row["earnings_yield_ttm"] == pytest.approx(-0.1)
     assert math.isnan(row["sales_to_price_ttm"])
 
 
@@ -288,9 +335,9 @@ def test_parameter_and_alias_conflicts_are_rejected() -> None:
 
 
 def test_empty_universe_missing_panel_fields_and_duplicate_keys() -> None:
-    empty = generate_factor_frame(list(NEW_FACTORS), trade_dates=[], asset_ids=[])
+    empty = generate_factor_frame(_factor_requests(), trade_dates=[], asset_ids=[])
     assert empty.empty
-    assert list(empty.columns) == ["trade_date", "asset_id", *NEW_FACTORS]
+    assert list(empty.columns) == ["trade_date", "asset_id", *FACTOR_OUTPUTS]
 
     with pytest.raises(FactorRequestError, match="prepared daily_basic_panel"):
         generate_factor_frame(
@@ -332,10 +379,23 @@ def test_new_and_existing_factor_registration_is_complete() -> None:
         "roe",
         "book_to_price",
     }
-    registered = set(FACTOR_DEFINITIONS)
-    assert (baseline | set(NEW_FACTORS)).issubset(registered)
+    registered = baseline | {
+        "amihud_illiquidity",
+        "downside_volatility",
+        "price_efficiency",
+        "price_volume_correlation",
+        "realized_volatility",
+        "relative_volume",
+        "rolling_max_drawdown",
+        "trend_r_squared",
+        "trend_slope",
+    } | set(REGISTERED_DAILY_BASIC_FACTORS)
+    assert set(FACTOR_DEFINITIONS) == registered
     assert {definition.code for definition in list_factors()} == registered
-    for code in NEW_FACTORS:
+    assert {"log_total_market_cap", "log_circulating_market_cap"}.isdisjoint(
+        registered
+    )
+    for code in REGISTERED_DAILY_BASIC_FACTORS:
         definition = get_factor_definition(code)
         assert definition.inputs
         assert definition.formula
@@ -343,6 +403,9 @@ def test_new_and_existing_factor_registration_is_complete() -> None:
         assert "T+1" in definition.time_semantics
         assert definition.parameter_schema == {}
         assert "NaN" in definition.nan_semantics
+    for alias in ("log_total_market_cap", "log_circulating_market_cap"):
+        with pytest.raises(UnknownFactorError):
+            get_factor_definition(alias)
 
 
 def test_public_shared_primitive_rejects_unknown_daily_basic_code() -> None:

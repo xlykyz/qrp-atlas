@@ -1,5 +1,7 @@
 # QRP v1.0 开发路线图
 
+> 任务 08 发布验收校准：2026-07-15，对照 main `69f31e41daebcb04d75af9ec71191ddf06e60ebb`。
+
 ## 一、路线原则
 
 1. 架构不再重构，只补能力；
@@ -7,235 +9,126 @@
 3. 先单标的、再组合；
 4. 先 long-only A 股可交易能力，再考虑 short 和多腿；
 5. 每个阶段必须形成端到端测试；
-6. API 和前端不应等待所有研究能力完成，可在稳定接口形成后并行推进；
-7. 每完成一阶段同步更新能力矩阵。
+6. API 和前端在稳定接口形成后并行推进；
+7. 每完成一阶段同步更新能力矩阵；
+8. 不把 short、多腿、借券、协整、机器学习、分布式回测和实盘列为 v1.0 发布阻塞。
 
 ## 二、阶段总览
 
-| 阶段 | 目标 | 主要模块 | 前置依赖 |
+| 阶段 | 目标 | 状态 | 主要模块 |
 |---|---|---|---|
-| 0 | 架构与产品蓝图封版 | docs | 已完成 |
-| 1 | 参数化指标与经典单标的策略 | indicators / strategies / backtest runtime | 策略模块已完成 |
-| 2 | 组合账户、A 股约束与真实资金曲线 | backtest / results | ✅ 已完成 |
-| 3 | point-in-time 数据底座与查询服务 | contracts / pipeline / data / backtest | ✅ 已完成：03-A/03-B/03-C |
-| 4 | 横截面与多因子 | indicators / strategies / backtest / results | 阶段 2-3；04-A～04-E 已完成，整体 ✅ 完成 |
-| 5 | 事件驱动 | contracts / pipeline / indicators / strategies | 阶段 3 |
-| 6 | 残差相对价值与稳健性验证 | indicators / strategies / backtest / results | 阶段 2-4 |
-| 7 | 策略 API 与前端产品闭环 | api / web | 稳定策略与回测接口 |
-| 8 | v1.0 总体验收 | 全部 | 阶段 1-7 |
+| 0 | 架构与产品蓝图封版 / 状态校准 | ✅ 任务 00 校准中 | docs |
+| 1 | 参数化指标与经典单标的策略 | ✅ 已完成 | indicators / strategies / backtest |
+| 2 | 组合账户、A 股约束与真实资金曲线 | ✅ 已完成 | backtest / results |
+| 3 | point-in-time 数据底座与查询服务 | ✅ 已完成 | contracts / pipeline / data / backtest |
+| 4 | 横截面与多因子 | ✅ 已完成 | indicators / strategies / backtest / results |
+| 5 | 事件驱动研究链路 | ✅ 已完成 | contracts / pipeline / indicators / strategies / backtest |
+| 6 | 残差相对价值与代表性稳健性验证 | ✅ 已完成 | indicators / strategies / backtest / results |
+| 7-A | 真实回测产品主链 | ✅ 已完成 | api / web / backtest/product |
+| 7-B1 | 横截面动量产品闭环 | ✅ 已完成 | api / web / backtest/product |
+| 7-B2 | 事件驱动真实产品闭环 | ✅ 已完成 | api / web / backtest/product |
+| 7-C | 标准结果与分析产品封板 | ✅ 已完成 | results / api / web |
+| 7-D | 声明式策略产品化 | ✅ 已完成 | strategies / api / web |
+| 8 | v1.0 总体验收与发布候选 | 🔄 当前执行 | 全部 |
 
-## 三、阶段 1：参数化指标与经典单标的策略
+## 三、已完成阶段摘要
 
-### 目标
+### 阶段 1～2
 
-把当前 MA5/System B 特例准备方式升级为通用指标请求，并完成代表性价格行为策略。
+- 参数化指标与经典策略；
+- 组合共享资金、A 股现实成交、真实净值。
 
-### 交付
+### 阶段 3
 
-- `IndicatorRequest` 或等价模型；
-- 指标计算注册与参数校验；
-- SMA、rolling return/volatility/z-score/high/low 等；
-- time series momentum；
-- dual SMA；
-- Donchian breakout；
-- rolling z-score mean reversion；
-- 每个策略动态回测闭环；
-- 旧 System B 和旧 BacktestEngine 兼容。
+- 财务/行业/指数 PIT 数据与 as_of 查询完成；
+- 结构化事件不由阶段 3 承担。
 
-### 退出条件
+### 阶段 4
 
-- 运行器不再增加具体指标硬编码；
-- 每个策略均有 ENTER/HOLD/EXIT/NO_ACTION 测试；
-- next_open 端到端测试通过；
-- 完整测试通过。
+- 04-A～04-E 全部完成：算子、因子、中性化、策略、IC/分组/暴露研究闭环。
 
-## 四、阶段 2：组合账户、A 股约束与资金曲线
+### 阶段 5（研究完成，产品入口已由 07-B2 封板）
 
-### 目标
+交付事实：
 
-把“互不关联的 Trade 列表”升级为真实共享资金组合回测。
+- 第一类标准事件：`earnings_forecast_event`（**不是** 以泛化 `corporate_event` 为唯一验收对象）；
+- `query_earnings_forecast_as_of` / `to_earnings_forecast_event_frame`；
+- 事件指标；
+- `event_drift_basic`；
+- `run_event_drift_portfolio_backtest`。
 
-### 交付
+退出条件（研究侧）已满足：
 
-- 账户、现金、持仓和每日快照；
-- target weight 和 rebalance；
-- 最大持仓数、单票上限、现金约束；
-- T+1、涨跌停、停牌、整数手；
-- 佣金最低收费、印花税和滑点；
-- equity curve、drawdown、daily return；
-- turnover 和 cost breakdown；
-- 旧交易级回测接口兼容。
+- 盘后公告不能同日成交；
+- 修订可追溯且不污染历史 as_of；
+- 端到端研究回测通过。
 
-### 退出条件
+产品化路径已由 07-B2 完成并合入 main。
 
-- 多标的同时发出信号时资金不会无限使用；
-- 组合净值由真实成交和持仓逐日计算；
-- A 股拒单原因可审计；
-- 前端现有净值/回撤组件可消费真实结果。
+### 阶段 6
 
-### 完成记录
+交付事实：
 
-- 状态：✅ 已完成（2026-07-13；2026-07-14 已同步最新 main）
-- 主分支：`feature/portfolio-backtest-core`
-- 主 PR：#5；停牌字段子 PR：#6 已并入主分支
-- 全量回归：以合并最新 main 后的实际 pytest 结果为准（见任务 02 文档）
-- 本地 DuckDB 已验收涨停、跌停、停牌和多标的调仓
-- 明确排除：short、借券、保证金、多腿、实盘；任务 04 未启动；任务 03 仅部分完成且不由任务 02 承担
+- 市场残差 / 行业残差研究；
+- `market_residual_mean_reversion`；
+- train/validation/test、walk-forward、成本压力、参数敏感性、滚动表现、OOS 保存。
 
+口径修正：
 
-## 五、阶段 3：point-in-time 数据底座
+- v1.0 要求**代表性残差策略**具备完整稳健性验证；
+- “旧策略均可使用通用稳健性框架”调整为 **v1.1** 目标，不阻塞发布。
 
-- 状态：✅ 已完成（2026-07-14）
-- 已完成并进入 main：
-  - 任务 03-A：`select_latest_available_records`（PR #7）
-  - 任务 03-B：财务/行业/指数数据底座（PR #8）
-  - 任务 03-C：as_of 查询服务（财务/行业/指数）
-- 明确不在任务 03：结构化事件 / `corporate_event`（任务 05）；全市场历史回填仍按需手动执行
+## 四、阶段 7-B2～7-D 完成事实与阶段 8
 
+### 阶段 7-B2：事件驱动真实产品闭环
 
-### 目标
-
-让财务、行业和事件研究具备无未来函数的数据基础。
-
-### 交付
-
-- 财务三表和 financial indicator 契约/管线；
-- 历史行业与指数成分；
-- corporate_event；
-- published/effective/available/ingested/revision 语义；
-- 版本保留和去重规则；
-- 数据覆盖、连续性和时间可用性测试；
-- 查询服务支持按回测日期获取当时可用版本。
-
-### 退出条件
-
-- 用历史日期查询时不会返回未来公告或未来修订；
-- 行业归属按历史日期正确；
-- 至少一种事件可以被端到端读取。
-
-## 六、阶段 4：横截面与多因子
-
-> 状态：✅ 已完成（2026-07-14）。04-A～04-E 已全部完成：基础算子、正式因子、中性化、Top N/策略，以及 forward return / IC / 分组 / 暴露研究闭环。
-
-### 目标
-
-完成 QRP 从单票状态机到横截面组合研究的跃迁。
-
-### 交付
-
-- [x] 横截面 rank、winsorize、z-score（04-A）；
-- [x] 历史股票池与截面处理入口（04-A）；
-- [x] 正式动量 / 市值 / 财务因子定义与生成（04-B）；
-- [x] 行业/市值中性化（04-C）；
-- [x] 股票池 eligibility 过滤契约（04-D；状态需调用方预准备）；
-- [x] Top N 和目标权重（04-D）；
-- [x] 定期调仓（04-D）；
-- [x] cross-sectional momentum（04-D）；
-- [x] multifactor long-only（04-D）；
-- [x] 目标行业/市值暴露分析（04-E；Beta 暴露仍未实现）；
-- [x] 因子分组和 IC 基础分析（04-E）。
-
-### 退出条件
-
-- 同一交易日基于全市场截面决策；
-- 股票池不存在幸存者偏差；
-- 权重总和、现金和持仓约束成立；
-- 因子数据严格按可用时间进入回测。
-
-## 七、阶段 5：事件驱动
-
-### 目标
-
-打通结构化事件从数据到策略和结果分析的第一条完整链路。
-
-### 交付
-
-- 首批事件类型；
-- event age/window/surprise 指标；
-- event_drift_basic；
-- 公告时间到可交易日期映射；
-- 事件窗和重叠事件处理；
-- 事件分组结果分析。
-
-### 退出条件
-
-- 盘后公告不能用当天收盘成交；
-- 事件修订不会污染旧回测；
-- 至少一个事件策略端到端通过。
-
-## 八、阶段 6：相对价值与稳健性
-
-### 目标
-
-覆盖成熟量化策略中的残差研究能力，并建立基本样本外验证。
-
-### 交付
-
-- rolling beta、市场/行业残差；
-- residual z-score 和稳定性；
-- market_residual_mean_reversion；
-- train/validation/test；
-- walk-forward；
-- 成本压力测试；
-- 参数敏感性和滚动表现。
-
-### 退出条件
-
-- 残差计算不存在未来数据；
-- 样本外结果独立保存；
-- 结果明确区分毛收益、成本和净收益。
-
-完整 pair long-short、多腿和借券属于增强项，可在基础研究策略稳定后追加。
-
-## 九、阶段 7：API 与前端闭环
-
-### 目标
-
-让已完成的后端能力成为用户可操作的产品。
-
-### 交付
-
-- 指标/策略目录 API；
-- 参数 schema；
-- 声明式策略校验和保存；
-- 创建、运行、查询回测任务；
-- 内置策略配置页面；
-- 自定义规则编辑器；
-- run 对比；
-- 真实净值、回撤、换手、成本、暴露和配置展示。
-
-### 退出条件
-
-用户无需命令行即可完成：
+目标：
 
 ```text
-配置策略 → 运行 → 查看 → 比较 → 修改 → 再运行
+前端选择 event_drift_basic
+→ 配置事件过滤和持有期
+→ 创建真实回测任务
+→ PIT 读取 earnings_forecast_event
+→ EventFrame
+→ run_event_drift_portfolio_backtest
+→ 标准产品结果包
+→ 前端查看、刷新重开、run 对比
 ```
 
-## 十、阶段 8：总体验收
+必须复用既有查询、策略、runner、writer 与任务状态机；不得二次计算 `available_trade_date`，不得二次 `next_open` 偏移。
 
-### 交付
+### 阶段 7-C：标准结果与分析产品封板
 
-- 三条正式演示场景；
-- 全量测试；
-- 数据时间可用性审计；
-- 回测现实约束审计；
-- 结果复现审计；
-- 文档和 README 更新；
-- v1.0 发布说明。
+目标：
 
-## 十一、并行开发建议
+- 统一经典 / 横截面 / 事件标准产品 run 的结果契约；
+- 补齐 summary、benchmark、滚动表现、暴露、快照与复现审计；
+- API 与前端分析页只消费标准产品结果，不依赖研究目录。
 
-可以并行：
+### 阶段 7-D：声明式策略产品化
 
-- 参数化指标与财务数据管线；
-- 组合引擎与事件数据采集；
-- API schema 与前端静态原型。
+目标：
 
-不可无序并行：
+- 白名单规则编辑、静态校验、版本化保存；
+- 与内置策略共享 `StrategyDecision` 与产品回测链；
+- 禁止 eval/exec/任意代码。
 
-- 横截面策略早于组合账户；
-- 多因子早于 point-in-time 财务和行业数据；
-- 事件策略早于标准事件时间语义；
-- 前端自定义策略早于后端 schema 稳定；
-- 相对价值多腿执行早于账户和仓位模型。
+### 阶段 8：总体验收与发布候选
+
+前置：07-B2、07-C、07-D 全部合并。
+
+交付：
+
+- 架构/PIT/成交约束审计；
+- 四条正式演示（经典 / 横截面 / 事件 / 声明式）；
+- 全量测试与构建；
+- 文档、release notes 与未合并 PR 等待人工授权。
+
+未经明确授权：不打 tag、不创建 GitHub Release、不宣布正式发布、不进入 v1.1 开发。
+
+## 五、并行与边界
+
+- Windows 端经典因子、估值与交易活跃度因子扩充任务不得被本路线图干扰；
+- 不新增顶级模块；
+- 不复制已有事件、残差、横截面或组合回测逻辑；
+- 研究增强项不得回写成发布门禁。

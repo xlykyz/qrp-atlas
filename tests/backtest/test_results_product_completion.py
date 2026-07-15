@@ -1,0 +1,522 @@
+"""07-C: standard product results package completion tests."""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from qrp_atlas.backtest.models import CostRule
+from qrp_atlas.backtest.portfolio import PortfolioBacktestConfig, PortfolioExecutionRule
+from qrp_atlas.backtest.portfolio.engine import PortfolioBacktestEngine
+from qrp_atlas.backtest.results.analytics import (
+    align_benchmark_series,
+    benchmark_summary,
+    calmar_ratio,
+    daily_returns_from_equity,
+    json_safe,
+    rolling_performance,
+    sharpe_ratio,
+    sortino_ratio,
+)
+from qrp_atlas.backtest.results.loader import BacktestRunsLoader
+from qrp_atlas.backtest.results.service import compare_runs, get_costs, get_summary
+from qrp_atlas.backtest.results.writer import BacktestRunWriter
+from qrp_atlas.backtest.product.service import _build_exposure_payload
+
+
+def _prices() -> pd.DataFrame:
+    days = pd.bdate_range("2024-01-02", periods=40)
+    rows = []
+    for i, d in enumerate(days):
+        close = 10 + i * 0.1
+        rows.append(
+            {
+                "trade_date": d.date().isoformat(),
+                "asset_id": "AAA.SZ",
+                "asset_name": "AAA",
+                "asset_type": "stock",
+                "open": close - 0.05,
+                "high": close + 0.1,
+                "low": close - 0.1,
+                "close": close,
+                "is_suspended": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _targets() -> pd.DataFrame:
+    # buy early, hold, then exit on calendar dates present in _prices()
+    return pd.DataFrame(
+        [
+            {"trade_date": "2024-01-03", "asset_id": "AAA.SZ", "target_weight": 0.5, "signal_date": "2024-01-02"},
+            {"trade_date": "2024-01-19", "asset_id": "AAA.SZ", "target_weight": 0.0, "signal_date": "2024-01-18"},
+        ]
+    )
+
+
+def test_json_safe_and_risk_metrics():
+    assert json_safe({"a": float("nan"), "b": float("inf"), "c": 1.5}) == {
+        "a": None,
+        "b": None,
+        "c": 1.5,
+    }
+    rets = [0.01, -0.005, 0.002, 0.003, -0.001, 0.004]
+    assert sharpe_ratio(rets) is not None
+    assert sortino_ratio(rets) is not None
+    assert calmar_ratio(12.0, -20.0) == 0.6
+
+
+def test_benchmark_alignment_no_fill():
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    bench = pd.DataFrame(
+        {
+            "trade_date": ["2024-01-02", "2024-01-04"],
+            "close": [100.0, 110.0],
+        }
+    )
+    aligned, diag = align_benchmark_series(dates, bench)
+    assert aligned[1]["benchmark_level"] is None
+    assert aligned[2]["benchmark_level"] == pytest.approx(110.0)
+    assert aligned[2]["benchmark_return"] is None
+    assert aligned[2]["daily_active_return"] is None
+    assert aligned[2]["excess_return"] is None
+    assert any("benchmark_gap:2024-01-03" in d for d in diag)
+    assert any("no_fill" in d for d in diag)
+
+
+def test_writer_emits_extended_package(tmp_path: Path):
+    engine = PortfolioBacktestEngine()
+    result = engine.run(
+        _prices(),
+        _targets(),
+        PortfolioBacktestConfig(
+            name="results-completion",
+            initial_cash=1_000_000,
+            max_positions=5,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0003, stamp_tax_rate=0.0005, slippage_bps=5),
+            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+        ),
+    )
+    run_dir = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_results_c",
+        strategy_name="dual_sma_trend@1.0.0",
+        universe="AAA.SZ",
+        config_overlay={
+            "product_request": {
+                "strategy_code": "dual_sma_trend",
+                "strategy_version": "1.0.0",
+                "strategy_params": {"fast_window": 5, "slow_window": 20},
+            }
+        },
+    )
+    for name in [
+        "summary.json",
+        "equity.json",
+        "daily_returns.json",
+        "rolling_performance.json",
+        "costs.json",
+        "diagnostics.json",
+        "orders.json",
+        "fills.json",
+        "targets.json",
+        "snapshots.json",
+        "config.json",
+    ]:
+        assert (run_dir / name).exists(), name
+
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    for key in ["sharpe", "sortino", "calmar", "turnover", "total_cost", "commission"]:
+        assert key in summary
+        if summary[key] is not None:
+            assert math.isfinite(float(summary[key]))
+
+    # no NaN/Inf in written json files
+    for path in run_dir.glob("*.json"):
+        text = path.read_text(encoding="utf-8")
+        assert "NaN" not in text
+        assert "Infinity" not in text
+
+    costs = json.loads((run_dir / "costs.json").read_text(encoding="utf-8"))
+    assert abs(float(costs["total_cost"]) - (
+        float(costs["commission"]) + float(costs["stamp_tax"]) + float(costs["slippage_cost"])
+    )) < 1e-9
+
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["reproducibility"]["locked_to_run_snapshot"] is True
+    assert config["product_request"]["strategy_params"]["fast_window"] == 5
+
+    from qrp_atlas.backtest.results.service import set_loader_for_tests
+
+    loader = BacktestRunsLoader(tmp_path)
+    set_loader_for_tests(loader)
+    try:
+        assert "run_results_c" in loader.list_run_ids()
+        loaded_summary = get_summary("run_results_c")
+        assert loaded_summary.run_id == "run_results_c"
+        assert get_costs("run_results_c") is not None
+
+        # compare works
+        compare = compare_runs(["run_results_c", "missing_run"])
+        assert len(compare.runs) == 1
+        assert "missing_run" in compare.missing
+
+        rolling = loader.load_rolling_performance("run_results_c")
+        assert isinstance(rolling, list)
+        assert rolling
+        daily = daily_returns_from_equity(loader.load_equity("run_results_c"))
+        assert daily[0]["daily_return"] == 0.0
+        assert rolling_performance(loader.load_equity("run_results_c"))
+    finally:
+        set_loader_for_tests(None)
+
+
+def test_old_package_costs_fallback(tmp_path: Path):
+    run = tmp_path / "old_run"
+    run.mkdir()
+    (run / "run_meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "old_run",
+                "name": "old",
+                "strategy_name": "x",
+                "universe": "u",
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-10",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "status": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "old_run",
+                "total_return_pct": 1.0,
+                "annual_return_pct": 2.0,
+                "max_drawdown_pct": -3.0,
+                "win_rate_pct": 50.0,
+                "profit_loss_ratio": 1.2,
+                "trade_count": 1,
+                "avg_holding_days": 2,
+                "max_trade_loss_pct": -1.0,
+                "max_trade_profit_pct": 2.0,
+                "skipped_count": 0,
+                "commission": 1.0,
+                "stamp_tax": 2.0,
+                "slippage_cost": 3.0,
+                "total_cost": 6.0,
+                "turnover": 0.1,
+                "final_equity": 100.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name, payload in {
+        "equity.json": [],
+        "trades.json": [],
+        "skipped.json": [],
+        "config.json": {},
+    }.items():
+        (run / name).write_text(json.dumps(payload), encoding="utf-8")
+
+    from qrp_atlas.backtest.results.service import set_loader_for_tests
+
+    set_loader_for_tests(BacktestRunsLoader(tmp_path))
+    try:
+        costs = get_costs("old_run")
+        assert costs is not None
+        assert costs.total_cost == 6.0
+        summary = get_summary("old_run")
+        assert summary.sharpe is None  # old package may lack risk metrics
+    finally:
+        set_loader_for_tests(None)
+
+
+def test_full_loss_annual_and_rolling_keep_zero_dates():
+    from qrp_atlas.backtest.results.writer import _annual_return_pct
+    from qrp_atlas.backtest.results.analytics import calmar_ratio, rolling_performance, daily_returns_from_equity
+
+    class _Snap:
+        def __init__(self, d):
+            self.trade_date = d
+
+    class _Result:
+        snapshots = [_Snap("2024-01-01"), _Snap("2024-12-31")]
+        summary = {"total_return": -1.0}
+
+    assert _annual_return_pct(_Result()) == -100.0
+    assert calmar_ratio(-100.0, -100.0) == -1.0
+
+    equity = [
+        {"date": "2024-01-02", "equity": 100.0},
+        {"date": "2024-01-03", "equity": 40.0},
+        {"date": "2024-01-04", "equity": 0.0},
+        {"date": "2024-01-05", "equity": 0.0},
+    ]
+    daily = daily_returns_from_equity(equity)
+    assert [r["date"] for r in daily] == [e["date"] for e in equity]
+    assert daily[2]["daily_return"] == -1.0
+    assert daily[3]["daily_return"] == 0.0
+
+    rolling = rolling_performance(equity, windows=(2,))
+    assert [r["date"] for r in rolling] == [e["date"] for e in equity]
+    assert rolling[2]["drawdown"] == -1.0
+    # must not drop zero-equity date
+    assert rolling[2]["equity"] == 0.0
+
+
+def test_writer_benchmark_mae_and_repro_hash(tmp_path: Path):
+    engine = PortfolioBacktestEngine()
+    prices = _prices()
+    result = engine.run(
+        prices,
+        _targets(),
+        PortfolioBacktestConfig(
+            name="results-bench",
+            initial_cash=1_000_000,
+            max_positions=5,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0003, stamp_tax_rate=0.0005, slippage_bps=5),
+            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+        ),
+    )
+    # synthetic benchmark with a gap
+    bench = prices[["trade_date", "close"]].copy()
+    bench = bench[bench["trade_date"] != "2024-01-10"].copy()
+    repro = {
+        "strategy_code": "dual_sma_trend",
+        "strategy_version": "1.0.0",
+        "strategy_definition_snapshot": {"code": "dual_sma_trend", "version": "1.0.0"},
+        "strategy_params": {"fast_window": 5, "slow_window": 20},
+        "indicator_requests": [],
+        "universe": {"mode": "tickers", "tickers": ["AAA.SZ"]},
+        "date_range": {"start_date": "2024-01-02", "end_date": "2024-02-29"},
+        "execution": {"entry_timing": "next_open"},
+        "cost": {"commission_rate": 0.0003},
+        "position": {"initial_cash": 1_000_000},
+        "benchmark_id": "000300.SH",
+        "locked_to_run_snapshot": True,
+    }
+    run_dir = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_results_bench",
+        strategy_name="dual_sma_trend@1.0.0",
+        universe="AAA.SZ",
+        price_frame=prices,
+        benchmark_frame=bench,
+        benchmark_id="000300.SH",
+        exposures={"available": True, "industry": [], "market_cap": [{"trade_date": "2024-01-03", "max_weight": 0.5}]},
+        reproducibility_snapshot=repro,
+        config_overlay={"product_request": {"strategy_params": {"fast_window": 5}}},
+    )
+    for name in [
+        "benchmark.json",
+        "exposures.json",
+        "reproducibility.json",
+        "trades.json",
+        "rolling_performance.json",
+    ]:
+        assert (run_dir / name).exists(), name
+
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert "benchmark_total_return_pct" in summary
+    assert "excess_total_return_pct" in summary
+
+    bench_art = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
+    assert bench_art["benchmark_id"] == "000300.SH"
+    assert any("benchmark_gap" in d for d in bench_art["diagnostics"])
+    assert any(p.get("excess_return") is not None for p in bench_art["points"])
+
+    trades = json.loads((run_dir / "trades.json").read_text(encoding="utf-8"))
+    closed = [t for t in trades if t.get("status") == "closed"]
+    assert closed
+    assert any(t.get("mae_pct") is not None or t.get("mfe_pct") is not None for t in closed)
+
+    repro1 = json.loads((run_dir / "reproducibility.json").read_text(encoding="utf-8"))
+    assert repro1["locked_to_run_snapshot"] is True
+    assert isinstance(repro1.get("snapshot_hash"), str) and len(repro1["snapshot_hash"]) == 64
+
+    # same snapshot => same hash
+    run_dir2 = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_results_bench_2",
+        strategy_name="dual_sma_trend@1.0.0",
+        universe="AAA.SZ",
+        price_frame=prices,
+        benchmark_frame=bench,
+        benchmark_id="000300.SH",
+        exposures={"available": True, "industry": [], "market_cap": [{"trade_date": "2024-01-03", "max_weight": 0.5}]},
+        reproducibility_snapshot=repro,
+        config_overlay={"product_request": {"strategy_params": {"fast_window": 5}}},
+    )
+    repro2 = json.loads((run_dir2 / "reproducibility.json").read_text(encoding="utf-8"))
+    assert repro1["snapshot_hash"] == repro2["snapshot_hash"]
+
+    # registry-default-like param drift must not alter locked snapshot hash already stored
+    config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["reproducibility"]["snapshot_hash"] == repro1["snapshot_hash"]
+    assert config["product_request"]["strategy_params"]["fast_window"] == 5
+
+
+def test_missing_benchmark_is_diagnostic_not_silent(tmp_path: Path):
+    engine = PortfolioBacktestEngine()
+    result = engine.run(
+        _prices(),
+        _targets(),
+        PortfolioBacktestConfig(
+            name="no-bench",
+            initial_cash=1_000_000,
+            max_positions=5,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0003, stamp_tax_rate=0.0005, slippage_bps=5),
+            execution=PortfolioExecutionRule(price_field="open", mark_price_field="close"),
+        ),
+    )
+    run_dir = BacktestRunWriter(tmp_path).write_portfolio_run(
+        result,
+        run_id="run_no_bench",
+        strategy_name="x@1",
+        universe="AAA.SZ",
+        benchmark_id="000300.SH",
+        benchmark_frame=None,
+    )
+    bench = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
+    assert "benchmark_missing" in bench["diagnostics"] or "benchmark_requested_but_data_missing" in bench["diagnostics"]
+    assert all(p.get("benchmark_level") is None for p in bench["points"])
+
+
+def test_excess_metrics_relative_not_simple_diff():
+    """Portfolio +10%,0% vs benchmark 0%,+10% must not yield negative relative excess."""
+
+    dates = ["2024-01-02", "2024-01-03"]
+    # levels so returns: day0=0 by convention first point, day1 from levels
+    # align_benchmark uses level ratios; inject portfolio_returns directly.
+    bench = pd.DataFrame({"trade_date": dates, "close": [100.0, 110.0]})  # +10% on second day
+    # First day b_ret treated as 0 when prev_level None; second day +10%.
+    port_rets = [0.10, 0.0]
+    aligned, diag = align_benchmark_series(dates, bench, portfolio_returns=port_rets)
+    assert not any("gap" in d for d in diag)
+    # day0: active = (1.1)/(1.0)-1 = 0.1
+    assert aligned[0]["daily_active_return"] == pytest.approx(0.1)
+    # day1: active = (1.0)/(1.1)-1 ≈ -0.0909
+    assert aligned[1]["daily_active_return"] == pytest.approx((1.0 / 1.1) - 1.0)
+    # cumulative: port = 1.1*1.0-1 = 0.1; bench = 0 then 0.1
+    assert aligned[1]["portfolio_cumulative_return"] == pytest.approx(0.1)
+    assert aligned[1]["benchmark_cumulative_return"] == pytest.approx(0.1)
+    assert aligned[1]["excess_percentage_point"] == pytest.approx(0.0)
+    assert aligned[1]["relative_return"] == pytest.approx(0.0)
+    summary = benchmark_summary(aligned)
+    assert summary["full_range_excess_available"] is True
+    assert summary["excess_percentage_point"] == pytest.approx(0.0)
+    assert summary["relative_return"] == pytest.approx(0.0)
+    assert summary["excess_total_return"] == pytest.approx(0.0)
+
+
+def test_excess_full_range_none_when_benchmark_gaps():
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    bench = pd.DataFrame({"trade_date": ["2024-01-02", "2024-01-04"], "close": [100.0, 110.0]})
+    port_rets = [0.01, 0.01, 0.01]
+    aligned, diag = align_benchmark_series(dates, bench, portfolio_returns=port_rets)
+    assert any("benchmark_gap:2024-01-03" in d for d in diag)
+    assert any("full_range_excess_unavailable" in d for d in diag)
+    summary = benchmark_summary(aligned)
+    assert summary["full_range_excess_available"] is False
+    assert summary["excess_percentage_point"] is None
+    assert summary["relative_return"] is None
+    assert summary["excess_total_return"] is None
+    assert summary["excess_total_return_pct"] is None
+    # The first date is defined against a zero benchmark return. A benchmark
+    # reappearance after the gap has no known previous level.
+    assert aligned[0]["daily_active_return"] is not None
+    assert aligned[1]["daily_active_return"] is None
+    assert aligned[2]["benchmark_level"] == pytest.approx(110.0)
+    assert aligned[2]["benchmark_return"] is None
+    assert aligned[2]["daily_active_return"] is None
+    assert aligned[2]["excess_return"] is None
+
+
+def test_realized_exposure_excludes_blocked_target(monkeypatch: pytest.MonkeyPatch):
+    prices = pd.DataFrame(
+        [
+            {
+                "trade_date": "2024-01-02",
+                "asset_id": "AAA.SZ",
+                "asset_name": "AAA",
+                "asset_type": "stock",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "market_cap": 100.0,
+                "is_suspended": False,
+                "is_limit_up": False,
+                "is_limit_down": False,
+            },
+            {
+                "trade_date": "2024-01-02",
+                "asset_id": "BBB.SZ",
+                "asset_name": "BBB",
+                "asset_type": "stock",
+                "open": 20.0,
+                "high": 20.0,
+                "low": 20.0,
+                "close": 20.0,
+                "market_cap": 10_000.0,
+                "is_suspended": False,
+                "is_limit_up": True,
+                "is_limit_down": False,
+            },
+        ]
+    )
+    targets = pd.DataFrame(
+        [
+            {"trade_date": "2024-01-02", "asset_id": "AAA.SZ", "target_weight": 0.4},
+            {"trade_date": "2024-01-02", "asset_id": "BBB.SZ", "target_weight": 0.4},
+        ]
+    )
+    result = PortfolioBacktestEngine().run(
+        prices,
+        targets,
+        PortfolioBacktestConfig(
+            name="realized-exposure",
+            initial_cash=1_000_000,
+            max_positions=2,
+            max_weight_per_asset=0.5,
+            cost=CostRule(commission_rate=0.0, stamp_tax_rate=0.0, slippage_bps=0.0),
+        ),
+    )
+
+    def _fake_exposure_panel(universe, **_kwargs):
+        panel = universe.copy()
+        panel["industry_code"] = panel["asset_id"].map(
+            {"AAA.SZ": "REALIZED", "BBB.SZ": "BLOCKED"}
+        )
+        return panel
+
+    monkeypatch.setattr(
+        "qrp_atlas.backtest.product.service.prepare_cross_section_exposure_panel",
+        _fake_exposure_panel,
+    )
+    payload = _build_exposure_payload(
+        SimpleNamespace(strategy_code="cross_sectional_momentum_long_only"),
+        portfolio_result=result,
+        execution_targets=targets,
+        db_path=Path("unused.duckdb"),
+        price_frame=prices,
+    )
+
+    assert payload["exposure_basis"] == "realized_portfolio_positions"
+    assert {row["industry_code"] for row in payload["industry"]} == {"REALIZED"}
+    assert all(row["name_count"] == 1 for row in payload["market_cap"])
+    assert payload["market_cap"][0]["weighted_log_market_cap"] == pytest.approx(math.log(100.0))

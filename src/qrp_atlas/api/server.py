@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from qrp_atlas.api.db import get_db, get_db_path
 from qrp_atlas.api.routes import (
+    declarative_strategies,
     adj_factor,
     auth,
     backtest,
@@ -65,6 +66,7 @@ app.include_router(research.router)
 app.include_router(backtest.router)
 app.include_router(backtest_tasks.router)
 app.include_router(catalog.router)
+app.include_router(declarative_strategies.router)
 
 
 # ── 系统端点 ──────────────────────────────────

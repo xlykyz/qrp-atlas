@@ -62,6 +62,7 @@ from qrp_atlas.contracts import (
     TURNOVER,
     TURNOVER_RATE,
     TURNOVER_RATE_F,
+    VOLUME,
     VOLUME_RATIO,
 )
 from qrp_atlas.indicators.cross_section.conventions import (
@@ -459,13 +460,11 @@ def compute_log_market_cap_factor(
 
 
 _DAILY_BASIC_FACTOR_SOURCES: dict[str, tuple[str, str]] = {
-    "earnings_yield_ttm": (PE_TTM, "positive_reciprocal"),
+    "earnings_yield_ttm": (PE_TTM, "nonzero_reciprocal"),
     "sales_to_price_ttm": (PS_TTM, "positive_reciprocal"),
     "dividend_yield_ttm": (DV_TTM, "nonnegative_percent"),
-    "log_total_market_cap": (TOTAL_MV, "positive_log"),
-    "log_circulating_market_cap": (CIRC_MV, "positive_log"),
-    "turnover_rate": (TURNOVER_RATE, "nonnegative_percent"),
-    "free_float_turnover_rate": (TURNOVER_RATE_F, "nonnegative_percent"),
+    "turnover_rate": (TURNOVER_RATE, "nonnegative_raw"),
+    "free_float_turnover_rate": (TURNOVER_RATE_F, "nonnegative_raw"),
     "volume_ratio": (VOLUME_RATIO, "nonnegative_raw"),
 }
 
@@ -480,8 +479,8 @@ def compute_daily_basic_factor(
     """Transform one already-prepared same-day daily-basic field.
 
     This pure adapter never queries storage, selects financial-report versions,
-    fills missing dates, or substitutes adjacent observations. Percentage inputs
-    are converted from percentage points to decimal ratios.
+    fills missing dates, or substitutes adjacent observations. Turnover fields
+    retain the percentage-point unit defined by the daily-basic contract.
     """
     try:
         source_field, transform = _DAILY_BASIC_FACTOR_SOURCES[factor_code]
@@ -490,14 +489,6 @@ def compute_daily_basic_factor(
             f"unknown daily-basic factor code: {factor_code}"
         ) from exc
     output = output_column or factor_code
-
-    if transform == "positive_log":
-        return compute_log_market_cap_factor(
-            daily_basic_panel,
-            universe=universe,
-            field=source_field,
-            output_column=output,
-        )
 
     uni = ensure_cross_section_frame(universe, enforce_primary_key=True)
     if uni.empty:
@@ -520,7 +511,11 @@ def compute_daily_basic_factor(
         return _attach_nan_column(uni, output)
 
     raw = _as_finite_series(panel[source_field])
-    if transform == "positive_reciprocal":
+    if transform == "nonzero_reciprocal":
+        values = raw.where(raw != 0).map(
+            lambda value: 1.0 / float(value) if pd.notna(value) else math.nan
+        )
+    elif transform == "positive_reciprocal":
         values = raw.where(raw > 0).map(
             lambda value: 1.0 / float(value) if pd.notna(value) else math.nan
         )
@@ -701,6 +696,30 @@ _SIZE_FIELD = {
 }
 
 
+_INDICATOR_WINDOW = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+}
+_LINEAR_TREND_PARAMETERS = _INDICATOR_WINDOW
+_PRICE_EFFICIENCY_PARAMETERS = _INDICATOR_WINDOW
+_REALIZED_VOLATILITY_PARAMETERS = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+    "annualization": FactorParameterSpec(
+        "number", 252.0, True, 0.000001, 100000.0
+    ),
+}
+_DOWNSIDE_VOLATILITY_PARAMETERS = {
+    **_REALIZED_VOLATILITY_PARAMETERS,
+    "target": FactorParameterSpec("number", 0.0, True, -1000.0, 1000.0),
+}
+_ROLLING_MAX_DRAWDOWN_PARAMETERS = _INDICATOR_WINDOW
+_RELATIVE_VOLUME_PARAMETERS = _INDICATOR_WINDOW
+_AMIHUD_PARAMETERS = {
+    "window": FactorParameterSpec("integer", 20, True, 2, 10000),
+    "scale": FactorParameterSpec("number", 1.0, True, 0.000001, 1e20),
+}
+_PRICE_VOLUME_CORRELATION_PARAMETERS = _INDICATOR_WINDOW
+
+
 FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
     "momentum": FactorDefinition(
         code="momentum",
@@ -784,6 +803,206 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         nan_semantics=(
             "NaN until every high in the full lookback window is finite and "
             "positive, or when T close is non-positive/non-finite."
+        ),
+    ),
+    "trend_slope": FactorDefinition(
+        code="trend_slope",
+        name="Normalized linear trend slope",
+        family="trend",
+        description=(
+            "Scale-free rolling OLS slope of close on bar position, reusing the "
+            "linear_regression_trend indicator's normalized_slope output."
+        ),
+        formula=(
+            "OLS_slope(close[T-window+1:T] ~ 0..window-1) / "
+            "mean(abs(close[T-window+1:T]))"
+        ),
+        direction="higher = stronger positive price trend; lower = stronger negative trend",
+        time_semantics=(
+            "The inclusive window ends at T and contains no future bar; known after "
+            "the T close and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_LINEAR_TREND_PARAMETERS,
+        default_output="trend_slope",
+        nan_semantics=(
+            "NaN until a full finite window exists, or when the mean absolute close "
+            "is zero; non-finite values are never filled."
+        ),
+    ),
+    "trend_r_squared": FactorDefinition(
+        code="trend_r_squared",
+        name="Linear trend fit R-squared",
+        family="trend",
+        description="Rolling coefficient of determination of close on bar position.",
+        formula="R^2 from OLS(close[T-window+1:T] ~ 0..window-1)",
+        direction="higher = price path is better explained by a linear trend, regardless of sign",
+        time_semantics=(
+            "The inclusive regression window ends at T; known after the T close and "
+            "intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_LINEAR_TREND_PARAMETERS,
+        default_output="trend_r_squared",
+        nan_semantics=(
+            "NaN until a full finite window exists or when close is constant so total "
+            "variation is zero."
+        ),
+    ),
+    "price_efficiency": FactorDefinition(
+        code="price_efficiency",
+        name="Kaufman price efficiency ratio",
+        family="trend",
+        description="Absolute net price movement divided by total path length.",
+        formula=(
+            "abs(close[T]-close[T-window]) / "
+            "sum(abs(close[i]-close[i-1]), i=T-window+1..T)"
+        ),
+        direction="higher = more directional and efficient price path",
+        time_semantics=(
+            "Uses window+1 closes ending at T; known after T close and intended for "
+            "T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_PRICE_EFFICIENCY_PARAMETERS,
+        default_output="price_efficiency",
+        nan_semantics=(
+            "NaN until window+1 finite closes exist or when total path length is zero; "
+            "no zero fill."
+        ),
+    ),
+    "realized_volatility": FactorDefinition(
+        code="realized_volatility",
+        name="Annualized realized volatility",
+        family="risk",
+        description="Population standard deviation of rolling simple returns, annualized.",
+        formula=(
+            "std_pop(close[i]/close[i-1]-1, i=T-window+1..T) * "
+            "sqrt(annualization)"
+        ),
+        direction="higher = greater realized return variability / risk",
+        time_semantics=(
+            "Uses window returns formed from window+1 closes through T; known after "
+            "T close and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_REALIZED_VOLATILITY_PARAMETERS,
+        default_output="realized_volatility",
+        nan_semantics=(
+            "NaN until a full return window exists or when any required close is "
+            "non-positive/non-finite; uses population ddof=0."
+        ),
+    ),
+    "downside_volatility": FactorDefinition(
+        code="downside_volatility",
+        name="Annualized downside volatility",
+        family="risk",
+        description="Root mean square downside deviation below a configurable target.",
+        formula=(
+            "sqrt(mean(min(return[i]-target, 0)^2, i=T-window+1..T)) * "
+            "sqrt(annualization)"
+        ),
+        direction="higher = greater downside deviation / risk",
+        time_semantics=(
+            "Uses window simple returns through T; known after T close and intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_DOWNSIDE_VOLATILITY_PARAMETERS,
+        default_output="downside_volatility",
+        nan_semantics=(
+            "NaN until a full return window exists or when a required close is "
+            "non-positive/non-finite; returns above target contribute zero downside."
+        ),
+    ),
+    "rolling_max_drawdown": FactorDefinition(
+        code="rolling_max_drawdown",
+        name="Rolling maximum drawdown",
+        family="risk",
+        description="Worst peak-to-trough drawdown inside an inclusive close window.",
+        formula=(
+            "min(close[i] / max(close[T-window+1:i]) - 1, "
+            "i=T-window+1..T)"
+        ),
+        direction="more negative = deeper drawdown / greater risk; zero = no drawdown",
+        time_semantics=(
+            "The inclusive window ends at T; known after T close and intended for "
+            "T+1 or later use."
+        ),
+        inputs=(CLOSE,),
+        parameter_schema=_ROLLING_MAX_DRAWDOWN_PARAMETERS,
+        default_output="rolling_max_drawdown",
+        nan_semantics=(
+            "NaN until a full window of strictly positive finite closes exists; "
+            "invalid windows are not partially evaluated."
+        ),
+    ),
+    "relative_volume": FactorDefinition(
+        code="relative_volume",
+        name="Relative volume",
+        family="liquidity",
+        description="Current volume relative to the mean of the prior window bars.",
+        formula="volume[T] / mean(volume[T-window:T-1])",
+        direction="higher = stronger current trading activity relative to recent history",
+        time_semantics=(
+            "The baseline explicitly excludes T while the numerator uses T volume; "
+            "known after T and intended for T+1 or later use."
+        ),
+        inputs=(VOLUME,),
+        parameter_schema=_RELATIVE_VOLUME_PARAMETERS,
+        default_output="relative_volume",
+        nan_semantics=(
+            "NaN until all prior-window volumes and T volume are finite/non-negative, "
+            "or when the prior mean is zero; a valid zero T volume yields zero."
+        ),
+    ),
+    "amihud_illiquidity": FactorDefinition(
+        code="amihud_illiquidity",
+        name="Amihud illiquidity",
+        family="liquidity",
+        description="Rolling mean absolute return per unit of positive traded amount.",
+        formula=(
+            "mean(abs(close[i]/close[i-1]-1) / amount[i], "
+            "i=T-window+1..T) * scale"
+        ),
+        direction="higher = larger price impact per traded amount / lower liquidity",
+        time_semantics=(
+            "Uses window returns and same-day amounts through T; known after T close "
+            "and intended for T+1 or later use."
+        ),
+        inputs=(CLOSE, AMOUNT),
+        parameter_schema=_AMIHUD_PARAMETERS,
+        default_output="amihud_illiquidity",
+        nan_semantics=(
+            "NaN until a full window exists or when a required close/amount is "
+            "non-positive or non-finite; zero amount never becomes infinity."
+        ),
+    ),
+    "price_volume_correlation": FactorDefinition(
+        code="price_volume_correlation",
+        name="Price-volume correlation",
+        family="liquidity",
+        description=(
+            "Rolling Pearson correlation between simple close returns and volume "
+            "percentage changes."
+        ),
+        formula=(
+            "corr(close[i]/close[i-1]-1, volume[i]/volume[i-1]-1, "
+            "i=T-window+1..T)"
+        ),
+        direction=(
+            "positive = price and volume changes move together; negative = they move oppositely"
+        ),
+        time_semantics=(
+            "Uses window paired changes through T; known after T close and intended "
+            "for T+1 or later use."
+        ),
+        inputs=(CLOSE, VOLUME),
+        parameter_schema=_PRICE_VOLUME_CORRELATION_PARAMETERS,
+        default_output="price_volume_correlation",
+        nan_semantics=(
+            "NaN until a full finite paired-change window exists, when prior volume "
+            "is zero, or when either series has zero variance."
         ),
     ),
     "high_low_range_volatility": FactorDefinition(
@@ -884,9 +1103,9 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         code="earnings_yield_ttm",
         name="Trailing earnings yield",
         family="fundamental",
-        description="Reciprocal of same-day positive PE_TTM from the prepared daily-basic panel.",
-        formula="1 / PE_TTM[T], only when PE_TTM[T] > 0",
-        direction="higher = more positive trailing earnings per unit of price; not a trade instruction",
+        description="Reciprocal of same-day nonzero PE_TTM from the prepared daily-basic panel.",
+        formula="1 / PE_TTM[T], when PE_TTM[T] != 0",
+        direction="higher = greater trailing earnings per unit of price; negative values retain loss information",
         time_semantics=(
             "Consumes only the prepared daily-basic row for trade_date T; known after "
             "the T close and intended for T+1 or later use. No adjacent-date substitution."
@@ -894,10 +1113,7 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         inputs=(PE_TTM,),
         parameter_schema={},
         default_output="earnings_yield_ttm",
-        nan_semantics=(
-            "NaN when PE_TTM is missing, non-finite, zero, or negative. Negative PE "
-            "represents non-positive earnings and is not inverted into a valuation yield."
-        ),
+        nan_semantics="NaN when PE_TTM is missing, non-finite, or zero; negative PE remains valid.",
     ),
     "sales_to_price_ttm": FactorDefinition(
         code="sales_to_price_ttm",
@@ -934,50 +1150,12 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
             "observation. Input percentage points are divided by 100."
         ),
     ),
-    "log_total_market_cap": FactorDefinition(
-        code="log_total_market_cap",
-        name="Log total market capitalization",
-        family="size",
-        description=(
-            "Natural log of same-day total_mv in the daily-basic panel's native "
-            "market-cap unit; callers must keep that unit consistent across rows."
-        ),
-        formula="ln(total_mv[T])",
-        direction="higher = larger total market capitalization",
-        time_semantics=(
-            "Consumes only total_mv for trade_date T; known after the T close and intended "
-            "for T+1 or later use. No fill or adjacent-date substitution."
-        ),
-        inputs=(TOTAL_MV,),
-        parameter_schema={},
-        default_output="log_total_market_cap",
-        nan_semantics="NaN for missing, non-finite, zero, or negative total_mv.",
-    ),
-    "log_circulating_market_cap": FactorDefinition(
-        code="log_circulating_market_cap",
-        name="Log circulating market capitalization",
-        family="size",
-        description=(
-            "Natural log of same-day circ_mv in the daily-basic panel's native "
-            "market-cap unit; callers must keep that unit consistent across rows."
-        ),
-        formula="ln(circ_mv[T])",
-        direction="higher = larger circulating market capitalization",
-        time_semantics=(
-            "Consumes only circ_mv for trade_date T; known after the T close and intended "
-            "for T+1 or later use. No fill or adjacent-date substitution."
-        ),
-        inputs=(CIRC_MV,),
-        parameter_schema={},
-        default_output="log_circulating_market_cap",
-        nan_semantics="NaN for missing, non-finite, zero, or negative circ_mv.",
-    ),
     "turnover_rate": FactorDefinition(
         code="turnover_rate",
         name="Daily turnover rate",
         family="liquidity",
-        description="Same-day turnover_rate converted from percent to a decimal ratio.",
-        formula="turnover_rate[T] / 100",
+        description="Same-day turnover_rate retained in the contract's percentage-point unit.",
+        formula="turnover_rate[T]",
         direction="higher = more shares traded relative to outstanding shares",
         time_semantics=(
             "Consumes only the prepared daily-basic row for trade_date T; known after "
@@ -986,17 +1164,14 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         inputs=(TURNOVER_RATE,),
         parameter_schema={},
         default_output="turnover_rate",
-        nan_semantics=(
-            "NaN for missing, non-finite, or negative input. Zero is valid. Input "
-            "percentage points are divided by 100."
-        ),
+        nan_semantics="NaN for missing, non-finite, or negative input. Zero is valid.",
     ),
     "free_float_turnover_rate": FactorDefinition(
         code="free_float_turnover_rate",
         name="Daily free-float turnover rate",
         family="liquidity",
-        description="Same-day turnover_rate_f converted from percent to a decimal ratio.",
-        formula="turnover_rate_f[T] / 100",
+        description="Same-day turnover_rate_f retained in its percentage-point unit.",
+        formula="turnover_rate_f[T]",
         direction="higher = more shares traded relative to free-float shares",
         time_semantics=(
             "Consumes only the prepared daily-basic row for trade_date T; known after "
@@ -1005,10 +1180,7 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         inputs=(TURNOVER_RATE_F,),
         parameter_schema={},
         default_output="free_float_turnover_rate",
-        nan_semantics=(
-            "NaN for missing, non-finite, or negative input. Zero is valid. Input "
-            "percentage points are divided by 100."
-        ),
+        nan_semantics="NaN for missing, non-finite, or negative input. Zero is valid.",
     ),
     "volume_ratio": FactorDefinition(
         code="volume_ratio",
@@ -1202,10 +1374,19 @@ def _compute_one_factor(
         "intermediate_momentum",
         "short_term_reversal",
         "distance_to_high",
+        "trend_slope",
+        "trend_r_squared",
+        "price_efficiency",
+        "realized_volatility",
+        "downside_volatility",
+        "rolling_max_drawdown",
         "high_low_range_volatility",
         "average_turnover",
         "turnover_change",
+        "relative_volume",
         "average_traded_amount",
+        "amihud_illiquidity",
+        "price_volume_correlation",
     }:
         if prices is None:
             raise FactorRequestError(f"{code} requires a prices panel")
@@ -1214,6 +1395,7 @@ def _compute_one_factor(
             compute_average_turnover_factor,
             compute_distance_to_high_factor,
             compute_high_low_range_volatility_factor,
+            _compute_indicator_backed_market_factor,
             compute_intermediate_momentum_factor,
             compute_short_term_reversal_factor,
             compute_turnover_change_factor,
@@ -1239,6 +1421,24 @@ def _compute_one_factor(
                 prices,
                 universe=universe,
                 lookback=int(params["lookback"]),
+                output_column=output,
+            )
+        if code in {
+            "trend_slope",
+            "trend_r_squared",
+            "price_efficiency",
+            "realized_volatility",
+            "downside_volatility",
+            "rolling_max_drawdown",
+            "relative_volume",
+            "amihud_illiquidity",
+            "price_volume_correlation",
+        }:
+            return _compute_indicator_backed_market_factor(
+                prices,
+                universe=universe,
+                factor_code=code,
+                parameters=params,
                 output_column=output,
             )
         if code == "high_low_range_volatility":
@@ -1270,10 +1470,13 @@ def _compute_one_factor(
             output_column=output,
         )
     if code == "log_market_cap":
-        panel = size_panel if size_panel is not None else prices
+        panel = size_panel
+        if panel is None:
+            panel = daily_basic_panel if daily_basic_panel is not None else prices
         if panel is None:
             raise FactorRequestError(
-                "log_market_cap requires a size_panel or prices panel with market-cap fields"
+                "log_market_cap requires a size_panel, daily_basic_panel, or prices "
+                "panel with market-cap fields"
             )
         return compute_log_market_cap_factor(
             panel,
