@@ -301,6 +301,7 @@ class BacktestRunWriter:
         strategy_name: str,
         universe: str,
         name: str | None = None,
+        owner_user_id: str = "local-user",
         created_at: str | None = None,
         overwrite: bool = False,
         config_overlay: dict[str, Any] | None = None,
@@ -333,6 +334,7 @@ class BacktestRunWriter:
             skipped = _skipped_payload(result, extra_skipped=extra_skipped)
             meta = {
                 "run_id": run_id,
+                "owner_user_id": owner_user_id,
                 "name": name or result.config.name,
                 "strategy_name": strategy_name,
                 "universe": universe,

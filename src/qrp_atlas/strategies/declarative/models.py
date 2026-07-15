@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
-from qrp_atlas.indicators import IndicatorRequest
+from qrp_atlas.indicators import IndicatorParameterBinding, IndicatorRequest
 
 from ..models import ParameterSpec, StrategyDefinition, StrategyType
 
@@ -145,6 +145,14 @@ class DeclarativeStrategySpec:
             params = item.get("parameters") or {}
             if not isinstance(params, Mapping):
                 raise ValueError("indicator_request.parameters must be an object")
+            normalized_params = {
+                str(key): (
+                    IndicatorParameterBinding(str(value["parameter"]))
+                    if isinstance(value, Mapping) and set(value) == {"parameter"}
+                    else value
+                )
+                for key, value in params.items()
+            }
             alias = item.get("alias")
             if alias is not None:
                 alias = str(alias).strip() or None
@@ -154,7 +162,7 @@ class DeclarativeStrategySpec:
             indicator_requests_list.append(
                 IndicatorRequest(
                     code=code,
-                    parameters=dict(params),
+                    parameters=normalized_params,
                     alias=alias,
                     output_fields={str(k): str(v) for k, v in output_fields.items()},
                 )

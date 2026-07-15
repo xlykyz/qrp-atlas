@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import multiprocessing
 from pathlib import Path
 
 import duckdb
@@ -13,6 +15,7 @@ from qrp_atlas.backtest.product import (
     BacktestTaskStore,
     CreateBacktestTaskRequest,
     list_strategy_catalog,
+    get_strategy_catalog_item,
     validate_create_request,
 )
 from qrp_atlas.backtest.product.schemas import (
@@ -60,6 +63,15 @@ def _definition(**overrides):
     return payload
 
 
+def _concurrent_create(root: str, queue) -> None:
+    store = DeclarativeStrategyStore(Path(root))
+    try:
+        store.create(_definition(), owner_user_id="user-a")
+        queue.put("created")
+    except DeclarativeStoreError:
+        queue.put("exists")
+
+
 def test_rejects_illegal_operator_and_eval_tokens(tmp_path: Path):
     store = DeclarativeStrategyStore(tmp_path)
     with pytest.raises(DeclarativeStoreError):
@@ -74,6 +86,36 @@ def test_rejects_illegal_operator_and_eval_tokens(tmp_path: Path):
         )
     with pytest.raises(DeclarativeStoreError):
         store.validate(_definition(description="evil eval(os.system('x'))"))
+
+
+def test_validate_rejects_static_type_mismatches(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path)
+    with pytest.raises(DeclarativeStoreError, match="incompatible operand types"):
+        store.validate(
+            _definition(
+                parameters={
+                    "threshold": {"type": "string", "required": True},
+                },
+                entry={
+                    "left": {"source_type": "parameter", "code": "threshold"},
+                    "operator": "eq",
+                    "right": {"source_type": "literal", "value": 1},
+                },
+            )
+        )
+    with pytest.raises(DeclarativeStoreError, match="does not support boolean"):
+        store.validate(
+            _definition(
+                parameters={
+                    "threshold": {"type": "boolean", "required": True},
+                },
+                entry={
+                    "left": {"source_type": "parameter", "code": "threshold"},
+                    "operator": "gt",
+                    "right": {"source_type": "literal", "value": False},
+                },
+            )
+        )
 
 
 def test_version_immutability_and_owner_isolation(tmp_path: Path):
@@ -93,6 +135,51 @@ def test_version_immutability_and_owner_isolation(tmp_path: Path):
     # owner isolation
     with pytest.raises(DeclarativeStoreError):
         store.get("demo_decl_trend", "1.0.0", owner_user_id="user-b")
+
+
+def test_declarative_code_cannot_conflict_with_builtin(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path)
+    with pytest.raises(DeclarativeStoreError, match="conflicts with builtin"):
+        store.create(
+            _definition(code="dual_sma_trend"),
+            owner_user_id="user-a",
+        )
+
+
+def test_semver_latest_uses_numeric_order(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path)
+    reset_declarative_store_for_tests(store)
+    try:
+        store.create(_definition(version="1.9.0"), owner_user_id="user-a")
+        store.create(_definition(version="1.10.0"), owner_user_id="user-a")
+        latest = get_strategy_catalog_item(
+            "demo_decl_trend", owner_user_id="user-a"
+        )
+        assert latest.version == "1.10.0"
+    finally:
+        reset_declarative_store_for_tests(None)
+
+
+def test_cross_process_create_is_locked_and_atomic(tmp_path: Path):
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [
+        context.Process(target=_concurrent_create, args=(str(tmp_path), queue))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    assert sorted(queue.get(timeout=2) for _ in processes) == ["created", "exists"]
+    payload = json.loads(
+        (tmp_path / "user-a" / "demo_decl_trend@1.0.0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["definition"]["name"] == "Demo Declarative"
+    assert not list((tmp_path / "user-a").glob("*.tmp"))
 
 
 def test_deterministic_serialization():
@@ -210,7 +297,7 @@ def test_referenced_version_cannot_be_overwritten_even_with_flag(tmp_path: Path)
     store = DeclarativeStrategyStore(tmp_path)
     store.create(_definition(), owner_user_id="user-a")
     store.mark_referenced("demo_decl_trend", "1.0.0", owner_user_id="user-a")
-    with pytest.raises(DeclarativeStoreError, match="referenced by runs"):
+    with pytest.raises(DeclarativeStoreError, match="strictly immutable"):
         store.create(
             _definition(name="mutated"),
             owner_user_id="user-a",
@@ -221,19 +308,19 @@ def test_referenced_version_cannot_be_overwritten_even_with_flag(tmp_path: Path)
     assert old.referenced_by_runs is True
 
 
-def test_unreferenced_overwrite_requires_explicit_flag(tmp_path: Path):
+def test_unreferenced_version_cannot_be_overwritten_with_legacy_flag(tmp_path: Path):
     store = DeclarativeStrategyStore(tmp_path)
     store.create(_definition(), owner_user_id="user-a")
     with pytest.raises(DeclarativeStoreError, match="already exists"):
         store.create(_definition(name="mutated"), owner_user_id="user-a")
-    updated = store.create(
-        _definition(name="mutated"),
-        owner_user_id="user-a",
-        allow_overwrite=True,
-    )
-    assert updated.name == "mutated"
-    assert updated.version == "1.0.0"
-    assert updated.referenced_by_runs is False
+    with pytest.raises(DeclarativeStoreError, match="strictly immutable"):
+        store.create(
+            _definition(name="mutated"),
+            owner_user_id="user-a",
+            allow_overwrite=True,
+        )
+    unchanged = store.get("demo_decl_trend", "1.0.0", owner_user_id="user-a")
+    assert unchanged.name == "Demo Declarative"
 
 
 def test_product_run_locks_definition_snapshot(tmp_path: Path):
@@ -289,6 +376,96 @@ def test_product_run_locks_definition_snapshot(tmp_path: Path):
         reset_declarative_store_for_tests(None)
 
 
+def test_owner_isolates_catalog_tasks_and_run_results(tmp_path: Path):
+    store = DeclarativeStrategyStore(tmp_path / "decl")
+    reset_declarative_store_for_tests(store)
+    try:
+        store.create(_definition(name="owner-a"), owner_user_id="user-a")
+        store.create(_definition(name="owner-b"), owner_user_id="user-b")
+        assert [
+            item.name
+            for item in list_strategy_catalog(
+                product_only=True, owner_user_id="user-a"
+            )
+            if item.code == "demo_decl_trend"
+        ] == ["owner-a"]
+        assert [
+            item.name
+            for item in list_strategy_catalog(
+                product_only=True, owner_user_id="user-b"
+            )
+            if item.code == "demo_decl_trend"
+        ] == ["owner-b"]
+
+        service = BacktestProductService(
+            task_store=BacktestTaskStore(tmp_path / "tasks"),
+            runs_dir=tmp_path / "runs",
+            db_path=_price_db(tmp_path),
+            execute_inline=True,
+        )
+        response = service.create_task(
+            CreateBacktestTaskRequest(
+                name="owner-a-run",
+                strategy_code="demo_decl_trend",
+                strategy_version="1.0.0",
+                strategy_params={"threshold": 10.0},
+                tickers=["600519.SH"],
+                start_date="2024-01-10",
+                end_date="2024-02-05",
+            ),
+            owner_user_id="user-a",
+        )
+        task = response.task
+        assert task.status == "succeeded", task.error_message
+        assert service.list_tasks(owner_user_id="user-a")[0].task_id == task.task_id
+        assert service.list_tasks(owner_user_id="user-b") == []
+        with pytest.raises(KeyError):
+            service.get_task(task.task_id, owner_user_id="user-b")
+        run_meta = json.loads(
+            (tmp_path / "runs" / task.run_id / "run_meta.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert run_meta["owner_user_id"] == "user-a"
+    finally:
+        reset_declarative_store_for_tests(None)
+
+
+def test_mark_referenced_failure_removes_committed_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = DeclarativeStrategyStore(tmp_path / "decl")
+    reset_declarative_store_for_tests(store)
+    try:
+        store.create(_definition(), owner_user_id="local-user")
+
+        def _fail_mark(*_args, **_kwargs):
+            raise DeclarativeStoreError("lock write failed")
+
+        monkeypatch.setattr(store, "mark_referenced", _fail_mark)
+        service = BacktestProductService(
+            task_store=BacktestTaskStore(tmp_path / "tasks"),
+            runs_dir=tmp_path / "runs",
+            db_path=_price_db(tmp_path),
+            execute_inline=True,
+        )
+        task = service.create_task(
+            CreateBacktestTaskRequest(
+                strategy_code="demo_decl_trend",
+                strategy_version="1.0.0",
+                strategy_params={"threshold": 10.0},
+                tickers=["600519.SH"],
+                start_date="2024-01-10",
+                end_date="2024-02-05",
+            )
+        ).task
+        assert task.status == "failed"
+        assert "failed to lock declarative strategy reference" in (task.error_message or "")
+        assert not list((tmp_path / "runs").glob("run_*"))
+    finally:
+        reset_declarative_store_for_tests(None)
+
+
 def test_rejects_duplicate_indicator_aliases():
     payload = _definition(
         required_indicators=["sma"],
@@ -299,3 +476,23 @@ def test_rejects_duplicate_indicator_aliases():
     )
     with pytest.raises(DeclarativeStoreError):
         validate_declarative_payload(payload)
+
+
+def test_indicator_request_accepts_strategy_parameter_binding():
+    payload = _definition(
+        parameters={
+            "threshold": {"type": "number", "default": 10.0},
+            "lookback": {"type": "integer", "default": 20},
+        },
+        indicator_requests=[
+            {
+                "code": "sma",
+                "parameters": {"window": {"parameter": "lookback"}},
+                "alias": "trend_sma",
+            }
+        ],
+    )
+    normalized = validate_declarative_payload(payload).to_dict()
+    assert normalized["indicator_requests"][0]["parameters"]["window"] == {
+        "parameter": "lookback"
+    }

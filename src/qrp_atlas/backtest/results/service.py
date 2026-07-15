@@ -40,7 +40,17 @@ def set_loader_for_tests(loader: BacktestRunsLoader | None) -> None:
     _loader = loader
 
 
-def list_runs() -> List[BacktestRunMeta]:
+def run_belongs_to(run_id: str, owner_user_id: str, *, allow_legacy: bool = False) -> bool:
+    meta = get_loader().load_run_meta(run_id)
+    stored_owner = meta.get("owner_user_id")
+    if stored_owner is None:
+        return allow_legacy
+    return str(stored_owner) == str(owner_user_id)
+
+
+def list_runs(
+    *, owner_user_id: str | None = None, allow_legacy: bool = False
+) -> List[BacktestRunMeta]:
     """列出所有 run，按 run_id 排序。
 
     缺失 run_meta.json 的 run 会被跳过，不抛错。
@@ -51,6 +61,12 @@ def list_runs() -> List[BacktestRunMeta]:
             meta = get_loader().load_run_meta(run_id)
         except ResultFileMissingError:
             continue
+        stored_owner = meta.get("owner_user_id")
+        if owner_user_id is not None:
+            if stored_owner is None and not allow_legacy:
+                continue
+            if stored_owner is not None and str(stored_owner) != str(owner_user_id):
+                continue
         runs.append(BacktestRunMeta.model_validate(meta))
     return runs
 
@@ -173,6 +189,7 @@ __all__ = [
     "RunNotFoundError",
     "ResultFileMissingError",
     "list_runs",
+    "run_belongs_to",
     "get_run_meta",
     "get_summary",
     "get_equity",

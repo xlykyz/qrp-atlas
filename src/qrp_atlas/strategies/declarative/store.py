@@ -7,15 +7,21 @@ Local auth still binds a stable owner_user_id.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+from uuid import uuid4
+
+from filelock import FileLock
 
 from qrp_atlas.config.paths import PROJECT_ROOT
+from qrp_atlas.strategies.registry import list_strategies
 
 from .evaluator import DeclarativeStrategy
 from .models import DeclarativeStrategySpec
@@ -43,6 +49,13 @@ def _default_root() -> Path:
 
 def deterministic_json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def semver_key(version: str) -> tuple[int, int, int]:
+    if not _VERSION_RE.match(version):
+        raise DeclarativeStoreError(f"invalid semantic version: {version}")
+    major, minor, patch = version.split(".")
+    return int(major), int(minor), int(patch)
 
 
 @dataclass(frozen=True)
@@ -110,7 +123,31 @@ class DeclarativeStrategyStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else _default_root()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._file_lock_path = self.root / ".store.lock"
+
+    @contextmanager
+    def _exclusive(self):
+        with self._lock:
+            with FileLock(str(self._file_lock_path), timeout=30):
+                yield
+
+    @staticmethod
+    def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n"
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     def _path(self, owner_user_id: str, code: str, version: str) -> Path:
         safe_owner = re.sub(r"[^A-Za-z0-9_-]", "_", owner_user_id)
@@ -129,10 +166,7 @@ class DeclarativeStrategyStore:
     def _save_index(self, owner_user_id: str, index: dict[str, Any]) -> None:
         path = self._index_path(owner_user_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        self._write_atomic(path, index)
 
     def validate(self, payload: dict[str, Any]) -> dict[str, Any]:
         spec = validate_declarative_payload(payload)
@@ -153,13 +187,20 @@ class DeclarativeStrategyStore:
     ) -> DeclarativeStrategyRecord:
         """Create a versioned definition.
 
-        Versions are immutable once referenced by runs. Unreferenced versions may only
-        be rewritten when ``allow_overwrite=True``; public create/new-version APIs keep
-        this False so product writes always go through explicit new versions.
+        Version identity is content-addressed by owner/code/version and is strictly
+        immutable from creation. ``allow_overwrite`` is retained only to reject legacy
+        callers explicitly rather than silently changing behavior.
         """
 
         owner = str(owner_user_id)
         spec = validate_declarative_payload(payload)
+        builtin_codes = {definition.code for definition in list_strategies()}
+        if spec.definition.code in builtin_codes:
+            raise DeclarativeStoreError(
+                f"declarative strategy code conflicts with builtin strategy: {spec.definition.code}"
+            )
+        if allow_overwrite:
+            raise DeclarativeStoreError("declarative strategy versions are strictly immutable")
         definition = spec.to_dict()
         # freeze exact definition content
         record = DeclarativeStrategyRecord(
@@ -173,41 +214,12 @@ class DeclarativeStrategyStore:
             created_at=_now(),
         )
         path = self._path(owner, record.code, record.version)
-        with self._lock:
+        with self._exclusive():
             if path.exists():
-                existing = DeclarativeStrategyRecord.from_dict(
-                    json.loads(path.read_text(encoding="utf-8"))
+                raise DeclarativeStoreError(
+                    f"version already exists and is immutable: {record.code}@{record.version}"
                 )
-                if existing.owner_user_id != owner:
-                    raise DeclarativeStoreError("owner mismatch")
-                if existing.referenced_by_runs:
-                    raise DeclarativeStoreError(
-                        f"version already referenced by runs and cannot be overwritten: "
-                        f"{record.code}@{record.version}"
-                    )
-                if not allow_overwrite:
-                    raise DeclarativeStoreError(
-                        f"version already exists: {record.code}@{record.version}"
-                    )
-                # preserve identity metadata; never mutate referenced history (guarded above)
-                record = DeclarativeStrategyRecord(
-                    code=existing.code,
-                    version=existing.version,
-                    owner_user_id=existing.owner_user_id,
-                    name=spec.definition.name,
-                    description=spec.definition.description,
-                    status=existing.status if existing.status == "active" else "active",
-                    definition=definition,
-                    created_at=existing.created_at,
-                    archived_at=None,
-                    referenced_by_runs=False,
-                )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(record.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
-                + "\n",
-                encoding="utf-8",
-            )
+            self._write_atomic(path, record.to_dict())
             index = self._load_index(owner)
             items = [
                 item
@@ -225,7 +237,7 @@ class DeclarativeStrategyStore:
                     "created_at": record.created_at,
                 }
             )
-            items.sort(key=lambda x: (x["code"], x["version"]))
+            items.sort(key=lambda x: (x["code"], semver_key(str(x["version"]))))
             index["items"] = items
             self._save_index(owner, index)
         return record
@@ -249,38 +261,23 @@ class DeclarativeStrategyStore:
         code: str,
         version: str,
         *,
-        owner_user_id: str | UUID | None = None,
+        owner_user_id: str | UUID = "local-user",
     ) -> DeclarativeStrategyRecord:
-        if owner_user_id is not None:
-            path = self._path(str(owner_user_id), code, version)
-            if not path.exists():
-                raise DeclarativeStoreError(f"strategy not found: {code}@{version}")
-            return DeclarativeStrategyRecord.from_dict(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
-        # scan all owners
-        for owner_dir in self.root.iterdir() if self.root.exists() else []:
-            if not owner_dir.is_dir():
-                continue
-            path = owner_dir / f"{code}@{version}.json"
-            if path.exists():
-                return DeclarativeStrategyRecord.from_dict(
-                    json.loads(path.read_text(encoding="utf-8"))
-                )
-        raise DeclarativeStoreError(f"strategy not found: {code}@{version}")
+        path = self._path(str(owner_user_id), code, version)
+        if not path.exists():
+            raise DeclarativeStoreError(f"strategy not found: {code}@{version}")
+        return DeclarativeStrategyRecord.from_dict(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
 
     def list(
         self,
         *,
-        owner_user_id: str | UUID | None = None,
+        owner_user_id: str | UUID = "local-user",
         include_archived: bool = False,
     ) -> list[DeclarativeStrategyRecord]:
         records: list[DeclarativeStrategyRecord] = []
-        roots: list[Path] = []
-        if owner_user_id is not None:
-            roots = [self.root / re.sub(r"[^A-Za-z0-9_-]", "_", str(owner_user_id))]
-        elif self.root.exists():
-            roots = [p for p in self.root.iterdir() if p.is_dir()]
+        roots = [self.root / re.sub(r"[^A-Za-z0-9_-]", "_", str(owner_user_id))]
         for owner_dir in roots:
             if not owner_dir.exists():
                 continue
@@ -291,7 +288,7 @@ class DeclarativeStrategyStore:
                 if not include_archived and record.status in {"archived", "disabled"}:
                     continue
                 records.append(record)
-        records.sort(key=lambda r: (r.code, r.version))
+        records.sort(key=lambda r: (r.code, semver_key(r.version)))
         return records
 
     def set_status(
@@ -308,7 +305,7 @@ class DeclarativeStrategyStore:
         path = self._path(owner, code, version)
         if not path.exists():
             raise DeclarativeStoreError(f"strategy not found: {code}@{version}")
-        with self._lock:
+        with self._exclusive():
             record = DeclarativeStrategyRecord.from_dict(
                 json.loads(path.read_text(encoding="utf-8"))
             )
@@ -329,11 +326,7 @@ class DeclarativeStrategyStore:
                 archived_at=_now() if status in {"archived", "disabled"} else None,
                 referenced_by_runs=record.referenced_by_runs,
             )
-            path.write_text(
-                json.dumps(updated.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
-                + "\n",
-                encoding="utf-8",
-            )
+            self._write_atomic(path, updated.to_dict())
             index = self._load_index(owner)
             for item in index.get("items", []):
                 if item.get("code") == code and item.get("version") == version:
@@ -345,8 +338,8 @@ class DeclarativeStrategyStore:
         owner = str(owner_user_id)
         path = self._path(owner, code, version)
         if not path.exists():
-            return
-        with self._lock:
+            raise DeclarativeStoreError(f"strategy not found: {code}@{version}")
+        with self._exclusive():
             record = DeclarativeStrategyRecord.from_dict(
                 json.loads(path.read_text(encoding="utf-8"))
             )
@@ -355,11 +348,7 @@ class DeclarativeStrategyStore:
             updated = DeclarativeStrategyRecord(
                 **{**record.to_dict(), "referenced_by_runs": True}
             )
-            path.write_text(
-                json.dumps(updated.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
-                + "\n",
-                encoding="utf-8",
-            )
+            self._write_atomic(path, updated.to_dict())
 
 
 _store: DeclarativeStrategyStore | None = None

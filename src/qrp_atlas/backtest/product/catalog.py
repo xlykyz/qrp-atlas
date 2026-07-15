@@ -9,6 +9,7 @@ from qrp_atlas.indicators.parameterized import CALCULATION_REGISTRY
 from qrp_atlas.indicators.cross_section import list_factors
 from qrp_atlas.strategies import get_strategy, list_strategies
 from qrp_atlas.strategies.registry import StrategyNotFoundError
+from qrp_atlas.strategies.declarative.store import semver_key
 
 from .schemas import IndicatorCatalogItem, ParameterSpecDTO, StrategyCatalogItem
 
@@ -257,7 +258,7 @@ def _declarative_to_catalog_item(record: Any) -> StrategyCatalogItem:
         required_fields=list(definition.get("required_fields") or []),
         required_indicators=list(definition.get("required_indicators") or []),
         parameter_schema=schema,
-        indicator_requests=[],
+        indicator_requests=list(definition.get("indicator_requests") or []),
         product_supported=True,
         requires_historical_universe=False,
         supported_universe_modes=["tickers"],
@@ -266,7 +267,9 @@ def _declarative_to_catalog_item(record: Any) -> StrategyCatalogItem:
     )
 
 
-def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogItem]:
+def list_strategy_catalog(
+    *, product_only: bool = True, owner_user_id: str = "local-user"
+) -> list[StrategyCatalogItem]:
     """List strategy catalog items from the live registry + user declarative store."""
 
     items = [_strategy_to_catalog_item(definition) for definition in list_strategies()]
@@ -276,7 +279,9 @@ def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogI
     try:
         from qrp_atlas.strategies.declarative.store import get_declarative_store
 
-        for record in get_declarative_store().list(include_archived=False):
+        for record in get_declarative_store().list(
+            owner_user_id=owner_user_id, include_archived=False
+        ):
             items.append(_declarative_to_catalog_item(record))
     except Exception:
         # Catalog must remain available even if store is empty/unavailable.
@@ -285,10 +290,12 @@ def list_strategy_catalog(*, product_only: bool = True) -> list[StrategyCatalogI
     dedup: dict[tuple[str, str], StrategyCatalogItem] = {}
     for item in items:
         dedup[(item.code, item.version)] = item
-    return sorted(dedup.values(), key=lambda x: (x.code, x.version))
+    return sorted(dedup.values(), key=lambda x: (x.code, semver_key(x.version)))
 
 
-def get_strategy_catalog_item(code: str, version: str | None = None) -> StrategyCatalogItem:
+def get_strategy_catalog_item(
+    code: str, version: str | None = None, *, owner_user_id: str = "local-user"
+) -> StrategyCatalogItem:
     try:
         strategy = get_strategy(code, version)
         return _strategy_to_catalog_item(strategy.definition)
@@ -298,16 +305,18 @@ def get_strategy_catalog_item(code: str, version: str | None = None) -> Strategy
         store = get_declarative_store()
         try:
             if version:
-                record = store.get(code, version)
+                record = store.get(code, version, owner_user_id=owner_user_id)
             else:
                 records = [
                     r
-                    for r in store.list(include_archived=False)
+                    for r in store.list(
+                        owner_user_id=owner_user_id, include_archived=False
+                    )
                     if r.code == code and r.status == "active"
                 ]
                 if not records:
                     raise KeyError(str(exc)) from exc
-                record = sorted(records, key=lambda r: r.version)[-1]
+                record = sorted(records, key=lambda r: semver_key(r.version))[-1]
         except DeclarativeStoreError as store_exc:
             raise KeyError(str(store_exc)) from store_exc
         if record.status in {"archived", "disabled"}:
