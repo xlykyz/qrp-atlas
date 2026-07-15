@@ -48,16 +48,22 @@ from qrp_atlas.contracts import (
     BPS,
     CIRC_MV,
     CLOSE,
+    DV_TTM,
     FLOAT_CAP,
     HIGH,
     LOW,
     MARKET_CAP,
+    PE_TTM,
+    PS_TTM,
     ROE,
     TICKER,
     TOTAL_MV,
     TRADE_DATE,
     TURNOVER,
+    TURNOVER_RATE,
+    TURNOVER_RATE_F,
     VOLUME,
+    VOLUME_RATIO,
 )
 from qrp_atlas.indicators.cross_section.conventions import (
     CrossSectionFrameError,
@@ -450,6 +456,94 @@ def compute_log_market_cap_factor(
         how="left",
     )
     out[output_column] = _as_finite_series(out[output_column])
+    return sort_cross_section_frame(out)
+
+
+_DAILY_BASIC_FACTOR_SOURCES: dict[str, tuple[str, str]] = {
+    "earnings_yield_ttm": (PE_TTM, "nonzero_reciprocal"),
+    "sales_to_price_ttm": (PS_TTM, "positive_reciprocal"),
+    "dividend_yield_ttm": (DV_TTM, "nonnegative_percent"),
+    "turnover_rate": (TURNOVER_RATE, "nonnegative_raw"),
+    "free_float_turnover_rate": (TURNOVER_RATE_F, "nonnegative_raw"),
+    "volume_ratio": (VOLUME_RATIO, "nonnegative_raw"),
+}
+
+
+def compute_daily_basic_factor(
+    daily_basic_panel: pd.DataFrame,
+    *,
+    universe: pd.DataFrame,
+    factor_code: str,
+    output_column: str | None = None,
+) -> pd.DataFrame:
+    """Transform one already-prepared same-day daily-basic field.
+
+    This pure adapter never queries storage, selects financial-report versions,
+    fills missing dates, or substitutes adjacent observations. Turnover fields
+    retain the percentage-point unit defined by the daily-basic contract.
+    """
+    try:
+        source_field, transform = _DAILY_BASIC_FACTOR_SOURCES[factor_code]
+    except KeyError as exc:
+        raise UnknownFactorError(
+            f"unknown daily-basic factor code: {factor_code}"
+        ) from exc
+    output = output_column or factor_code
+
+    uni = ensure_cross_section_frame(universe, enforce_primary_key=True)
+    if uni.empty:
+        return empty_cross_section_frame([output])
+
+    panel = _normalize_panel_keys(
+        daily_basic_panel,
+        label="daily_basic_panel",
+        required_value_columns=[source_field],
+    )
+    if panel.empty:
+        return _attach_nan_column(uni, output)
+
+    max_date = uni[TRADE_DATE].max()
+    needed_assets = set(uni[ASSET_ID].tolist())
+    panel = panel.loc[
+        (panel[TRADE_DATE] <= max_date) & panel[ASSET_ID].isin(needed_assets)
+    ].copy()
+    if panel.empty:
+        return _attach_nan_column(uni, output)
+
+    raw = _as_finite_series(panel[source_field])
+    if transform == "nonzero_reciprocal":
+        values = raw.where(raw != 0).map(
+            lambda value: 1.0 / float(value) if pd.notna(value) else math.nan
+        )
+    elif transform == "positive_reciprocal":
+        values = raw.where(raw > 0).map(
+            lambda value: 1.0 / float(value) if pd.notna(value) else math.nan
+        )
+    elif transform == "nonnegative_percent":
+        values = raw.where(raw >= 0).div(100.0)
+    elif transform == "nonnegative_raw":
+        values = raw.where(raw >= 0)
+    else:
+        raise FactorError(f"unsupported daily-basic transform: {transform!r}")
+
+    computed = pd.DataFrame(
+        {
+            TRADE_DATE: panel[TRADE_DATE].to_numpy(),
+            ASSET_ID: panel[ASSET_ID].to_numpy(),
+            output: values.to_numpy(),
+        }
+    )
+    computed = ensure_cross_section_frame(
+        computed,
+        feature_columns=[output],
+        enforce_primary_key=True,
+    )
+    out = uni[[TRADE_DATE, ASSET_ID]].merge(
+        computed[[TRADE_DATE, ASSET_ID, output]],
+        on=[TRADE_DATE, ASSET_ID],
+        how="left",
+    )
+    out[output] = _as_finite_series(out[output])
     return sort_cross_section_frame(out)
 
 
@@ -1005,6 +1099,109 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
             "NaN for missing, non-finite, zero or negative market cap; never zero-filled."
         ),
     ),
+    "earnings_yield_ttm": FactorDefinition(
+        code="earnings_yield_ttm",
+        name="Trailing earnings yield",
+        family="fundamental",
+        description="Reciprocal of same-day nonzero PE_TTM from the prepared daily-basic panel.",
+        formula="1 / PE_TTM[T], when PE_TTM[T] != 0",
+        direction="higher = greater trailing earnings per unit of price; negative values retain loss information",
+        time_semantics=(
+            "Consumes only the prepared daily-basic row for trade_date T; known after "
+            "the T close and intended for T+1 or later use. No adjacent-date substitution."
+        ),
+        inputs=(PE_TTM,),
+        parameter_schema={},
+        default_output="earnings_yield_ttm",
+        nan_semantics="NaN when PE_TTM is missing, non-finite, or zero; negative PE remains valid.",
+    ),
+    "sales_to_price_ttm": FactorDefinition(
+        code="sales_to_price_ttm",
+        name="Trailing sales-to-price",
+        family="fundamental",
+        description="Reciprocal of same-day positive PS_TTM from the prepared daily-basic panel.",
+        formula="1 / PS_TTM[T], only when PS_TTM[T] > 0",
+        direction="higher = more trailing sales per unit of price; not a trade instruction",
+        time_semantics=(
+            "Consumes only the prepared daily-basic row for trade_date T; known after "
+            "the T close and intended for T+1 or later use. No adjacent-date substitution."
+        ),
+        inputs=(PS_TTM,),
+        parameter_schema={},
+        default_output="sales_to_price_ttm",
+        nan_semantics="NaN when PS_TTM is missing, non-finite, zero, or negative.",
+    ),
+    "dividend_yield_ttm": FactorDefinition(
+        code="dividend_yield_ttm",
+        name="Trailing dividend yield",
+        family="fundamental",
+        description="Same-day DV_TTM converted from percent to a decimal ratio.",
+        formula="DV_TTM[T] / 100",
+        direction="higher = larger trailing cash-dividend rate; not a trade instruction",
+        time_semantics=(
+            "Consumes only the prepared daily-basic row for trade_date T; known after "
+            "the T close and intended for T+1 or later use. No adjacent-date substitution."
+        ),
+        inputs=(DV_TTM,),
+        parameter_schema={},
+        default_output="dividend_yield_ttm",
+        nan_semantics=(
+            "NaN for missing, non-finite, or negative DV_TTM. Zero is a valid zero-yield "
+            "observation. Input percentage points are divided by 100."
+        ),
+    ),
+    "turnover_rate": FactorDefinition(
+        code="turnover_rate",
+        name="Daily turnover rate",
+        family="liquidity",
+        description="Same-day turnover_rate retained in the contract's percentage-point unit.",
+        formula="turnover_rate[T]",
+        direction="higher = more shares traded relative to outstanding shares",
+        time_semantics=(
+            "Consumes only the prepared daily-basic row for trade_date T; known after "
+            "the T close and intended for T+1 or later use. No rolling fill."
+        ),
+        inputs=(TURNOVER_RATE,),
+        parameter_schema={},
+        default_output="turnover_rate",
+        nan_semantics="NaN for missing, non-finite, or negative input. Zero is valid.",
+    ),
+    "free_float_turnover_rate": FactorDefinition(
+        code="free_float_turnover_rate",
+        name="Daily free-float turnover rate",
+        family="liquidity",
+        description="Same-day turnover_rate_f retained in its percentage-point unit.",
+        formula="turnover_rate_f[T]",
+        direction="higher = more shares traded relative to free-float shares",
+        time_semantics=(
+            "Consumes only the prepared daily-basic row for trade_date T; known after "
+            "the T close and intended for T+1 or later use. No rolling fill."
+        ),
+        inputs=(TURNOVER_RATE_F,),
+        parameter_schema={},
+        default_output="free_float_turnover_rate",
+        nan_semantics="NaN for missing, non-finite, or negative input. Zero is valid.",
+    ),
+    "volume_ratio": FactorDefinition(
+        code="volume_ratio",
+        name="Daily volume ratio",
+        family="liquidity",
+        description="Same-day prepared volume_ratio retained as its original multiple.",
+        formula="volume_ratio[T]",
+        direction="higher = current volume is larger relative to the source reference volume",
+        time_semantics=(
+            "Consumes only the already-computed daily-basic value for trade_date T; known "
+            "after the T close and intended for T+1 or later use. This module does not "
+            "recompute or fill the source's reference window."
+        ),
+        inputs=(VOLUME_RATIO,),
+        parameter_schema={},
+        default_output="volume_ratio",
+        nan_semantics=(
+            "NaN for missing, non-finite, or negative input. Zero is retained as a valid "
+            "raw multiple; the value is not divided by 100."
+        ),
+    ),
     "roe": FactorDefinition(
         code="roe",
         name="Return on equity (prepared PIT panel)",
@@ -1158,6 +1355,7 @@ def _compute_one_factor(
     prices: pd.DataFrame | None,
     size_panel: pd.DataFrame | None,
     financial_panel: pd.DataFrame | None,
+    daily_basic_panel: pd.DataFrame | None,
 ) -> pd.DataFrame:
     code = resolved.definition.code
     output = resolved.output_column
@@ -1272,15 +1470,29 @@ def _compute_one_factor(
             output_column=output,
         )
     if code == "log_market_cap":
-        panel = size_panel if size_panel is not None else prices
+        panel = size_panel
+        if panel is None:
+            panel = daily_basic_panel if daily_basic_panel is not None else prices
         if panel is None:
             raise FactorRequestError(
-                "log_market_cap requires a size_panel or prices panel with market-cap fields"
+                "log_market_cap requires a size_panel, daily_basic_panel, or prices "
+                "panel with market-cap fields"
             )
         return compute_log_market_cap_factor(
             panel,
             universe=universe,
             field=str(params["field"]),
+            output_column=output,
+        )
+    if code in _DAILY_BASIC_FACTOR_SOURCES:
+        if daily_basic_panel is None:
+            raise FactorRequestError(
+                f"{code} requires a prepared daily_basic_panel"
+            )
+        return compute_daily_basic_factor(
+            daily_basic_panel,
+            universe=universe,
+            factor_code=code,
             output_column=output,
         )
     if code == "roe":
@@ -1320,6 +1532,7 @@ def generate_factor_frame(
     prices: pd.DataFrame | None = None,
     size_panel: pd.DataFrame | None = None,
     financial_panel: pd.DataFrame | None = None,
+    daily_basic_panel: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Generate a unique, stable raw-factor frame for a historical universe.
 
@@ -1333,8 +1546,10 @@ def generate_factor_frame(
         financial_panel: prepared same-day financial fields with columns
             ``trade_date``, ``asset_id``, and ``roe`` / ``bps`` as needed.
             Build it with ``qrp_atlas.backtest.prepare_financial_factor_panel``
-            so that ROE and book-to-price share one PIT snapshot. This entry
-            point never queries DuckDB.
+            so that ROE and book-to-price share one PIT snapshot.
+        daily_basic_panel: caller-prepared daily-basic fields keyed by the same
+            ``trade_date`` and asset. Values are consumed only from that exact
+            date; this entry point never queries DuckDB or fills adjacent dates.
 
     Returns:
         DataFrame with ``trade_date``, ``asset_id`` and factor columns in the
@@ -1358,6 +1573,7 @@ def generate_factor_frame(
             prices=prices,
             size_panel=size_panel,
             financial_panel=financial_panel,
+            daily_basic_panel=daily_basic_panel,
         )
         frames.append(factor_frame[[TRADE_DATE, ASSET_ID, item.output_column]])
 
@@ -1385,6 +1601,7 @@ __all__ = [
     "ResolvedFactorRequest",
     "UnknownFactorError",
     "compute_book_to_price_factor",
+    "compute_daily_basic_factor",
     "compute_log_market_cap_factor",
     "compute_momentum_factor",
     "compute_roe_factor",

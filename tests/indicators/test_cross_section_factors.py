@@ -154,7 +154,10 @@ def test_list_and_get_factor_definitions() -> None:
         "average_turnover",
         "book_to_price",
         "distance_to_high",
+        "dividend_yield_ttm",
         "downside_volatility",
+        "earnings_yield_ttm",
+        "free_float_turnover_rate",
         "high_low_range_volatility",
         "intermediate_momentum",
         "log_market_cap",
@@ -165,10 +168,13 @@ def test_list_and_get_factor_definitions() -> None:
         "relative_volume",
         "roe",
         "rolling_max_drawdown",
+        "sales_to_price_ttm",
         "short_term_reversal",
         "trend_r_squared",
         "trend_slope",
         "turnover_change",
+        "turnover_rate",
+        "volume_ratio",
     ]
     momentum = get_factor_definition("momentum")
     assert "close[T]" in momentum.formula

@@ -44,6 +44,9 @@ EXPECTED_FACTOR_CODES = {
     "intermediate_momentum",
     "short_term_reversal",
     "distance_to_high",
+    "dividend_yield_ttm",
+    "earnings_yield_ttm",
+    "free_float_turnover_rate",
     "trend_slope",
     "trend_r_squared",
     "price_efficiency",
@@ -60,6 +63,9 @@ EXPECTED_FACTOR_CODES = {
     "log_market_cap",
     "roe",
     "book_to_price",
+    "sales_to_price_ttm",
+    "turnover_rate",
+    "volume_ratio",
 }
 
 
