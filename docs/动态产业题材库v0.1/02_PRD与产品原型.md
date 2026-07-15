@@ -71,11 +71,12 @@
 
 ```text
 候选 → 萌芽 → 活跃 → 加速 → 分歧 → 退潮 → 沉寂
-          ↑                         │       │
-          └──────── 复燃 ──────────┴───────┘
 ```
 
-状态由可解释指标和事件规则计算；人工可以覆盖展示状态，但覆盖必须有原因和有效期。
+- 状态由可解释指标和事件规则计算，并绑定 `theme_cycle`；
+- “复燃”不是状态回流，而是开启新的题材周期；
+- 归档/合并/错误实体属于 `record_status`，不进入生命周期状态机；
+- 人工可以覆盖展示状态，但覆盖必须有原因和有效期。
 
 ## 4. 信息架构
 
@@ -94,6 +95,7 @@
 │       ├── 成员
 │       ├── 证据
 │       ├── 时间轴
+│       ├── 历史周期
 │       └── 版本与审计
 ├── 产业图谱
 │   ├── 产业链模板
@@ -104,7 +106,8 @@
 │   └── 运行状态
 └── 审核队列
     ├── 新题材候选
-    ├── 成员增删 / 角色变化
+    ├── 成员增删 / 关系状态变化
+    ├── 产业关系（节点 / 边 / 公司产业关系 / 题材产业影响）
     ├── 合并 / 分裂 / 别名
     └── Agent 提案
 ```
@@ -170,6 +173,12 @@
 - 显示变更主体（source/rule/human/agent）、原因和关联运行批次。
 
 ### 5.3 产业图谱
+
+产业图谱维护的是可独立版本化的业务关系，不是题材成员的附属标签：
+
+- 公司 ↔ 产业环节：`asset_chain_relation`（产品、产能、客户、供应）；
+- 题材 ↔ 产业环节：`theme_chain_link`（本轮题材影响哪些环节，可绑定 `theme_cycle`）；
+- 题材 ↔ 公司：`theme_membership` 仅保存证据关系与 `relation_status`，相关度/角色来自派生观察。
 
 MVP 不做自由拖拽的大画布，采用“链路列 + 关系表”以保证扫描效率：
 
@@ -262,17 +271,28 @@ MVP 不做自由拖拽的大画布，采用“链路列 + 关系表”以保证�
 
 即使当前 QRP 是个人产品，也建议保留角色语义，避免以后把人工操作与自动流程混在同一身份下。
 
+对象边界：
+
+- 全局 canonical：题材、taxonomy/产业关系、已批准证据与标准成员事实；
+- 用户私有：研究笔记、订阅、未提交提案、个人审核草稿、Agent run（均带 `owner_id`）；
+- 受控共享：已提交提案、review task、canonical commit。
+
 ## 10. API 产品契约草案
 
 ```text
 GET  /api/themes?as_of=&state=&sort=&query=
 GET  /api/themes/{theme_id}?as_of=
 GET  /api/themes/{theme_id}/metrics?start=&end=&version=
-GET  /api/themes/{theme_id}/members?as_of=&role=&evidence_status=
+GET  /api/themes/{theme_id}/members?as_of=&role=&evidence_status=&mode=strict_effective|observed_as_of
+GET  /api/themes/{theme_id}/cycles
+GET  /api/themes/{theme_id}/chain-links?as_of=&cycle_id=
 GET  /api/themes/{theme_id}/events?start=&end=&type=
 GET  /api/themes/{theme_id}/versions?from=&to=
+GET  /api/chain/nodes?as_of=
+GET  /api/assets/{asset_id}/chain-relations?as_of=
 GET  /api/evidence/{evidence_id}
 POST /api/theme-proposals
+POST /api/chain-proposals
 POST /api/theme-proposals/{id}/review
 GET  /api/monitor/alerts?status=&severity=
 POST /api/monitor/subscriptions
@@ -330,14 +350,16 @@ GET  /api/agent/research-runs/{run_id}
 → 每条关键主张可跳转证据
 ```
 
-### 场景 B：成员审核
+### 场景 B：成员与产业关系审核
 
 ```text
-供应商新增成员
-→ 系统生成候选关系而非直接认定
+供应商新增成员 / 公告披露产品环节
+→ 系统分别生成 theme_membership 与 asset_chain_relation 候选
+→ 如本轮题材影响该环节，另生成 theme_chain_link 提案
 → 规则/Agent 找到支持证据与一条反证
-→ Reviewer 查看差异并批准为“观察成员”
-→ 新版本从批准后的 available_at 起生效
+→ Reviewer 在 owner 隔离的审核队列中查看差异
+→ 批准后写入 canonical；相关度/角色仅作为 derived 观察重算
+→ 新版本从批准后的 available_at / available_trade_date 起生效
 ```
 
 ### 场景 C：历史回放

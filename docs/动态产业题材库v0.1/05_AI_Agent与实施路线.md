@@ -30,6 +30,7 @@ Agent 不负责：
 5. **显式未知与冲突**：无证据返回 `unknown`；相反证据并列，不强行选边。
 6. **最小权限和预算**：每类任务有工具白名单、最大轮次、最大文档数和成本上限。
 7. **可关闭**：Agent 故障或停用时，数据、指标、状态机、告警和人工审核继续工作。
+8. **owner / workspace 隔离**：`agent_run`、未提交 `proposal`、研究笔记属于用户私有对象，必须带 `owner_id`；Agent 不得跨用户读取私有笔记或私有提案。
 
 ## 3. 架构
 
@@ -58,10 +59,10 @@ Agent 不负责：
 | 工具 | 作用 | 关键限制 |
 | --- | --- | --- |
 | `search_themes` | 查题材、别名和供应商映射 | 最多返回 20 个候选，不做自动合并 |
-| `get_theme_as_of` | 获取某时点题材定义/状态 | 必须传 `as_of` |
-| `get_theme_members` | 获取成员、角色、双轴分数 | 返回 coverage 和版本 |
-| `get_theme_metrics` | 获取结构化指标与贡献项 | Agent 不自行重算 |
-| `get_theme_changes` | 比较两个版本/时点 | 返回标准 diff |
+| `get_theme_as_of` | 获取某时点题材定义/状态 | 必须传 `as_of`，并声明 `strict_effective` 或 `observed_as_of` |
+| `get_theme_members` | 获取成员、角色、双轴分数 | 返回 coverage、版本与 `effective_time_quality` |
+| `get_theme_metrics` | 获取结构化指标与贡献项 | Agent 不自行重算；指标绑定 `available_trade_date` |
+| `get_theme_changes` | 比较两个版本/时点或两个 `theme_cycle` | 返回标准 diff |
 | `search_documents` | 按实体、时间、来源级别检索 | 来源白名单、权限过滤 |
 | `get_document_excerpt` | 读取允许的证据片段 | 返回定位、授权标签和时间 |
 | `get_claim_evidence` | 获取主张的支持/反对证据 | 保留独立来源分组 |
@@ -70,17 +71,27 @@ Agent 不负责：
 
 ### 4.2 写入型工具
 
-写入型工具只写工作区对象：
+写入型工具只写工作区对象，并继承当前用户 `owner_id`：
 
 | 工具 | 允许写入 | 禁止写入 |
 | --- | --- | --- |
 | `create_research_note` | 用户私有研究笔记 | canonical fact |
 | `create_theme_proposal` | 新题材/定义/别名提案 | 正式 theme version |
-| `create_membership_proposal` | 成员、角色、状态提案 | 正式 membership |
+| `create_membership_proposal` | 题材成员事实关系提案 | 正式 membership、相关度分数、角色观察 |
+| `create_chain_node_proposal` | 产业节点提案 | 正式 chain_node |
+| `create_chain_edge_proposal` | 产业边提案 | 正式 chain_edge |
+| `create_asset_chain_relation_proposal` | 公司—产业环节关系提案 | 正式 asset_chain_relation |
+| `create_theme_chain_link_proposal` | 题材—产业环节影响提案 | 正式 theme_chain_link |
 | `request_more_evidence` | 审核任务 | 自动采集白名单外来源 |
 | `create_monitor_rule_draft` | 未启用的订阅规则草案 | 自动启用通知 |
 
-每次工具调用记录 agent run、参数摘要、结果 ID、耗时和错误。敏感/授权内容不进入模型日志的自由文本字段。
+边界：
+
+- 未提交提案 / 研究笔记 / `agent_run`：`visibility=private`，仅 `owner_id` 可见；
+- 用户提交后提案进入受控共享审核队列，不再仅靠 `requester_id` 间接隔离；
+- 产业库维护必须走独立提案工具，禁止把公司—产业关系塞进 `theme_membership` 提案。
+
+每次工具调用记录 `agent_run`（含 `owner_id`）、参数摘要、结果 ID、耗时和错误。敏感/授权内容不进入模型日志的自由文本字段。
 
 ## 5. 标准任务
 
@@ -163,12 +174,13 @@ Agent 只回答：
 提交前执行确定性检查：
 
 1. citation ID 存在且属于本次允许范围；
-2. 引用 `available_at <= as_of`；
+2. 引用 `available_at <= as_of` 且 `available_trade_date <= business_date`；
 3. 引用片段确实包含实体/数值/关系关键词；
 4. 数值和单位与来源一致；
 5. 多来源是否属于同一转载独立性组；
 6. 输出中的事实句是否都有引用或 observation ID；
-7. 授权标签是否允许当前展示范围。
+7. 授权标签是否允许当前展示范围；
+8. 不得读取其他 `owner_id` 的私有笔记、私有提案或 `agent_run`。
 
 验证失败时，不生成 proposal；结果以草稿返回并标出失败主张。
 
@@ -220,74 +232,85 @@ Agent 只回答：
 - Agent run、模型、提示、工具策略和输入版本全部审计；
 - 模型升级必须跑固定评测集和回放对比；
 - 提案自动过期，避免旧结论长期占用审核队列；
-- 用户笔记与 canonical knowledge 分区存储。
+- 用户笔记、未提交提案与 `agent_run` 按 `owner_id` 与 canonical knowledge 分区存储；
+- 审核队列可见性按 Researcher / Reviewer / Maintainer / Admin 角色定义，不依赖 `requester_id` 间接隔离。
 
-## 10. 实施路线
+## 10. 实施路线与版本归属
 
-### Phase 0：口径与金标准
+本能力**不属于当前 QRP v1.0 蓝图主线**。返修后的文档继续作为 Open 预研 PR，不进入 v1.0 合并队列。
+
+| 版本 | 范围 | 说明 |
+| --- | --- | --- |
+| v1.0 | 不实施 | 已封版主线不并入产业-题材库 |
+| v1.1 | 数据基座 + 日频闭环 | contracts、PIT、成员/产业事实、指标、生命周期、Web 闭环 |
+| v1.1 后段或 v2.0 入口 | Agent 副驾驶 | 受控工具、引用校验、提案审核；不自动写标准事实 |
+| v2.0 | 盘中增强 | 竞价/分钟、provisional 状态、实时告警与产业高频 |
+
+### Phase 0：口径与金标准（v1.1 入口）
 
 交付：
 
 - 对象定义、枚举、来源等级、时间契约封板；
-- 20～30 个种子题材及人工版本；
-- 200～300 条成员金标准；
+- 行业 / 产业链 / 题材分模与 owner 边界确认；
+- 20～30 个种子题材、`theme_cycle` 与人工版本；
+- 200～300 条成员金标准 + 独立 `asset_chain_relation` 金标准；
 - 数据授权与存储边界清单；
 - 生命周期与分数回放 notebook/报告（实现时可放研究目录，不在本任务创建）。
 
-退出条件：行业/产业链/题材边界无重大分歧；PIT 查询示例通过；关键数据源可用。
+退出条件：行业/产业链/题材边界无重大分歧；`strict_effective` / `observed_as_of` 示例通过；关键数据源可用。
 
-### Phase 1：日频数据基座
+### Phase 1：日频数据基座（v1.1）
 
 建议任务包：
 
-1. contracts：来源、题材、成员、证据、版本和时间字段；
+1. contracts：来源、题材、`theme_cycle`、成员事实、产业关系、证据、版本和时间字段；
 2. pipeline：DC/KP/THS adapter、原始快照、schema 契约和幂等；
-3. canonicalization：供应商映射、别名、日快照差分；
-4. PIT query：题材/成员/证据 as-of 服务；
+3. canonicalization：供应商映射、别名、日快照差分、产业关系提案提交器；
+4. PIT query：题材/成员/产业关系/证据 as-of 服务，含 `available_trade_date`；
 5. quality：水位、覆盖率、批次隔离和版本 manifest。
 
-退出条件：至少 60 个交易日可回放，或产品明确展示真实历史起点；未来证据泄漏测试为 0。
+退出条件：至少 60 个交易日可回放，或产品明确展示真实历史起点；三类未来函数测试为 0 泄漏。
 
-### Phase 2：指标与生命周期
+### Phase 2：指标与生命周期（v1.1）
 
 建议任务包：
 
 1. 题材市场面板准备；
 2. 一级指标与 coverage；
-3. 成员双轴相关度；
-4. 状态机、滞回和人工覆盖；
+3. 成员双轴相关度与角色观察（derived）；
+4. 状态机、滞回、人工覆盖与 `theme_cycle`；
 5. 变化事件、告警聚类和盘后摘要；
 6. 60 日种子题材回放与阈值校准。
 
 退出条件：所有分数可解释到组件；断源不制造批量退出；状态迁移人工抽检达标。
 
-### Phase 3：Web 产品闭环
+### Phase 3：Web 产品闭环（v1.1）
 
 建议任务包：
 
 1. 题材目录/详情 API；
 2. 今日总览与题材详情；
-3. 成员证据、时间轴和版本差异；
+3. 成员证据、产业关系审核入口、时间轴、历史周期切换与版本差异；
 4. 订阅、告警流和运行状态；
 5. 审核队列、提案差异和决策审计；
 6. 响应式与可访问性、性能和空/错/缺失状态。
 
 退出条件：PRD 四个 MVP 场景可重复演示，历史日页面与 API 输出一致。
 
-### Phase 4：Agent 副驾驶
+### Phase 4：Agent 副驾驶（v1.1 后段 / v2.0 入口）
 
 建议任务包：
 
-1. 只读检索/指标/证据工具；
-2. 题材周报和成员验证标准任务；
+1. 只读检索/指标/证据/产业上下文工具；
+2. 题材周报、成员验证与产业关系验证标准任务；
 3. citation verifier 与 JSON Schema；
-4. proposal 写入工具和人工审核；
+4. 题材/成员/产业关系 proposal 写入工具和人工审核；
 5. 金标准离线评测、成本/延迟/审计；
 6. 模型切换和 Agent 全局关闭开关。
 
 退出条件：PIT 泄漏为 0；引用完整率 100%；核心流程在 Agent 关闭后仍正常。
 
-### Phase 5：盘中增强
+### Phase 5：盘中增强（v2.0）
 
 在授权、频率、SLA 和日频质量稳定后再进入：
 
@@ -325,7 +348,11 @@ Agent 只回答：
 ### 数据
 
 - [ ] 来源快照、canonical fact、派生指标分层；
-- [ ] 题材/成员/证据支持 as-of 和双时态；
+- [ ] 题材/成员/产业关系/证据支持 as-of 和双时态；
+- [ ] `asset_chain_relation` / `theme_chain_link` 独立于 `theme_membership`；
+- [ ] `theme_membership` 不含相关度分数与 core/follower 角色字段；
+- [ ] `theme_cycle` 支持本轮/上轮比较，生命周期不含 reactivated/archived；
+- [ ] 私有对象带 `owner_id`，审核队列按角色可见；
 - [ ] 供应商成员不直接成为 QRP 核心成员；
 - [ ] 任何分数和状态可回到 input manifest；
 - [ ] 断源/补数/修订不会静默改写历史。
@@ -336,6 +363,8 @@ Agent 只回答：
 - [ ] 每个外部主张逐条引用；
 - [ ] 无证据明确返回未知；
 - [ ] 只创建提案，不能批准；
+- [ ] 具备产业节点/边/公司产业关系/题材产业影响提案工具；
+- [ ] `agent_run` 与未提交提案带 `owner_id`，不可跨用户读取；
 - [ ] PIT、引用、Schema 和误合并评测达门槛；
 - [ ] Agent 关闭后核心产品可用。
 

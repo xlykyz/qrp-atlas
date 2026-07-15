@@ -164,7 +164,9 @@
     }
     .title-line { display: flex; align-items: flex-start; gap: 10px; }
     .title-line h1 { margin: 0; font-size: 21px; line-height: 30px; }
-    .title-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; }
+    .title-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+    .cycle-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+    .cycle-switch select { height: 32px; border: 1px solid var(--line-strong); border-radius: 5px; padding: 0 8px; background: #fff; max-width: min(320px, 58vw); }
     .badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 7px; border-radius: 4px; font-size: 12px; font-weight: 650; }
     .badge.active { background: var(--red-soft); color: var(--red); }
     .badge.emerging { background: var(--amber-soft); color: var(--amber); }
@@ -354,6 +356,13 @@
           <h1 id="themeTitle">人形机器人</h1><span class="badge active" id="stateBadge">加速</span>
           <div class="title-actions">
             <button class="icon-button" id="watchButton" title="订阅题材" aria-label="订阅题材">☆</button>
+            <label class="cycle-switch" for="cycleSwitch">theme_cycle
+              <select id="cycleSwitch" aria-label="theme_cycle 历史周期切换">
+                <option value="c3" selected>本轮 · theme_cycle #3（2026-06-20 起）</option>
+                <option value="c2">上一轮 · theme_cycle #2（2025-11-08 ~ 2026-02-14）</option>
+                <option value="c1">更早 · theme_cycle #1（2024-03-12 ~ 2024-07-01）</option>
+              </select>
+            </label>
             <button class="action" id="compareButton">版本比较</button>
           </div>
         </div>
@@ -438,6 +447,11 @@
 
       <section class="panel" id="panel-evidence">
         <div class="evidence-list">
+          <article class="evidence-item" data-review data-kind="chain">
+            <div class="evidence-top"><span class="badge emerging">产业关系审核</span><strong>示例精工 · 丝杠产能</strong><time>2026-07-15 09:40</time></div>
+            <p>提案将“示例精工 → 丝杠”写入独立 asset_chain_relation，并新增本轮 theme_chain_link（绑定 theme_cycle #3）；不直接改写题材成员事实。证据来自公告产品定点，不推断收入占比。</p>
+            <footer><span>P0 公司公告</span><span>chain_node + asset_relation</span><button class="action primary review-action">批准产业关系</button><button class="action danger review-action">要求补证</button></footer>
+          </article>
           <article class="evidence-item" data-review>
             <div class="evidence-top"><span class="badge emerging">待审核</span><strong>研究科技 · 触觉传感</strong><time>2026-07-15 10:08</time></div>
             <p>公司在互动回复中说明相关传感产品正在客户验证阶段；当前未披露订单金额和收入占比。Agent 建议先加入“观察成员”，业务相关度区间 55～70。</p>
@@ -537,6 +551,7 @@
 
     $('#watchButton').addEventListener('click', (event) => { const watched = event.currentTarget.textContent === '★'; event.currentTarget.textContent = watched ? '☆' : '★'; toast(watched ? '已取消订阅' : '已加入订阅'); });
     $('#compareButton').addEventListener('click', () => { $$('.tab').find(t => t.dataset.tab === 'versions').click(); toast('已打开版本时间线'); });
+  $('#cycleSwitch')?.addEventListener('change', (e) => toast(`已切换到 ${e.target.selectedOptions[0].textContent}`));
     $$('.review-action').forEach(button => button.addEventListener('click', () => { const item = button.closest('[data-review]'); item.querySelector('.badge').textContent = button.textContent === '批准观察' ? '已批准' : '待补证'; item.querySelector('.badge').className = `badge ${button.textContent === '批准观察' ? 'active' : 'emerging'}`; button.parentElement.querySelectorAll('button').forEach(b => b.remove()); toast('审核决定已记录为原型状态'); }));
 
     const drawer = $('#agentDrawer');
