@@ -1,242 +1,132 @@
 # QRP v1.0 Agent 任务包
 
-> 本文件用于把产品蓝图拆成可独立交付本地 Agent 的开发任务。  
-> 每项任务开始前必须读取核心架构文档、本成果包和仓库最新代码。  
-> 任何任务不得新增顶级模块或推翻 v1.0 架构。
+> 任务 00 状态校准：2026-07-15。以下任务状态以 main 真实代码为准。
 
-## 通用执行要求
+## 一、使用规则
 
-每项任务均应：
+1. 一次只做一个任务或一个明确子任务；
+2. 不新增顶级模块，不重构已封版架构；
+3. 优先复用现有 contracts、indicators、strategies、backtest、results、api、web；
+4. 不复制已有事件、残差、横截面或组合回测逻辑；
+5. 每项任务补充测试，并运行完整 pytest、compileall、git diff check 和前端 build；
+6. 禁止 `--ignore`、`-k`、新增 skip/skipif 绕过失败；
+7. 禁止 rebase 和 force push；
+8. PR 保持未合并，等待云端验收；
+9. 完成后更新能力矩阵与验收清单。
 
-1. 审计实际代码后再修改；
-2. 保持向后兼容，除非任务明确声明迁移；
-3. 补充单元测试、场景测试和端到端测试；
-4. 运行完整 pytest、compileall 和 diff check；
-5. 更新对应文档和能力矩阵；
-6. 提交并推送；
-7. 汇报文件、接口、测试、提交哈希和未完成项。
+## 二、任务状态总表
 
----
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| 00 蓝图状态校准 | ✅ | 文档状态已与 main 对齐 |
+| 01 参数化指标与经典策略 | ✅ | 已完成 |
+| 02 组合账户与 A 股现实回测 | ✅ | 已完成 |
+| 03 PIT 数据与查询 | ✅ | 已完成 |
+| 04 横截面与多因子 | ✅ | 04-A～04-E 已完成 |
+| 05 事件研究链路 | ✅ | `earnings_forecast_event` + `event_drift_basic` 研究闭环完成 |
+| 06 残差与稳健性 | ✅ | 市场/行业残差与代表性稳健性完成 |
+| 07-A 真实回测产品主链 | ✅ | 已完成 |
+| 07-B1 横截面动量产品闭环 | ✅ | 已完成 |
+| 07-B2 事件产品闭环 | ⛔ | **当前剩余** |
+| 07-C 标准结果与分析封板 | ⛔ | **当前剩余** |
+| 07-D 声明式策略产品 | ⛔ | **当前剩余** |
+| 08 总体验收与发布 | ⛔ | 前置 07-B2/C/D |
 
-## 任务 01：参数化指标与经典单标的策略
+## 三、已完成任务（摘要，不再重做）
 
-### 目标
+### 任务 01～04
 
-- 通用参数化指标请求；
-- 去除 backtest runtime 对 MA5/System B 的扩展式硬编码；
-- 完成 time series momentum、dual SMA、Donchian、rolling z-score mean reversion；
-- 保持 system_b_basic 和旧回测接口兼容。
+见对应任务文档 07～15。
 
-### 验收
+### 任务 05
 
-- 同一指标支持多个窗口和 alias；
-- 指标按 ticker 独立计算；
-- 通道排除当前 bar；
-- 四个策略均可动态回测；
-- 完整测试通过。
+- 第一类标准事件：`earnings_forecast_event + EventFrame`；
+- 不以泛化 `corporate_event` 为当前唯一验收对象；
+- 事件指标、`event_drift_basic`、`run_event_drift_portfolio_backtest` 已完成。
 
-### 不做
+### 任务 06
 
-横截面、组合资金、因子、事件、short、多腿、前端。
+- 市场/行业残差研究与代表策略；
+- walk-forward、成本压力、参数敏感性、滚动表现、OOS 保存；
+- **验收口径**：代表性残差策略具备完整稳健性验证；
+- **延后 v1.1**：全策略通用稳健性/优化框架。
 
----
+### 任务 07-A / 07-B1
 
-## 任务 02：组合账户与 A 股现实回测
+- 真实 product task 主链；
+- 经典策略与 `cross_sectional_momentum_long_only` 产品闭环。
 
-### 目标
+## 四、剩余任务包
 
-在现有 `backtest` 内实现真实共享资金组合与 A 股成交约束。
+### 任务 07-B2：事件驱动真实产品闭环
 
-### 主要能力
+建议分支：`feature/event-product-loop`
 
-- cash / positions / orders / fills / snapshots；
-- target weights；
-- 调仓；
-- T+1；
-- 涨跌停和停牌；
-- 100 股整数手；
-- 现金和持仓限制；
-- 最低佣金、印花税、滑点；
-- 组合净值、回撤、日收益、换手和成本。
-
-### 验收
-
-- 多标的竞争同一账户资金；
-- 不能无限开仓；
-- 拒单原因稳定；
-- equity curve 由逐日账户快照生成；
-- 旧 BacktestEngine 仍通过。
-
-### 不做
-
-short、借券、保证金、多腿、实盘。
-
----
-
-## 任务 03：point-in-time 财务与行业数据
-
-### 目标
-
-扩充 contracts/pipeline/data，使多因子研究不存在财务和行业未来函数。
-
-### 交付
-
-- 财务三表；
-- financial indicator；
-- 历史行业归属；
-- 历史指数成分；
-- published_at / available_trade_date / revision；
-- 历史版本查询；
-- 数据质量测试。
-
-### 验收
-
-- 历史日期只能看到当时已公开版本；
-- 修订数据不覆盖旧版本；
-- 历史行业归属可按日期查询；
-- contracts 与本地数据库迁移保持一致。
-
-### 不做
-
-因子策略和前端。
-
----
-
-## 任务 04：横截面组合与多因子策略
-
-> 状态：✅ 已完成（04-A～04-E 全部完成；详见 11～15 任务文档）
-
-### 前置
-
-任务 02、03 完成。
-
-### 目标
-
-- [x] 横截面 rank、winsorize、z-score（04-A）；
-- [x] 历史股票池与截面处理入口（04-A）；
-- [x] 正式动量 / 市值 / 财务因子定义与生成（04-B）；
-- [x] 行业/市值中性化（04-C）；
-- [x] Top N 与完整股票池过滤（04-D）；
-- [x] cross-sectional momentum long-only（04-D）；
-- [x] multifactor long-only（04-D）；
-- [x] 目标权重和周期调仓（04-D）；
-- [x] 基础因子分析（04-E）。
-
-### 验收
-
-- 决策按交易日截面生成；
-- 无幸存者偏差；
-- 因子数据按实际可用日；
-- 权重、现金和持仓约束成立；
-- 输出换手、行业和市值暴露。
-
-### 不做
-
-完整 long-short、借券、机器学习。
-
----
-
-## 任务 05：标准事件数据与事件驱动
-
-### 目标
-
-打通至少一类结构化事件从 pipeline 到回测结果的完整链路。
-
-### 交付
-
-- corporate_event 契约和管线；
-- 首批事件类型；
-- 公告时间与 available_trade_date；
-- event age/window/surprise 指标；
-- event_drift_basic；
-- 事件分组结果。
-
-### 验收
-
-- 盘后公告不能在当天成交；
-- 修订事件可追溯；
-- 重叠事件有明确规则；
-- 端到端回测通过。
-
-### 不做
-
-NLP 大模型、社媒情绪、实时新闻交易。
-
----
-
-## 任务 06：残差相对价值与稳健性验证
-
-### 目标
-
-- rolling beta 和市场/行业残差；
-- residual z-score；
-- 关系稳定性；
-- market_residual_mean_reversion；
-- train/validation/test；
-- walk-forward；
-- 成本压力和参数敏感性。
-
-### 验收
-
-- 估计窗口严格滞后；
-- 样本外结果单独标记；
-- 成本前后结果可比较；
-- 旧策略也可使用通用稳健性框架。
-
-### 不做
-
-完整多腿 long-short、期现、期权和跨所套利。
-
----
-
-## 任务 07：策略 API 与前端产品闭环
-
-### 前置
-
-策略和组合回测接口稳定。
-
-### 目标
-
-- 指标目录 API；
-- 策略目录和版本 API；
-- 声明式策略校验/保存；
-- 回测任务创建与状态；
-- 内置策略配置；
-- 自定义策略编辑器；
-- 股票池、日期、成本和执行设置；
-- run 对比；
-- 真实组合结果展示。
-
-### 验收
-
-用户可在前端完成：
+目标路径：
 
 ```text
-选择/创建策略 → 配置 → 运行 → 查看 → 比较 → 再运行
+前端选择 event_drift_basic
+→ 配置事件过滤和持有期
+→ 创建真实回测任务
+→ query_earnings_forecast_as_of
+→ to_earnings_forecast_event_frame
+→ run_event_drift_portfolio_backtest
+→ BacktestRunWriter 标准结果包
+→ 前端查看 / 刷新重开 / run 对比
 ```
 
-### 不做
+核心约束：
 
-任意 Python、实盘下单、多租户 SaaS。
+- 复用现有 product/API/task 边界；
+- 保持 `announcement_date → strictly next open available_trade_date → open 入场`；
+- 产品层不得重算 `available_trade_date`，不得二次 `next_open`；
+- 参数：`hold_days`、`min_profit_change_midpoint`、日期、资金、持仓上限、权重上限、成本；
+- 不做新事件源、新闻 NLP、新表、事件参数优化、实盘。
 
----
+### 任务 07-C：标准结果与分析产品封板
 
-## 任务 08：QRP v1.0 总体验收与发布
+建议分支：`feature/backtest-results-product-completion`
 
-### 目标
+目标：
 
-按 `06_QRP_v1.0_总体验收清单.md` 完成系统级审计。
+- 统一经典 / 横截面 / 事件标准产品 run 契约；
+- 补齐 summary、benchmark、滚动、暴露、快照、复现与多 run 比较；
+- 研究专用 residual robustness artifact 可保留独立格式，但标准产品页不得依赖研究目录。
 
-### 交付
+### 任务 07-D：声明式策略编辑、版本与持久化
 
-- 全量测试与构建；
-- 数据 point-in-time 审计；
-- A 股成交约束审计；
-- 结果复现审计；
+建议分支：`feature/declarative-strategy-product`
+
+目标：
+
+- 白名单规则（比较、and/or/not、crossing、连续满足、参数/指标引用、常量）；
+- 静态校验、不可变版本、owner 语义；
+- 目录合并内置与用户策略；
+- 前端受控规则编辑器；
+- 严格禁止 eval/exec/任意 Python/任意导入。
+
+### 任务 08：总体验收与发布候选
+
+建议分支：`release/v1.0-acceptance`
+
+前置：07-B2、07-C、07-D 全部合并。
+
+交付：
+
+- 架构、PIT、成交现实约束审计；
 - 三条正式演示；
-- README 和架构/能力矩阵同步；
-- v1.0 release notes。
+- 全量 pytest / compileall / diff check / web build / lint；
+- README、蓝图、release notes；
+- PR 未合并，等待人工授权；不打 tag、不宣布发布。
 
-### 验收
+## 五、明确非阻塞项
 
-所有发布阻塞项关闭，完整用户闭环无需命令行人工拼接数据或结果文件。
+以下未完成不阻塞 v1.0：
+
+- short / 多腿 / 借券 / 保证金；
+- 协整完整交易；
+- 机器学习复杂模型；
+- 分布式回测；
+- 实盘自动交易；
+- 泛化 `corporate_event` 统一主表；
+- 全策略通用稳健性优化框架。

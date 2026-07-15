@@ -1,243 +1,199 @@
 # QRP v1.0 当前能力审计与能力矩阵
 
-> 初始审计基线：2026-07-12，策略模块提交 `4159c84 Add QRP strategy module v1` 之后的主分支代码。
-> 任务 01 状态更新：2026-07-13，参数化指标、四个经典单标的策略和通用 runtime 准备链路已实现。
-> 任务 02 状态更新：2026-07-14，组合共享资金、A 股现实撮合、真实资金曲线和停牌字段接入已合入 main（PR #5）。
-> 任务 03 状态更新：2026-07-14，03-A/03-B/03-C 全部完成；PIT 选择器、数据底座与 as_of 查询服务可用。结构化事件仍归任务 05。
-> 任务 04-A 状态更新：2026-07-14，横截面 rank/winsorize/z-score、历史股票池与 process_cross_section 入口已完成。
-> 任务 04-B 状态更新：2026-07-14，正式动量/市值/财务因子与 generate_factor_frame 已完成。
-> 任务 04-C 状态更新：2026-07-14，行业/市值暴露面板与横截面中性化已完成。
-> 任务 04-D 状态更新：2026-07-14，调仓日历、eligibility、Top N、目标权重与 `cross_sectional_momentum_long_only` / `multifactor_long_only` 已完成。
-> 任务 04-E 状态更新：2026-07-14，forward return、IC/Rank IC、分组收益、目标暴露与研究闭环已完成。任务 04 整体完成。
+> 初始审计基线：2026-07-12。
+> 任务 00 状态校准：2026-07-15，对照 main `a6df258eff6e9e5ab6399784583b4aa006329b8e`（含 PR #24 residual robustness merge）。
 > 数据事实：用户已确认本地数据库与 `contracts` 严格一致。
 
 ## 一、审计结论
 
-QRP 已经完成了后端核心架构闭环：
+QRP 后端研究闭环与主要产品主链已大部分完成：
 
 ```text
-contracts → indicators → strategies → backtest runtime → backtest engine
+contracts → indicators → strategies → backtest runtime / portfolio / product → results → api / web
 ```
 
-当前最成熟的能力是：
+### 已成熟能力
 
-- A 股日线行情、估值、市值、涨跌停、停牌、指数、研报与调研数据契约；
-- MA5、个股趋势、System B 状态、市场宽度与市场风险指标；
-- 版本化策略定义、内置策略、受限声明式策略；
-- 固定持有回测和动态 ENTER/HOLD/EXIT 回测；
-- 单笔手续费、印花税、滑点、MAE/MFE 和交易级汇总；
-- 已有结果 JSON 查询 API 与回测分析页面。
+- A 股日线、估值、市值、涨跌停、停牌、指数、财务三表、历史行业、历史指数成分与 PIT as_of 查询；
+- 参数化时间序列指标、横截面算子/因子/中性化、事件指标、市场残差指标；
+- 经典单标的策略、横截面 long-only 策略、`event_drift_basic`、`market_residual_mean_reversion`；
+- 组合共享资金、目标权重、A 股现实成交与真实净值；
+- 代表性残差 walk-forward / 成本压力 / 参数敏感性 / 滚动表现与 OOS 结果包；
+- 真实回测产品主链（07-A）与横截面动量产品闭环（07-B1）；
+- 回测 workflow 前端、任务创建、结果分析与基础 run 比较。
 
-当前最主要的产品缺口不是架构，而是能力密度：
+### 当前真正剩余产品缺口
 
-1. 横截面基础算子、正式因子、中性化、Top N/策略与因子分析研究闭环（04-A～04-E）已完成；仍缺事件指标和残差指标；
-2. 财务报表、历史行业、指数成分与 as_of 查询已具备；标准事件时间轴 / corporate_event 仍缺（任务 05）；
-3. 组合共享资金、目标权重调仓、A 股现实成交和真实资金曲线已在任务 02 完成；横截面研究到策略与 IC/分组/暴露闭环已在 04-A～04-E 完成；
-4. 多因子 long-only 已完成；仍缺事件驱动和代表性相对价值策略；
-5. 结果层已可写入组合净值、成本与换手，仍缺行业/市值暴露、稳健性验证和前端配置闭环；
-6. API/前端只能读取已有回测结果，尚不能完成策略配置与回测任务创建。
+1. **07-B2**：事件驱动真实产品闭环（`event_drift_basic` 尚未进入 product catalog/service）；
+2. **07-C**：标准结果与分析产品封板（Sharpe/Sortino/Calmar、benchmark、滚动表现、完整快照与统一消费等发布能力）；
+3. **07-D**：声明式策略编辑、版本与持久化（已有 declarative 求值底座，缺产品化保存/目录/前端编辑器）；
+4. **08**：总体验收与发布候选。
 
-## 二、现有模块真实状态
+**本文件不宣告 v1.0 发布完成。**
 
-### 2.1 contracts / 数据层
+## 二、任务完成总表
 
-当前数据库契约包含：
+| 任务 | 状态 | 关键证据 |
+|---|---|---|
+| 01 参数化指标与经典策略 | ✅ | `IndicatorRequest`、经典策略与动态 runtime |
+| 02 组合账户与 A 股现实回测 | ✅ | `PortfolioBacktestEngine`、T+1/涨跌停/停牌/整数手 |
+| 03 PIT 数据与查询 | ✅ | 财务/行业/指数 as_of 查询 |
+| 04 横截面与多因子 | ✅ | 04-A～04-E 全部完成 |
+| 05 事件驱动研究链路 | ✅ | `earnings_forecast_event` + EventFrame + 事件指标 + `event_drift_basic` + `run_event_drift_portfolio_backtest` |
+| 06 残差与稳健性 | ✅ | 市场/行业残差研究 + residual robustness 包 |
+| 07-A 真实回测产品主链 | ✅ | product task 状态机 + 经典策略产品路径 |
+| 07-B1 横截面动量产品闭环 | ✅ | product catalog/service + 前端 workflow |
+| 07-B2 事件产品闭环 | ⛔ | 研究链路已完成，产品入口未接入 |
+| 07-C 标准结果与分析封板 | 🟡 | 基础结果包已有，发布级指标/基准/比较未封板 |
+| 07-D 声明式策略产品 | 🟡 | 受限 declarative 求值底座已有，产品化未完成 |
+| 08 总体验收与发布 | ⛔ | 前置 07-B2/C/D 未完成 |
 
-- `daily_market_snapshot`
-- `daily_basic`
-- `stock_info`
-- `trading_calendar`
-- `adj_factor_changes`
-- `index_daily`
-- `zt_pool`
-- `dt_pool`
-- `suspend_d`
-- `market_phase`
-- `trade_execution`
-- `cninfo_research_visits`
-- `research_report_stock`
-- `research_report_industry`
+## 三、现有模块真实状态
 
-已覆盖的关键字段包括：OHLCV、涨跌幅、昨收、成交额、换手率、市值、流通市值、PE/PB/PS、股息率、量比、涨跌停、ST、停牌、复权因子、上市退市日期等。
+### 3.1 contracts / 数据层
 
-明确缺失：
+已实现并可用于回测/研究：
 
-- 利润表、资产负债表、现金流量表；
-- 统一财务指标及其公告可用时间；
-- 历史行业分类和历史指数/ETF 成分；
-- 业绩预告、业绩快报、分红、回购、增减持、解禁、并购、问询等结构化事件；
-- `published_at / effective_at / available_at / revision` 等统一 point-in-time 字段；
-- 无风险利率、股指期货、期权、借券与融资成本等相对价值数据。
+- 日线行情、daily basic、复权、股票信息、交易日历；
+- 指数日线、涨跌停、停牌；
+- 财务三表、财务指标、历史行业、历史指数成分（PIT）；
+- **v1.0 第一类标准事件表：`earnings_forecast_event`**（非泛化 `corporate_event`）。
 
-### 2.2 indicators
+PIT 语义已落地：
+
+- `announcement_date` / `published_at` / `available_trade_date` / revision / source / ingested；
+- as_of 查询拒绝未来数据；修订保留历史版本。
+
+明确不是 v1.0 当前验收对象：
+
+- 泛化 `corporate_event` 统一事件主表（可延后到 v1.1 扩展更多事件类型）；
+- 无风险利率、股指期货、期权、借券与融资成本。
+
+### 3.2 indicators
 
 已实现：
 
-- `ma5`
-- 收盘价相对 MA5 状态；
-- 连续站上/跌破 MA5 天数；
-- `system_b_trend_valid`
-- `system_b_exit_triggered`
-- 市场涨跌家数与涨跌停宽度；
-- 市场大跌家数和风险等级。
-- `IndicatorRequest`、策略参数绑定、稳定 alias 与显式输出字段；
-- 统一指标计算注册和参数 schema；
-- 参数化 SMA、区间收益、Donchian high/low、rolling mean/std/z-score；
-- 所有新增时间序列指标按 ticker 独立并按日期稳定排序；
-- Donchian 排除当前 bar，z-score 零标准差输出缺失值。
+- 参数化 SMA / return / Donchian / rolling 统计 / 经典技术指标族；
+- 横截面 rank / winsorize / z-score、正式因子、行业市值中性化；
+- 业绩预告事件指标：`profit_change_midpoint`、`event_age`、`event_window` 等；
+- 市场残差 / residual z-score 等相对价值指标。
 
 当前限制：
 
-- 元数据目录与参数化计算注册是两个公开入口，尚未由 API 统一展示；
-- 不支持横截面、因子、事件和残差指标族；
-- 指标版本尚未进入结果快照。
+- 指标版本快照仍需在 07-C 产品结果中统一封板；
+- 目录 API 已部分接入，产品展示可继续完善。
 
-### 2.3 strategies
-
-已实现：
-
-- `StrategyDefinition / StrategyInput / StrategyDecision / StrategyRunResult`；
-- `ENTER / HOLD / EXIT / NO_ACTION`；
-- 版本化注册表；
-- 参数类型与范围校验；
-- `system_b_basic@1.0.0`；
-- `time_series_momentum@1.0.0`；
-- `dual_sma_trend@1.0.0`；
-- `donchian_breakout@1.0.0`；
-- `rolling_zscore_mean_reversion@1.0.0`；
-- 声明式策略的 `field / indicator / parameter / literal`；
-- `eq / ne / gt / gte / lt / lte`；
-- `all / any / not`；
-- 禁止 `eval` 和任意代码执行。
-
-当前限制与进展：
-
-- long-only、逐标的状态机；
-- `score` 已用于超过组合容量时的候选排序，`weight` 已用于显式目标权重；策略决策可通过 `strategy_decisions_to_target_weights()` 转为组合目标权重；
-- 当前缺口是横截面策略本身，而不是目标权重适配；
-- 缺策略族、时间框架、适用资产等目录元数据；
-- 声明式策略尚不支持横截面排序、调仓、事件窗和多腿关系。
-
-### 2.4 backtest
+### 3.3 strategies
 
 已实现：
 
-- 原有 `BacktestEngine().run(price_df, signals_df, config)`；
-- `signal_close / next_open / next_close`；
-- 固定持有 N bar；
-- 动态策略运行器；
-- 参数化指标请求的通用准备、参数绑定和输出选择；
-- ENTER/HOLD/EXIT 到 Trade 的执行适配；
-- 手续费、印花税、滑点；
-- MAE/MFE；
-- 无行情、非法价格、缺未来 bar 等 skipped 记录。
+- 标准 `StrategyDefinition / StrategyDecision` 与版本化注册表；
+- 经典价格行为策略与扩展技术策略；
+- `cross_sectional_momentum_long_only` / `multifactor_long_only`；
+- `event_drift_basic`；
+- `market_residual_mean_reversion`；
+- 受限声明式策略求值底座（`strategies/declarative`）。
 
-当前限制与进展：
+产品目录当前正式暴露：
 
-- 旧 `BacktestEngine` 的 `PositionRule` 仍主要用于记录；真实共享资金约束已由 `PortfolioBacktestEngine` 承担；
-- 组合回测已生成真实 `equity_curve`、日收益、回撤、换手和成本拆分，并写入现有 run 结果契约；
-- 已支持目标权重调仓、共享现金竞争、T+1、涨停买不到、跌停卖不出、停牌、100 股整数手、最低佣金；
-- `load_stock_prices()` 已把 `is_limit_up / is_limit_down / is_suspended / suspend_type` 送入标准 PriceFrame；
-- 仍不支持 short、多腿、借券、保证金；
-- 仍不支持 walk-forward、样本内外拆分和参数稳健性验证。
+- 经典产品策略（07-A）；
+- `cross_sectional_momentum_long_only`（07-B1）。
 
-runtime 已移除 MA5/System B 专用准备分支；旧 System B 声明通过 indicators 兼容请求进入统一计算入口。
+尚未产品化：
 
-### 2.5 results / API / frontend
+- `event_drift_basic`（07-B2）；
+- 用户声明式策略 CRUD / 版本持久化 / 前端编辑器（07-D）。
+
+### 3.4 backtest runtime / portfolio / research
 
 已实现：
 
-- 结果文件 loader/service/schema；
-- run、summary、equity、trades、skipped、config 查询 API；
-- 回测 run 选择；
-- 汇总卡片；
-- 净值和回撤图组件；
-- 交易、风险、skipped、配置页面。
+- 动态 ENTER/HOLD/EXIT 与旧信号回测兼容；
+- 组合共享现金、目标权重、A 股现实约束；
+- 横截面组合回测；
+- 事件组合回测 `run_event_drift_portfolio_backtest`；
+- 市场/行业残差研究；
+- 残差稳健性：train/validation/test、walk-forward、成本压力、参数敏感性、滚动表现、OOS 保存。
 
-当前限制：
+口径修正：
 
-- API 只读已有结果，不能创建和执行策略回测；
-- 策略目录与声明式策略没有 API；
-- 前端没有策略编辑、参数配置、股票池和时间区间选择；
-- 组合回测后端已可生成真实净值与成本文件；前端仍主要依赖结果文件读取，尚未形成创建任务闭环；
-- 缺 run 对比、滚动分析、更细成本归因、暴露和稳健性展示。
+- v1.0 **要求代表性残差策略**具备完整稳健性验证；
+- **全策略通用稳健性/优化框架延后 v1.1**，不再作为旧策略全部接入的发布门禁。
 
-## 三、模块能力矩阵
+### 3.5 product / results / api / web
 
-| 能力 | 数据/contracts | indicators | strategies | backtest | results/API/frontend | 状态 | v1.0 定位 |
+已实现：
+
+- product task 状态机、标准结果包写入、任务与结果 API；
+- 经典与横截面产品路径；
+- 前端 workflow：策略目录、参数表单、任务创建、状态查询、结果打开、基础 run 比较；
+- 分析结果页：净值、回撤、交易、skipped、配置快照等基础展示。
+
+待 07-C 封板：
+
+- 统一发布级 summary（Sharpe/Sortino/Calmar、胜率、盈亏比、MAE/MFE 等）；
+- 产品级 benchmark 与 excess；
+- 滚动表现进入标准产品页；
+- 完整策略/指标/universe/PIT/execution 快照与复现审计；
+- 暴露、成本拆分、多 run 比较的稳定消费契约。
+
+## 四、能力矩阵
+
+| 能力 | 数据 | 指标 | 策略 | 回测/研究 | 产品/前端 | 状态 | 备注 |
 |---|---|---|---|---|---|---|---|
-| 日线 OHLCV 与复权 | 已有行情、复权因子 | MA5 已用 | System B 已用 | 可回测 | 可展示交易 | 🟡 | 必须完善复权口径与运行集成 |
-| 估值、市值、换手、涨跌停、停牌 | 已有 | 少量使用 | 尚未形成通用策略 | 涨跌停/停牌已接入组合撮合 | 未完整展示 | ✅ | 任务 02 已接入 A 股现实约束 |
-| 通用时间序列指标 | 基础字段已有 | 参数化 SMA/收益/通道/rolling 统计已完成 | 四个经典策略已用 | 通用动态准备已完成 | API 目录未接入 | ✅ | 第一阶段已完成 |
-| 趋势/动量/突破 | 数据足够 | 参数化指标已完成 | 动量/双均线/Donchian 已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的策略能力已完成 |
-| long-only 均值回归 | 数据足够 | rolling z-score 已完成 | z-score 均值回归已完成 | 动态回测可用 | 只读结果 | ✅ | 单标的代表策略已完成 |
-| 横截面排序与调仓 | 市值和行情部分已有 | rank/winsorize/z-score、历史股票池（04-A）、正式因子（04-B）、中性化（04-C）、Top N/策略（04-D）、IC/分组/暴露（04-E）已完成 | `cross_sectional_momentum_long_only` / `multifactor_long_only` 与研究闭环已实现 | 组合账户、目标权重和调仓底座已完成 | 组合结果 + IC/分组/暴露研究输出 | ✅ | 任务 04 完成 |
-| 多因子 long-only | 财务/行业/指数历史与 as_of 查询已具备（事件仍缺） | 正式因子（04-B）、中性化（04-C）、策略（04-D）、IC/分组/暴露（04-E）已完成 | 已实现 long-only 代表策略与研究闭环 | 组合调仓底座已完成 | IC/分组/目标暴露可读 | ✅ | 任务 04 完成 |
-| 事件驱动 | 研报/调研已有，标准事件缺失 | 缺事件特征 | 未实现 | 缺事件时点规则 | 缺事件分析 | ⛔ | v1.0 必须打通一条链路 |
-| 残差/相对价值研究 | 指数已有，行业历史/期货缺 | 缺 beta/残差/半衰期 | 未实现 | 缺多腿/short | 缺价差结果 | ⛔ | v1.0 至少完成研究级残差策略 |
-| 完整配对多腿交易 | 数据不足 | 缺 | 缺 | 缺 short、多腿、保证金 | 缺 | ⛔ | 增强项，不阻塞 v1.0 |
-| 监督学习研究规范 | 部分特征数据 | 缺通用特征集 | 无模型策略 | 缺时间切分框架 | 缺样本外分析 | ⛔ | 只要求准备边界，不要求复杂内置模型 |
-| 强化学习 | 数据/环境不足 | 无 | 无 | 无仿真环境 | 无 | ➡ | v1.0 后 |
-| 高频微结构 | 无订单簿数据 | 无 | 无 | 无低延迟撮合 | 无 | ➡ | 明确排除 |
-| 组合资金曲线 | 数据足够 | 不适用 | 目标权重适配已完成 | 真实 equity_curve / snapshots 已完成 | 可读结果文件 | ✅ | 任务 02 已完成 |
-| A 股现实成交约束 | 字段已有，停牌已聚合进 PriceFrame | 不适用 | 不应负责 | T+1/涨跌停/停牌/整数手已实现 | 拒单可审计 | ✅ | 任务 02 已完成 |
-| 成本与换手分析 | 基础成本已有 | 不适用 | 不应负责 | 佣金/印花税/滑点/换手已入 summary | 可读取，缺更深归因 | ✅ | 任务 02 已完成基础能力 |
-| 稳健性与样本外验证 | 交易日数据已有 | 不适用 | 不应负责 | 未实现 | 未实现 | ⛔ | v1.0 必须具备基础 walk-forward |
-| 策略 API 与编辑器 | 不适用 | 注册表可支撑 | 声明式底座已有 | 运行器已有 | 尚未接入 | 🟡 | v1.0 必须完成 |
-| 结果可复现 | created_at 部分已有 | 指标无版本快照 | 策略有版本 | config 可保存 | 结果读取已有 | 🟡 | v1.0 必须保存完整快照 |
+| 估值、市值、换手、涨跌停、停牌 | 已有 | 已有 | 已用 | 已接入撮合 | 可读 | ✅ | 任务 02 |
+| 通用时间序列指标 | 已有 | 参数化已完成 | 经典策略已用 | 动态回测可用 | 目录部分接入 | ✅ | 任务 01 |
+| 趋势/动量/突破/均值回归 | 已有 | 已完成 | 已完成 | 动态/组合可用 | 07-A 产品路径 | ✅ | 任务 01/07-A |
+| 横截面排序与调仓 | 历史股票池已有 | rank/因子/中性化完成 | CS 策略完成 | 组合回测完成 | 07-B1 产品闭环 | ✅ | 任务 04/07-B1 |
+| 多因子 long-only | 财务/行业/指数 as_of 已有 | 正式因子完成 | 已实现 | 研究闭环完成 | 研究完成；产品主推动量 | ✅ | 任务 04 |
+| 事件驱动 | `earnings_forecast_event` 已有 | 事件指标完成 | `event_drift_basic` 完成 | 组合回测完成 | 产品入口未完成 | 🟡 | 研究 ✅；07-B2 产品待做 |
+| 残差/相对价值研究 | 指数与行业历史已有 | beta/残差完成 | 代表策略完成 | 研究+稳健性完成 | 研究级结果包 | ✅ | 任务 06；非产品主链 |
+| 完整配对多腿交易 | 不足 | 缺 | 缺 | 缺 short/多腿 | 缺 | ➡ | 不阻塞 v1.0 |
+| 监督学习复杂模型 | 部分特征 | 缺通用训练 | 无 | 缺统一框架 | 缺 | ➡ | 不阻塞 v1.0 |
+| 强化学习 / 高频 | 不足 | 无 | 无 | 无 | 无 | ➡ | 排除 |
+| 组合资金曲线 | 足够 | n/a | 目标权重完成 | 真实 equity 完成 | 可读 | ✅ | 任务 02/07-A |
+| A 股现实成交约束 | 字段已有 | n/a | n/a | 已实现 | 拒单可审计 | ✅ | 任务 02 |
+| 成本与换手分析 | 已有 | n/a | n/a | summary 已有 | 可读，归因可加深 | ✅ | 基础完成；07-C 统一 |
+| 代表性残差稳健性 | 交易日已有 | n/a | residual 策略 | walk-forward 等完成 | 研究包 | ✅ | 任务 06-B |
+| 全策略通用稳健性框架 | n/a | n/a | n/a | 未做成通用产品 | 未做 | ➡ | 延后 v1.1 |
+| 策略 API 与编辑器 | n/a | 注册表可支撑 | declarative 底座已有 | 运行器已有 | workflow 部分完成 | 🟡 | 07-D 待完成 |
+| 结果可复现与发布分析 | created_at 等 | 版本快照待封板 | 策略版本已有 | config/结果已有 | 分析页基础完成 | 🟡 | 07-C 待封板 |
 
-## 四、策略族能力矩阵
+## 五、策略族能力矩阵
 
 | 策略族 | 当前基础 | 缺口 | v1.0 代表策略 |
 |---|---|---|---|
-| 时间序列趋势/动量 | 参数化指标、三个经典策略和动态 runtime 已完成；组合资金与 A 股现实成交底座已完成 | 稳健性验证、benchmark、样本外验证、参数敏感性、产品化配置入口 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
-| 均值回归 | rolling z-score 和 long-only 状态机已完成；可接入组合账户与现实撮合 | 稳健性验证、benchmark、样本外验证、参数敏感性、产品化配置入口 | `rolling_zscore_mean_reversion` |
-| QRP 专属系统 | System B 基础状态与策略 | 判断层、目标池和完整规则尚未系统化 | `system_b_basic` 保留为架构验证策略 |
-| 横截面动量 | 行情、市值字段；目标权重与组合调仓底座已完成；rank/历史股票池（04-A）、动量因子（04-B）、中性化（04-C）、策略（04-D）、研究闭环（04-E）已完成 | 事件/残差等后续能力 | `cross_sectional_momentum_long_only` |
-| 多因子 | daily_basic + 财务/行业/指数历史与 as_of 查询（任务 03 完成）；组合账户底座已完成；正式因子（04-B）、中性化（04-C）、策略（04-D）、研究闭环（04-E）已完成 | 事件数据 | `multifactor_long_only` |
-| 事件驱动 | 研报和调研数据 | 标准事件表、时间语义、事件指标 | `event_drift_basic` |
-| 相对价值 | 股票和指数日线 | rolling beta、残差、关系稳定性 | `market_residual_mean_reversion` |
-| 机器学习 | 暂无统一训练管线 | 时间切分、特征快照、模型版本 | v1.0 不要求内置复杂模型 |
-| RL/HFT | 无必要基础 | 数据、环境、基础设施均不足 | 不进入 v1.0 |
+| 时间序列趋势/动量 | 指标、策略、组合与 07-A 产品路径已完成 | 发布级 benchmark/滚动/完整快照 | `time_series_momentum`、`dual_sma_trend`、`donchian_breakout` |
+| 均值回归 | rolling z-score 与状态机已完成 | 同上 | `rolling_zscore_mean_reversion` |
+| QRP 专属系统 | System B 基础策略 | 完整规则系统化非阻塞 | `system_b_basic` |
+| 横截面动量 | 研究到 07-B1 产品闭环已完成 | 结果分析封板 | `cross_sectional_momentum_long_only` |
+| 多因子 | 研究闭环已完成 | 非当前产品主推路径 | `multifactor_long_only` |
+| 事件驱动 | 数据/指标/策略/研究回测已完成 | **产品闭环 07-B2** | `event_drift_basic` |
+| 相对价值 | 市场/行业残差与稳健性已完成 | 完整多腿执行 | `market_residual_mean_reversion` |
+| 机器学习 | 边界保留 | 复杂内置模型 | 不作为发布阻塞 |
+| RL/HFT | 无 | 基础设施不足 | 不进入 v1.0 |
 
-## 五、优先级结论
+## 六、优先级结论
 
-### P0：产品闭环阻塞项
+### 已关闭的 P0 研究/底座项
 
-已关闭：
+- 真实组合资金曲线与 A 股约束；
+- PIT 财务/行业/指数与事件第一类标准链路；
+- 横截面研究到策略；
+- 残差研究与代表性稳健性；
+- 经典与横截面真实产品主链。
 
-- 真实组合资金曲线；
-- A 股成交约束；
-- 目标权重适配与组合调仓底座。
+### 当前 P0 产品剩余
 
-仍未完成：
+- 07-B2 事件产品闭环；
+- 07-C 标准结果与分析产品封板；
+- 07-D 声明式策略产品化；
+- 08 总体验收。
 
-- 事件指标与残差指标（04-A～04-E 已完成横截面研究到策略与 IC/分组闭环）；
-- 标准事件 point-in-time 数据（财务/行业/指数历史查询任务 03 已完成）；
-- 策略运行 API 与前端配置；
-- 结果快照与复现。
+### 不作为 v1.0 发布阻塞
 
-### P1：代表性研究能力
-
-- 趋势/动量/突破/均值回归；
-- 横截面动量；
-- 多因子 long-only；
-- 基础事件驱动；
-- 市场残差均值回归；
-- walk-forward 与成本归因。
-
-### P2：v1.0 增强但不阻塞
-
-- 完整多腿配对；
-- short、借券和保证金；
-- 监督学习参考策略；
-- 更复杂风险模型。
-
-### 明确延后
-
-- 强化学习；
-- 高频做市；
-- 订单簿预测；
-- 延迟套利；
-- 分布式和超高性能回测；
-- 实盘自动下单。
+- short / 借券 / 保证金 / 多腿配对；
+- 协整完整交易、机器学习复杂模型；
+- 分布式回测、实盘自动交易；
+- 泛化 `corporate_event` 统一主表与更多事件源；
+- 全策略通用稳健性优化框架（v1.1）。
