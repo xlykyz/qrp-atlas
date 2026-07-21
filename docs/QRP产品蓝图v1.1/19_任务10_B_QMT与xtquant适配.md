@@ -1,297 +1,546 @@
-# 任务 10-B：QMT 与 xtquant 适配
+# 任务 10-B：MiniQMT 网关协议与执行适配
 
 ## 一、目标
 
-在任务 10-A 的 broker-neutral 核心之上，实现国金 QMT / xtquant 适配器，完成账户查询、下单、撤单、回调、重连、恢复和对账，并通过纸面、仿真和受限实盘三级验收。
+在任务 10-A 的 `qrp-atlas/execution` 核心之上，完成独立 `qrp-trading` MiniQMT 网关的生产协议封板，并在 qrp-atlas 中实现对应的远程网关适配器。
 
-## 二、前置
+本任务不是在 qrp-atlas 中重新实现 xtquant，也不是把 qrp-trading 合并进 qrp-atlas。
 
-- 任务 10-A 已验收；
-- 用户已在仓库外确认 QMT/xtquant 基础链路可连通；
-- 正式开发机、QMT 客户端、账户权限和环境配置可用；
-- 真实账户自动交易默认关闭。
+最终链路：
 
-## 三、适配器边界
+```text
+qrp-atlas/execution
+→ versioned REST / WebSocket
+→ independent qrp-trading on Windows
+→ MiniQMT / xtquant
+→ broker account
+```
+
+## 二、当前现实基线
+
+用户已在本地独立仓库 `E:\projects\qrp-trading` 完成并启动 MiniQMT 局域网网关。
+
+已确认能力：
+
+- 服务监听 `0.0.0.0:8000`，局域网地址 `192.168.0.104:8000`；
+- MiniQMT 连接和账户订阅成功；
+- 自动发现账户别名 `account_1`；
+- 资产、持仓、当日委托、当日成交查询；
+- 最新行情、合约、板块和交易日历；
+- 下单、撤单和行情订阅；
+- `XtQuantTrader`、`xtdata`、信用账户和其他公开能力的通用 RPC；
+- `/api/v1/capabilities` 能力与签名发现；
+- WebSocket 连接、账户、订单、成交、错误和行情事件；
+- READONLY / TRADE / ADMIN API Key；
+- IP 白名单、账户脱敏、SQLite 审计、运行日志和防火墙脚本；
+- 生命周期方法 `start/stop/connect/register_callback/run_forever` 禁止远程调用；
+- `TRADE_ENABLED=false` 时正确拒绝下单和撤单；
+- Linux 客户端可通过局域网访问；
+- 离线自动化测试 11 passed；
+- 本机真实 MiniQMT 查询、RPC、异步回调和行情订阅已验证。
+
+因此本任务从“已有可运行网关”出发，不按“QMT能力尚未实现”重新建设。
+
+## 三、双仓工作包边界
+
+### 3.1 qrp-trading 子交付
+
+负责：
+
+- 生产窄协议；
+- 网关协议版本；
+- request/client order 幂等；
+- 稳定错误码；
+- WebSocket 事件序列和恢复游标；
+- MiniQMT 原始状态映射；
+- 权限、IP、交易总开关和本地审计；
+- 网关生命周期、健康、重连和能力发现；
+- Linux SDK/客户端契约。
+
+### 3.2 qrp-atlas 子交付
 
 建议结构：
 
 ```text
-trading/qmt/
-├── adapter.py
+src/qrp_atlas/execution/adapters/miniqmt_gateway/
+├── __init__.py
 ├── client.py
-├── callbacks.py
+├── adapter.py
+├── models.py
 ├── mapping.py
+├── events.py
+├── recovery.py
 ├── config.py
 ├── diagnostics.py
 └── AGENTS.md
 ```
 
-适配器职责：
+负责：
 
-- 把 QMT/xtquant 请求和响应转换为 trading 标准领域对象；
-- 维护 QRP client order id 与券商 order id 映射；
-- 归一状态码、错误码和回调；
-- 不实现策略、评分、目标组合和账户风控政策。
+- 实现 `ExecutionGatewayProtocol`；
+- 将 QRP 标准命令转换为网关窄协议；
+- 将网关响应和事件转换为 execution 标准领域对象；
+- 管理 QRP `client_order_id`、网关 request id 和 broker order id 映射；
+- WebSocket 断线后的主动查询、恢复和对账；
+- 不 import xtquant；
+- 不调用网关生命周期方法；
+- 不使用通用 RPC 绕过生产窄协议。
 
-## 四、环境与配置
+### 3.3 不共享的内容
 
-配置至少包括：
+- 两个仓库不共享数据库；
+- qrp-atlas 不读取 qrp-trading 的 `audit.db` 作为常规运行依赖；
+- qrp-trading 不直接写 QRP 数据库；
+- API Key 只通过环境或安全存储分发，不提交 Git；
+- qrp-trading 的原始审计与 QRP 业务审计分别保留，通过 ID 对账。
+
+## 四、生产窄协议
+
+通用 RPC继续保留为 ADMIN级诊断和能力探索接口，但正式生产执行必须使用稳定窄协议。
+
+至少封板：
 
 ```text
-qmt_path
+GET  /api/v1/health
+GET  /api/v1/capabilities
+GET  /api/v1/accounts
+GET  /api/v1/accounts/{alias}/asset
+GET  /api/v1/accounts/{alias}/positions
+GET  /api/v1/accounts/{alias}/orders
+GET  /api/v1/accounts/{alias}/trades
+POST /api/v1/orders
+POST /api/v1/orders/{client_order_id}/cancel
+GET  /api/v1/orders/by-client-id/{client_order_id}
+WS   /api/v1/ws/events
+```
+
+具体路径可保持现有实现兼容，但语义必须版本化和文档化。
+
+禁止生产OMS通过：
+
+```text
+POST /api/v1/rpc/trader/{method_name}
+POST /api/v1/rpc/xtdata/{method_name}
+```
+
+直接构造任意交易方法调用。
+
+## 五、协议版本和能力协商
+
+健康和能力接口至少返回：
+
+```text
+service_name
+gateway_version
+protocol_version
+build_commit
+server_time
+timezone
+trade_enabled
+qmt_connected
+account_subscribed
+supported_accounts
+supported_order_types
+supported_price_types
+supported_event_types
+capability_hash
+```
+
+要求：
+
+- qrp-atlas 声明支持的协议范围；
+- 不兼容版本 fail closed；
+- capability hash 变化进入告警和审计；
+- 新增字段向后兼容；
+- 删除或改变语义必须升级协议版本；
+- QMT当前安装版本的动态能力与生产窄协议分开表示。
+
+## 六、认证和网络安全
+
+继续使用分级密钥：
+
+```text
+READONLY
+TRADE
+ADMIN
+```
+
+要求：
+
+- 查询和WebSocket使用最小权限；
+- 下单/撤单必须使用TRADE或明确受控的ADMIN；
+- 通用RPC默认只允许ADMIN；
+- qrp-atlas execution使用独立服务身份和专用交易Key；
+- API Key不进入日志、结果包和PR；
+- 支持密钥轮换与旧密钥失效；
+- IP白名单默认限制局域网或指定Linux主机；
+- 服务不得直接暴露公网；
+- 外出访问只能通过加密虚拟局域网或认证隧道；
+- 认证失败、来源IP非法和权限不足均有稳定错误码和审计。
+
+## 七、双重交易门禁
+
+真实下单必须同时满足：
+
+```text
+QRP execution control enabled
+AND frozen order plan valid
+AND QRP business risk passed
+AND gateway TRADE_ENABLED=true
+AND caller has TRADE permission
+AND QMT connected/subscribed
+AND account alias matches
+```
+
+任一失败均 fail closed。
+
+`TRADE_ENABLED` 是网关机械安全门，不替代 QRP 业务风险；QRP 的 enable 也不能绕过网关关闭状态。
+
+## 八、标准下单请求
+
+生产下单请求至少包含：
+
+```text
+request_id
+client_order_id
+account_alias
+asset_id
+side
+quantity
+price_type
+limit_price (optional)
+strategy_tag
+plan_id
+plan_item_id
+submitted_at
+protocol_version
+```
+
+要求：
+
+- 网关不得自动改变方向、数量和账户；
+- 非法证券代码、数量、价格类型和时间拒绝；
+- 账户对象只通过别名解析；
+- xtconstant由网关内部映射，不要求QRP传SDK对象；
+- 策略备注不包含敏感信息；
+- 同步返回只表示接收/拒绝，不等价成交；
+- 返回稳定 `gateway_request_id` 和可用的 broker order reference；
+- 原始 QMT 返回保存在网关审计，外部API只返回脱敏标准字段。
+
+## 九、幂等契约
+
+网关必须把 `request_id` 和 `client_order_id` 作为正式幂等字段。
+
+要求：
+
+- 同一 `request_id` 重复请求返回第一次的确定结果或当前状态；
+- 同一 `client_order_id` 不允许创建第二笔不同订单；
+- 同一 `client_order_id` 且payload不同必须冲突拒绝；
+- submit超时后支持按client_order_id查询；
+- 网关重启后幂等记录仍可恢复；
+- 未知提交不得由客户端盲目重发；
+- 新attempt由QRP生成新的generation/client_order_id；
+- cancel也具有独立request_id和幂等语义。
+
+## 十、响应和错误码
+
+统一响应信封至少包含：
+
+```text
+request_id
+status
+code
+message
+server_time
+data
+diagnostics_id
+```
+
+错误分类至少包括：
+
+```text
+AUTHENTICATION_FAILED
+PERMISSION_DENIED
+SOURCE_IP_DENIED
+TRADE_DISABLED
+QMT_DISCONNECTED
+ACCOUNT_NOT_FOUND
+ACCOUNT_NOT_SUBSCRIBED
+INVALID_REQUEST
+INVALID_ASSET
+INVALID_QUANTITY
+INVALID_PRICE_TYPE
+IDEMPOTENCY_CONFLICT
+ORDER_NOT_FOUND
+ORDER_NOT_CANCELABLE
+BROKER_REJECTED
+BROKER_TIMEOUT
+GATEWAY_BUSY
+CAPABILITY_UNAVAILABLE
+INTERNAL_ERROR
+UNKNOWN_RESULT
+```
+
+不得把所有异常压成HTTP 500或自由文本。
+
+## 十一、订单和成交事实
+
+标准查询返回：
+
+```text
+client_order_id
+gateway_request_id
+broker_order_id
+account_alias
+asset_id
+side
+quantity
+filled_quantity
+average_price
+order_status
+submitted_at
+updated_at
+broker_status_code
+error_code
+```
+
+要求：
+
+- 账户号和内部敏感字段继续脱敏；
+- broker原始状态保留审计引用；
+- 空列表与查询失败分离；
+- 时间戳timezone-aware；
+- 数量、价格和金额类型稳定；
+- 按client_order_id和broker_order_id均可查询；
+- 网关不生成QRP策略reason code。
+
+## 十二、WebSocket事件契约
+
+支持并版本化：
+
+```text
+qmt_connected
+qmt_disconnected
+account_status
+stock_asset
+stock_position
+stock_order
+stock_trade
+order_error
+cancel_error
+order_stock_async_response
+cancel_order_stock_async_response
+market_data
+gateway_ready
+heartbeat
+```
+
+每个事件至少包含：
+
+```text
+event_id
+sequence
 session_id
-account_type
-account_id reference
-mode
-connect_timeout
-query_timeout
-submit_timeout
-reconnect_policy
-enabled
+event_type
+occurred_at
+received_at
+account_alias
+client_order_id (when known)
+broker_order_id (when known)
+payload
+protocol_version
 ```
 
 要求：
 
-- 敏感信息不提交 Git；
-- account_id 在日志/API 中脱敏；
-- 纸面、仿真和实盘配置物理/逻辑隔离；
-- `LIVE` 模式需要显式双重启用；
-- 启动时验证 QMT 进程、路径、账户和权限。
+- sequence在网关会话内单调；
+- event_id全局可去重；
+- 重复、乱序和延迟事件允许出现，QRP端必须幂等；
+- WebSocket断线后不能假设没有事件；
+- 重连后QRP先主动查询订单、成交、持仓，再恢复事件流；
+- 心跳和最后事件时间进入健康状态；
+- 无法匹配client_order_id的事件进入unmatched队列。
 
-## 五、连接生命周期
+## 十三、MiniQMT生命周期
 
-支持：
+保持现有设计：
 
-```text
-DISCONNECTED
-CONNECTING
-CONNECTED
-DEGRADED
-RECONNECTING
-FAILED
-STOPPED
-```
+- qrp-trading内部统一调用start/connect/subscribe/register_callback/run_forever；
+- 远程调用方不得直接触发生命周期方法；
+- 重复启动和重连幂等；
+- QMT断线时网关进入degraded状态；
+- 重连后恢复账户订阅和行情订阅；
+- 有活动订单或未知状态时发出高优先级事件；
+- 生命周期异常不得静默吞掉。
 
-要求：
+qrp-atlas只消费health、查询和事件，不管理Windows进程。
 
-- session id 唯一；
-- 重复 connect 幂等；
-- 连接失败明确诊断；
-- 断线触发 degraded/recovery，不直接重下订单；
-- 重连后先查询和对账；
-- 回调线程异常不导致静默停止；
-- health 输出连接、回调、查询和最后事件时间。
+## 十四、qrp-atlas适配器
 
-## 六、查询能力
+`MiniQmtGatewayAdapter` 至少实现：
 
-实现并标准化：
+- 配置加载和密钥注入；
+- health/capability negotiation；
+- 账户别名选择；
+- 资产、持仓、订单、成交查询；
+- 标准submit/cancel；
+- WebSocket事件消费；
+- REST与事件映射；
+- 超时、重试和熔断；
+- client/gateway/broker ID映射；
+- 日志脱敏；
+- recovery/reconciliation触发。
 
-- 账户资产；
-- 可用资金；
-- 持仓和可用数量；
-- 当日委托；
-- 当日成交；
-- 单订单查询（若 SDK 支持）；
-- 账户状态；
-- 交易连接状态。
+重试边界：
 
-查询结果必须：
+- GET/只读查询可按策略重试；
+- submit/cancel只允许使用相同request_id的幂等重试；
+- 不确定结果先查询，不创建新订单；
+- 协议不兼容、鉴权失败和交易关闭不自动重试。
 
-- 转为标准模型；
-- 保留 broker raw reference/diagnostic；
-- 处理空结果和 SDK 异常；
-- 时间和编码规范化；
-- 不因单项失败伪造完整快照。
-
-## 七、下单
-
-支持 v1.1 生产所需的 A 股 long-only 买卖：
-
-```text
-submit_order(StandardOrderCommand)
-```
-
-要求：
-
-- 仅接收任务 10-A 风险门已批准的 command；
-- 映射账户、标的、方向、数量、价格类型和策略备注；
-- 返回同步接收结果不等同最终成交；
-- 立即保存提交尝试和返回值；
-- 超时进入 UNKNOWN 并查询恢复；
-- client_order_id 进入可用的策略/备注字段或本地映射；
-- 不在适配器自动改变数量和方向；
-- SDK 拒绝转为稳定 reason code。
-
-## 八、撤单
-
-- 只撤销可撤订单；
-- 撤单请求幂等；
-- 同步返回不等同最终取消；
-- 通过回调/查询确认终态；
-- 已成交或终态订单返回稳定原因；
-- kill switch 的撤单策略遵循任务 00 和 10-A，不在适配器自行决定。
-
-## 九、回调
-
-归一：
-
-- 连接状态；
-- 委托状态；
-- 成交；
-- 资产/持仓变动（SDK 支持时）；
-- 错误；
-- 异步下单响应。
-
-要求：
-
-- 回调快速入队/落盘，避免阻塞 SDK；
-- 乱序、重复和延迟回调幂等；
-- 无映射订单进入 unmatched queue；
-- 原始字段保留审计引用；
-- 回调异常有监控和告警；
-- 不在回调中直接调用策略。
-
-## 十、状态映射
-
-建立明确表：
-
-```text
-QMT order status
-→ trading LiveOrderStatus
-→ terminal/non-terminal
-→ allowed transitions
-```
-
-必须覆盖：
-
-- 已报；
-- 未报/待报；
-- 部成；
-- 已成；
-- 已撤；
-- 废单/拒单；
-- 撤单中；
-- 未知/新增 SDK 状态。
-
-未知状态进入 `UNKNOWN`，不得猜测为终态。
-
-## 十一、恢复和对账
-
-重连/重启后：
-
-```text
-query account
-→ query positions
-→ query orders
-→ query fills
-→ rebuild mappings
-→ feed missing events to OMS
-→ reconcile
-→ unlock new submissions
-```
-
-要求：
-
-- 本地 SUBMITTING 订单能与券商记录匹配；
-- 无法匹配时保持 UNKNOWN；
-- 外部人工订单和成交标记；
-- 持仓、资金和成交差异进入正式对账；
-- 不因本地状态丢失重复提交。
-
-## 十二、模式
+## 十五、运行模式
 
 ### PAPER
 
-由任务 10-A paper adapter 提供，不启动 QMT。
+使用任务10-A的本地paper adapter，不访问qrp-trading。
 
-### SIMULATION
+### GATEWAY_READONLY
 
-连接 QMT 仿真账户或明确模拟环境：
+连接真实网关但只查询和消费事件：
 
-- 使用同一 QMT adapter；
-- 验证真实 SDK 查询、下单、撤单和回调；
-- 账户与正式账户隔离。
+- `TRADE_ENABLED=false`；
+- READONLY Key；
+- 用于账户状态、持仓、行情和事件联调。
+
+### GATEWAY_SIMULATION
+
+连接MiniQMT仿真或明确受控账户：
+
+- 使用生产窄协议；
+- 验证下单、撤单、回调、断线和恢复；
+- 与正式账户配置隔离。
 
 ### LIVE
 
-- 默认 disabled；
-- 需要配置、控制状态和人工授权；
+- 默认disabled；
+- QRP和网关双重启用；
 - 只执行冻结计划；
-- 风险门和恢复未通过时禁止下单；
-- 小资金和严格仓位限制由任务 11 验收配置控制。
+- recovery/reconciliation未通过时禁止下单；
+- 受限资金和严格仓位配置由任务11验收；
+- 任一关键异常暂停新增订单。
 
-## 十三、API 与前端
+## 十六、审计与三方对账
 
-API 仍使用 trading 标准模型，增加：
+三层事实：
 
-- broker health；
-- connection/recovery status；
-- masked account；
-- broker diagnostics；
-- unmatched events；
-- QRP/broker mapping；
-- simulation/live mode。
+```text
+qrp-atlas DB      业务订单、目标、原因和状态
+qrp-trading audit 原始请求、响应、回调和调用身份
+broker account    最终委托、成交、持仓和资金
+```
 
-前端不暴露 SDK 参数和任意原始下单入口。
+必须支持通过以下字段关联：
 
-## 十四、测试
+```text
+request_id
+client_order_id
+gateway_request_id
+broker_order_id
+account_alias
+```
 
-### 单元
+要求：
 
-使用 fake xtquant client 覆盖：
+- 网关审计保留期和轮转明确；
+- QRP无需常规直接读取SQLite文件；
+- 事故调查可导出脱敏审计包；
+- 三方不一致进入正式reconciliation difference；
+- 不以网关审计替代券商最终查询。
 
-- 字段和状态映射；
-- 查询；
+## 十七、测试
+
+### qrp-trading离线测试
+
+至少覆盖：
+
+- auth与权限；
+- IP白名单；
+- TRADE_ENABLED；
+- 请求校验；
+- request/client_order幂等；
+- payload冲突；
+- 标准错误码；
+- 序列化与脱敏；
+- QMT状态映射；
+- WebSocket序列、重复和断线；
+- 生命周期方法禁止远程调用；
+- 审计与重启恢复。
+
+### qrp-atlas单元测试
+
+使用fake gateway覆盖：
+
+- 协议和能力协商；
+- 查询映射；
 - submit/cancel；
-- SDK 异常；
-- 超时；
-- 回调乱序/重复；
+- 超时和UNKNOWN；
+- 错误码映射；
+- 事件乱序/重复；
 - unmatched；
-- 重连；
-- 日志脱敏。
+- 断线；
+- 日志脱敏；
+- 三方ID映射。
 
-### 集成
+### 局域网集成测试
 
-在可控 QMT 环境覆盖：
+在Windows网关与Linux QRP环境覆盖：
 
-- connect/disconnect；
-- 账户/持仓/订单/成交查询；
-- 仿真下单；
+- health/capabilities；
+- READONLY查询；
+- WebSocket事件；
+- 交易关闭时拒绝；
+- 仿真下单和撤单；
 - 部分成交或可控等价场景；
-- 撤单；
-- 断线重连；
-- 进程重启恢复；
-- 日终对账。
+- QMT断线重连；
+- 网关/QRP进程重启；
+- UNKNOWN恢复；
+- 日终三方对账。
 
-真实账户测试不得作为普通 CI 自动执行。
+真实账户交易不得作为普通CI自动副作用。
 
-## 十五、安全要求
+## 十八、安全要求
 
-- 真实下单默认关闭；
-- 无冻结计划不得下单；
-- 无风险门批准不得下单；
-- 未完成 recovery/reconciliation 不得下单；
-- account/mode 不匹配 fail closed；
-- 网络远程访问不暴露 QMT 端口到公网；
-- 所有 live 操作有审计；
-- 凭证、路径敏感信息和完整账户号不进入结果包。
+- 真实交易默认关闭；
+- 无冻结计划、无业务风险批准不得提交；
+- 通用RPC不得成为生产下单路径；
+- account/mode不匹配fail closed；
+- 不直接暴露网关到公网；
+- API Key、完整账户号和敏感路径不进入Git和结果包；
+- 服务端与客户端日志均脱敏；
+- 所有交易类调用可审计；
+- kill switch在QRP和网关两层均可阻塞新增订单。
 
-## 十六、禁止范围
+## 十九、禁止范围
 
-- 不修改策略和目标；
-- 不做盘口、Level-2 或高频；
-- 不使用 QMT 自带策略替代 QRP；
-- 不在 adapter 内重试未知订单；
-- 不直接从前端发送任意订单；
-- 不支持多券商或多账户作为 v1.1 门禁；
-- 不把仿真通过等同正式实盘授权。
+- 不把qrp-trading并入qrp-atlas；
+- 不在qrp-atlas import xtquant；
+- 不在网关实现策略、评分、目标组合和业务风险；
+- 不让前端直接调用网关或通用RPC；
+- 不通过RPC远程启动/停止QMT生命周期；
+- 不在未知订单状态盲目重下；
+- 不把现有真实连接验证等同完整生产验收；
+- 不以单次成功下单跳过连续仿真和恢复测试。
 
-## 十七、验收
+## 二十、验收
 
-- QMT adapter 完整实现 BrokerProtocol；
-- 查询、下单、撤单、回调、重连和对账可用；
-- OMS 幂等和状态语义不被 SDK 破坏；
-- 仿真端到端和故障恢复通过；
-- LIVE 默认关闭并受双重门禁；
-- 专项、全量、fake SDK 和 QMT 集成测试通过；
-- PR 等待独立验收。
+- qrp-trading生产窄协议和版本语义封板；
+- request/client_order幂等和稳定错误码完整；
+- WebSocket事件可去重、可恢复、可对账；
+- qrp-atlas `MiniQmtGatewayAdapter` 完整实现 `ExecutionGatewayProtocol`；
+- qrp-atlas不依赖xtquant和Windows环境；
+- 查询、下单、撤单、事件、断线、重启和三方对账可用；
+- READONLY和仿真端到端通过；
+- LIVE默认关闭并受双重门禁；
+- 两个仓库各自测试和跨服务集成测试通过；
+- qrp-atlas工作分支PR目标为`develop/v1.1`；
+- 本地qrp-trading交付有独立提交、版本和验收记录。
