@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from qrp_atlas.api.db import get_db, get_db_path
+from qrp_atlas.config.settings import get_settings
 from qrp_atlas.api.routes import (
     declarative_strategies,
     adj_factor,
@@ -28,12 +29,16 @@ from qrp_atlas.api.routes import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化状态，关闭时清理"""
-    app.state.db_path = get_db_path()
+    settings = get_settings()
+    app.state.settings = settings
+    app.state.db_path = settings.paths.duckdb_path
     yield
 
 
 # ── FastAPI 应用 ──────────────────────────────
 
+
+_SETTINGS = get_settings()
 
 app = FastAPI(
     title="QRP Atlas API",
@@ -43,7 +48,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(_SETTINGS.api.cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

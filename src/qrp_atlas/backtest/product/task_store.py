@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import uuid
@@ -11,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from qrp_atlas.config.paths import PROJECT_ROOT
+from qrp_atlas.config.settings import AppSettings, require_writable
 
 from .schemas import BacktestTaskRecord, CreateBacktestTaskRequest
 
@@ -26,10 +25,7 @@ VALID_STATUSES = frozenset(
 
 
 def default_tasks_dir() -> Path:
-    env = os.getenv("QRP_ATLAS_BACKTEST_TASKS_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "backtest_tasks"
+    return AppSettings.load().paths.backtest_tasks_dir
 
 
 def _utc_now() -> str:
@@ -49,15 +45,33 @@ class BacktestTaskStore:
     pending / running / succeeded / failed.
     """
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else default_tasks_dir()
-        self.root.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        settings: AppSettings | None = None,
+    ) -> None:
+        effective = settings or AppSettings.load()
+        configured_root = effective.paths.backtest_tasks_dir
+        self.root = Path(root) if root is not None else configured_root
+        self._write_settings = (
+            effective
+            if self.root.resolve(strict=False) == configured_root.resolve(strict=False)
+            else None
+        )
+        if self._write_settings is None or not effective.runtime.read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
     def _path(self, task_id: str) -> Path:
         return self.root / f"{_validate_task_id(task_id)}.json"
 
     def _write_atomic(self, path: Path, payload: dict[str, Any]) -> None:
+        if self._write_settings is not None:
+            require_writable(
+                self._write_settings,
+                operation="writing configured backtest task storage",
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(

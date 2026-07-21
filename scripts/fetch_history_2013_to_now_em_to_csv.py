@@ -1,21 +1,10 @@
-import os
 import time
 import random
 from datetime import datetime
-from pathlib import Path
 
 import akshare as ak
 import pandas as pd
 
-# ============================================================
-# 代理处理：强制禁用 requests 从环境继承代理（不影响你浏览器继续用 Clash）
-# ============================================================
-os.environ["NO_PROXY"] = "*"
-for key in [
-    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-    "ALL_PROXY", "all_proxy",
-]:
-    os.environ.pop(key, None)
 
 # ============================================================
 # 配置区
@@ -23,8 +12,12 @@ for key in [
 
 START_DATE = pd.Timestamp("2013-01-01")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-SAVE_DIR = BASE_DIR / "data" / "history"
+from qrp_atlas.config import DATA_DIR
+from qrp_atlas.config.settings import apply_proxy_environment
+
+apply_proxy_environment(clear_unconfigured=True, default_no_proxy="*")
+
+SAVE_DIR = DATA_DIR / "history"
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 # 你指定的限速：0.5s + (0~0.5s随机)

@@ -5,8 +5,8 @@
 ## 环境前提
 
 - **目标机器**：Linux 开发机（非本 Windows 机器）
-- **后端**：uvicorn 监听 `0.0.0.0:8000`，systemd 服务 `qrp-atlas-api.service`，用户 `claire`
-- **内网地址**：当前 `192.168.0.102:8000`
+- **后端**：监听地址与端口由 `QRP_API_HOST` / `QRP_API_PORT` 配置，systemd 服务为 `qrp-atlas-api.service`，部署用户为 `qrp-atlas`
+- **内网地址**：使用部署环境实际地址；不要把机器 IP 写入仓库
 
 ---
 
@@ -68,7 +68,7 @@ ngrok http 8000
 
 ### 附录：systemd 单元（可选）
 
-`/etc/systemd/system/ngrok-tunnel.service`:
+`/etc/systemd/system/ngrok-tunnel.service`（令 `/etc/qrp-atlas/tunnel.env` 仅对服务用户可读，并在其中安全注入 `NGROK_AUTHTOKEN`）：
 
 ```ini
 [Unit]
@@ -78,8 +78,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=claire
-Environment=NGROK_AUTHTOKEN=<你的token>
+User=qrp-atlas
+EnvironmentFile=/etc/qrp-atlas/tunnel.env
 ExecStart=/usr/bin/ngrok http 8000 --log stdout
 Restart=always
 RestartSec=10
@@ -185,7 +185,7 @@ cloudflared tunnel route dns qrp-atlas api.example.com
 # 5. 编写 config.yml
 cat > ~/.cloudflared/config.yml << 'EOF'
 tunnel: <tunnel-id>
-credentials-file: /home/claire/.cloudflared/<tunnel-id>.json
+credentials-file: /var/lib/qrp-atlas/.cloudflared/<tunnel-id>.json
 ingress:
   - hostname: api.example.com
     service: http://localhost:8000

@@ -1,34 +1,28 @@
-"""Check how tushare client communicates with the custom gateway"""
-import os, sys
+"""Verify the configured Tushare gateway without printing credentials."""
+
+import os
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-# Let's see what URL the tushare client actually uses
-import tushare as ts
-pro = ts.pro_api("dummy")
-pro._DataApi__http_url = "http://124.220.22.110:8020/"
+from qrp_atlas.config.settings import AppSettings
+from qrp_atlas.config.tushare_client import get_tushare_pro
 
-# Inspect how tushare makes API calls
-# Look at the __http_url and how requests are sent
-print(f"API URL: {pro._DataApi__http_url}")
-print(f"Token: {pro._DataApi__token[:10]}...{pro._DataApi__token[-5:]}")
-
-# Let's try sending a raw request to the gateway
-import requests
-import json
-
-# Try the tushare API format the client uses
-payload = {
-    "api_name": "index_basic",
-    "token": "dummy",
-    "params": {"limit": 3},
-    "fields": ""
-}
-headers = {"Content-Type": "application/json"}
-r = requests.post("http://124.220.22.110:8020/", json=payload, timeout=10)
-print(f"\nRaw POST to gateway:")
-print(f"Status: {r.status_code}")
-print(f"Response: {r.text[:500]}")
+settings = AppSettings.load()
+print(f"Gateway: {settings.external_services.tushare_api_url}")
+print(
+    "Credential: configured"
+    if settings.external_services.tushare_token
+    else "Credential: not configured"
+)
+try:
+    pro = get_tushare_pro(settings=settings)
+    frame = pro.index_basic(limit=3)
+except Exception as exc:
+    print(f"Gateway test: FAILED ({type(exc).__name__})")
+    raise SystemExit(1) from exc
+else:
+    print(f"Gateway test: SUCCESS, got {len(frame)} rows")

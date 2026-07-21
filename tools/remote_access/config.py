@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from qrp_atlas.config import DB_PATH
+from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import TABLE_BY_NAME
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RUNTIME_DIR = REPOSITORY_ROOT / ".runtime" / "remote_access"
+DEFAULT_RUNTIME_DIR = AppSettings.load().paths.remote_access_runtime_dir
 
 MAX_ROWS = 200
 DEFAULT_ROWS = 50
@@ -60,16 +59,16 @@ class GatewaySettings:
     """Runtime-only gateway settings; database paths are never returned by APIs."""
 
     database_path: Path
-    token: str
+    token: str = field(repr=False)
     request_timeout_seconds: int = REQUEST_TIMEOUT_SECONDS
 
 
 def load_settings() -> GatewaySettings:
     """Load the generated token from a protected runtime file."""
     validate_allowlist()
-    token_file = Path(
-        os.environ.get("QRP_REMOTE_ACCESS_TOKEN_FILE", DEFAULT_RUNTIME_DIR / "token")
-    )
+    effective = AppSettings.load()
+    token_file = effective.runtime.remote_access_token_file
+    assert token_file is not None
     try:
         token = token_file.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -77,8 +76,9 @@ def load_settings() -> GatewaySettings:
     if len(token) < 32:
         raise RuntimeError("Remote access token is invalid; restart the gateway.")
 
-    configured_db_path = os.environ.get("QRP_REMOTE_ACCESS_DB_PATH")
+    database_path = effective.runtime.remote_access_database_path
+    assert database_path is not None
     return GatewaySettings(
-        database_path=Path(configured_db_path) if configured_db_path else DB_PATH,
+        database_path=database_path,
         token=token,
     )

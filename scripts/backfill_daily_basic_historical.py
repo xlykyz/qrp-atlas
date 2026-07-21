@@ -8,10 +8,11 @@ import os
 import duckdb
 from datetime import date, timedelta
 
+from qrp_atlas.config import DB_PATH, STATE_DIR
 from qrp_atlas.pipeline.daily_basic.run import run_for_date
 
 
-CHECKPOINT_FILE = "data/db/.daily_basic_backfill_checkpoint"
+CHECKPOINT_FILE = str(STATE_DIR / ".daily_basic_backfill_checkpoint")
 
 
 def load_checkpoint() -> date | None:
@@ -34,7 +35,7 @@ def clear_checkpoint():
 
 
 def main():
-    con = duckdb.connect("data/db/quant.db")
+    con = duckdb.connect(str(DB_PATH))
     all_trading_days = con.execute(
         "SELECT DISTINCT trade_date FROM daily_market_snapshot ORDER BY trade_date"
     ).fetchdf()
@@ -142,7 +143,7 @@ def main():
         clear_checkpoint()
         print(f"  ✅ 全部完成，checkpoint 已清除")
 
-    con = duckdb.connect("data/db/quant.db")
+    con = duckdb.connect(str(DB_PATH))
     r = con.execute("SELECT MIN(trade_date)::VARCHAR, MAX(trade_date)::VARCHAR, COUNT(DISTINCT trade_date) FROM daily_basic").fetchone()
     con.close()
     print(f"  daily_basic 当前: {r[0]} ~ {r[1]}, {r[2]} 天")
