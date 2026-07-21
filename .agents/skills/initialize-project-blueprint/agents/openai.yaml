@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目蓝图标准启动"
+  short_description: "按 PMI/PMP 方法建立范围基线、WBS 与工作包"
+  default_prompt: "Use $initialize-project-blueprint to audit this project, freeze the complete product endpoint, and create an executable Chinese blueprint with scope baseline, WBS, work packages, acceptance gates, and change control."
