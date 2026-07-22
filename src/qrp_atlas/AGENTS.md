@@ -322,6 +322,9 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 - 目录创建应集中、幂等，`QRP_READ_ONLY=true` 时不得创建缺失持久目录或打开写连接；
 - 测试必须使用临时目录和显式 `environ`/override，不能读取或污染真实用户目录、仓库 `data/` 或进程私有配置；
 - `.env.example` 与 `SUPPORTED_ENV_VARS` 必须同步，并说明类型、默认值、场景和秘密属性；
+- `qrp-atlas-config setup` 只能编排 `AppSettings`、`initialize_runtime()`、统一 doctor 和包内数据库初始化 API，不得复制配置解析、路径派生、默认值或 schema SQL；
+- setup 的交互层必须可注入输入输出，非 TTY 不得等待；秘密不得进入 CLI 参数、普通输入、摘要、日志、异常或测试快照；
+- 配置更新必须保留未知项和未修改秘密，采用原子替换与可恢复备份；现有配置和数据库不得静默覆盖；
 - 不提交真实密钥、token、数据库、本机 `.env` 或本地路径；
 - 默认值不得悄悄改变安全、PIT、owner 或执行语义。
 
