@@ -2,6 +2,109 @@
 
 本文说明 QRP Atlas v1.0 的统一运行配置、跨平台路径、秘密处理、初始化与诊断方式。配置实现的唯一事实来源是 `qrp_atlas.config.settings`。
 
+## 新用户首次运行：setup
+
+安装完成后，默认产品入口是：
+
+```bash
+qrp-atlas-config setup
+qrp-atlas-api
+```
+
+`setup` 是 `AppSettings`、`initialize_runtime()`、包内空数据库初始化和 `doctor()` 的产品化编排，不维护第二套配置解析或默认值。流程为：
+
+```text
+选择 profile
+→ 确认配置文件
+→ 设置运行与数据目录
+→ 创建、复用或跳过 DuckDB
+→ 配置 API 和认证
+→ 可选配置 Tushare 与代理
+→ 查看脱敏摘要
+→ 明确确认
+→ 原子保存
+→ 初始化目录和数据库
+→ doctor
+→ 输出唯一启动命令
+```
+
+交互流程支持在确认页返回修改。`Ctrl+C`、EOF 或取消不会写配置、创建目录或创建数据库。stdin/stdout 不是 TTY 时必须显式使用 `--non-interactive`，否则立即失败。
+
+### 三个 profile
+
+- `local`：`127.0.0.1`、local 认证、development、CORS `*`，默认建议创建空 DuckDB。
+- `lan`：`0.0.0.0`、local 认证、development；必须确认仅用于可信局域网，并确认或收紧 CORS。
+- `production`：production、database 认证；必须从隐藏输入或受保护环境提供 PostgreSQL DSN，必须使用显式 CORS，运行和数据目录必须在仓库外。
+
+Profile 只提供首次建议，所有候选值仍先由 `AppSettings.load(...)` 严格验证。
+
+### 配置文件与重复运行
+
+源码部署默认写入仓库根 `.env`。也可在命令前或 `setup` 子命令后指定其他文件：
+
+```bash
+qrp-atlas-config --env-file /etc/qrp-atlas/qrp-atlas.env setup
+qrp-atlas-config setup --env-file /etc/qrp-atlas/qrp-atlas.env
+```
+
+已有文件会先解析并显示脱敏摘要，用户明确选择更新后才写入。更新保留未知变量、注释和未修改秘密；原文件复制到不覆盖的 `.bak`/`.bak.N`，新内容通过同目录临时文件原子替换。POSIX 上目标文件和备份权限为 `0600`；Windows 不执行无意义的 `chmod`，文件访问边界由当前 Windows 用户和目录 ACL 决定。
+
+目标目录不可创建或不可写时 setup 明确失败。保存后的重新加载、初始化或 doctor 发生阻塞失败时，原配置恢复；setup 不自动删除用户已有目录或数据库。
+
+### DuckDB 三种模式
+
+1. `create`：在 `QRP_DUCKDB_PATH` 原子创建 v1.0 空库，只包含 `daily_market_snapshot`、`market_phase`、`trade_execution`，所有表零行；路径已存在时绝不覆盖。
+2. `reuse`：要求普通文件存在，以 DuckDB 只读模式打开并执行 `SHOW TABLES`，不写入数据。
+3. `skip`：完成配置、目录初始化和 doctor；最终明确提示真实数据库接口在 DuckDB 准备完成前不可用。
+
+`scripts/init_db.py` 只是包内 `qrp_atlas.database.create_empty_database()` 的兼容薄入口，schema SQL 只保留一份。setup 不运行 pipeline、不下载数据、不做历史回补。
+
+### 秘密处理
+
+PostgreSQL DSN、Tushare Token 和可能含凭据的代理 URL 使用隐藏输入；摘要、`repr`、doctor、日志和错误只显示 `configured` 状态或异常类型。未修改的已有秘密会保留。setup 不提供任何秘密 CLI 参数，`--set` 也不允许用于 setup；非交互模式只能从进程环境或已有受保护配置文件读取秘密。
+
+setup 不主动连接 PostgreSQL、不部署 PostgreSQL schema、不创建用户，也不在线验证 Tushare Token。PostgreSQL 后续管理继续使用现有 `qrp-atlas-auth`。
+
+### 非交互模式
+
+```bash
+qrp-atlas-config setup \
+  --profile local \
+  --env-file /srv/qrp-atlas/qrp-atlas.env \
+  --home /srv/qrp-atlas/runtime \
+  --data-dir /srv/qrp-atlas/data \
+  --database create \
+  --non-interactive --yes
+```
+
+非交互模式不等待输入，缺少 `--profile`、确认或 production 必需项时立即失败。已有配置还必须显式使用 `--update-existing`。端口占用作为警告输出；自动化调用方可据此选择不同 `--api-port`。命令稳定返回：成功 `0`，配置/执行失败 `2`，安全取消 `130`。
+
+### 自定义 env 文件启动
+
+默认仓库 `.env` 可直接使用 `qrp-atlas-api`。非默认文件必须使用正式参数：
+
+```bash
+qrp-atlas-api --env-file /srv/qrp-atlas/qrp-atlas.env
+```
+
+向导成功页会输出与实际文件一致的命令，不依赖仅在向导进程中有效的临时环境变量。
+
+Windows PowerShell 示例：
+
+```powershell
+qrp-atlas-config setup --env-file 'D:\QRP Atlas\qrp-atlas.env'
+qrp-atlas-api --env-file 'D:\QRP Atlas\qrp-atlas.env'
+```
+
+Linux 示例：
+
+```bash
+qrp-atlas-config setup --env-file "$HOME/.config/qrp-atlas/qrp-atlas.env"
+qrp-atlas-api --env-file "$HOME/.config/qrp-atlas/qrp-atlas.env"
+```
+
+路径支持绝对路径、`~` 和相对仓库根的路径；Windows/Linux 最终解析仍由 `AppSettings` 的统一跨平台规则决定。
+
 ## 1. 审计分类与边界
 
 本次运行配置审计将仓库内容分为三类：
@@ -223,6 +326,10 @@ QRP_AUTH_SESSION_TTL_SECONDS=86400
 
 ## 11. 已知边界
 
+- setup 不安装 Python、虚拟环境、systemd、Windows Service、Docker/Kubernetes、反向代理或防火墙规则。
+- setup 不迁移已有数据，不下载行情，不执行 pipeline，不部署 PostgreSQL schema，不管理用户。
+- setup 不提供网页设置页、远程配置中心或远程秘密管理。
+- Windows 上配置文件保护依赖用户账户和 ACL；setup 只在 POSIX 上执行 `0600`。
 - 本改动不提供数据迁移工具、动态配置中心、Vault/Consul、Docker 或 Kubernetes 编排。
 - 配置在进程内通过 `get_settings()` 缓存；修改环境后应重启进程。测试可调用 `reset_settings_cache()`。
 - doctor 验证 PostgreSQL DSN 的格式和存在性，不主动连接远程 PostgreSQL，避免诊断命令产生外部副作用。
