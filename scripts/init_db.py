@@ -1,19 +1,8 @@
-from pathlib import Path
 import duckdb
 
-# 获取项目根目录（src 的上一级）
-BASE_DIR = Path(__file__).resolve().parent.parent
+from qrp_atlas.config import DB_PATH, ensure_dirs
 
-# 数据库目录
-DB_DIR = BASE_DIR / "data" / "db"
-
-# 确保目录存在
-DB_DIR.mkdir(parents=True, exist_ok=True)
-
-# 数据库文件路径
-DB_PATH = DB_DIR / "quant.db"
-
-# 连接数据库
+ensure_dirs()
 con = duckdb.connect(str(DB_PATH))
 
 con.execute("BEGIN TRANSACTION;")

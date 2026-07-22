@@ -200,6 +200,61 @@ npm run build
 
 默认认证模式为本地单用户模式；数据库认证必须通过环境变量显式启用。具体说明见 [`docs/用户与认证/README.md`](docs/用户与认证/README.md)。
 
+## 运行配置与部署
+
+QRP v1.0 的运行配置统一由 `qrp_atlas.config.settings` 解析。未配置时仍使用仓库内 `data/`，因此现有本地开发方式保持兼容；生产部署可把代码、运行目录和持久数据完全分离。
+
+配置优先级固定为：
+
+```text
+显式参数 / qrp-atlas-config --set
+> 进程环境变量
+> QRP_ENV_FILE 或仓库根 .env
+> 稳定默认值
+```
+
+### 本地默认开发模式
+
+```bash
+python -m qrp_atlas.config show
+python -m qrp_atlas.config doctor
+python -m qrp_atlas.config init
+qrp-atlas-api
+```
+
+`show` 只显示脱敏后的最终配置；`doctor` 不写文件并以非零状态报告阻塞错误；`init` 幂等创建目录，但不会创建或覆盖数据库。
+
+### Windows 自定义数据目录
+
+```powershell
+$env:QRP_HOME = 'D:\qrp-runtime'
+$env:QRP_DATA_DIR = 'E:\qrp-data'
+$env:QRP_API_HOST = '127.0.0.1'
+python -m qrp_atlas.config doctor
+python -m qrp_atlas.config init
+```
+
+相对路径始终按仓库根解析，不依赖 PowerShell 当前目录。
+
+### Linux systemd 部署
+
+通用 unit 示例位于 `deploy/qrp-atlas-api.service`，默认采用 `/opt/qrp-atlas` 代码目录和 `/etc/qrp-atlas/qrp-atlas.env` 配置文件。数据位置由服务环境中的 `QRP_DATA_DIR` 决定，不要求放在代码仓库内。启动服务前应以服务用户运行 `qrp-atlas-config doctor` 和 `init`。
+
+### PostgreSQL 认证模式
+
+```env
+QRP_RUNTIME_ENV=production
+QRP_AUTH_MODE=database
+QRP_AUTH_DATABASE_URL=postgresql://USER:PASSWORD@db.example.com:5432/qrp_atlas
+QRP_AUTH_SESSION_TTL_SECONDS=86400
+```
+
+`database` 模式缺少 DSN 会立即失败且不会降级到本地认证。真实 DSN、Tushare token 和带认证信息的代理 URL 必须由安全环境注入，不得提交、打印或写入诊断结果。正式环境还应显式收紧 `QRP_API_CORS_ORIGINS`。
+
+旧的 `QRP_DB_READ_ONLY` 和 `QRP_ATLAS_*_DIR` 路径变量仍作为兼容别名，但新部署应使用 `.env.example` 中的 `QRP_*` 名称。应用不会自动迁移已有数据。
+
+完整变量清单、路径派生、Windows/Linux 示例、只读模式、systemd 和迁移边界见 [运行配置与部署文档](docs/runtime-configuration.md)。
+
 ## 数据目录
 
 `data/` 用于本地运行数据，通常不提交 Git：

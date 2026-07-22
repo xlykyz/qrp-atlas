@@ -5,8 +5,7 @@
 from pathlib import Path
 import duckdb
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "db" / "quant.db"
+from qrp_atlas.config import DB_PATH
 
 def fix_trade_date():
     if not DB_PATH.exists():

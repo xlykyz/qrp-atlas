@@ -10,9 +10,9 @@ import pandas as pd
 # 路径配置
 # =====================
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data" / "daily"
-DB_PATH = BASE_DIR / "data" / "db" / "quant.db"
+from qrp_atlas.config import DATA_DIR as QRP_DATA_DIR, DB_PATH
+
+DATA_DIR = QRP_DATA_DIR / "daily"
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 

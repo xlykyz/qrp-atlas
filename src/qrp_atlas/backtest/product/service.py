@@ -62,15 +62,11 @@ class BacktestTaskExecutionError(RuntimeError):
 
 
 def default_product_runs_dir() -> Path:
-    """Product and result API share one SSOT: QRP_ATLAS_BACKTEST_RUNS_DIR."""
+    """Return the configured product result root (legacy aliases supported)."""
 
-    import os
-    from qrp_atlas.config.paths import PROJECT_ROOT
+    from qrp_atlas.config.settings import AppSettings
 
-    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "backtest_runs"
+    return AppSettings.load().paths.backtest_runs_dir
 
 
 def _normalize_date(value: str, field: str) -> str:

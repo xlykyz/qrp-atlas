@@ -9,9 +9,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-RAW_DIR = BASE_DIR / "data" / "raw"
-DB_PATH = BASE_DIR / "data" / "db" / "quant.db"
+from qrp_atlas.config import DB_PATH, RAW_DIR
 
 # CSV 文件名 → (index_code, index_name)
 INDEX_FILES = {

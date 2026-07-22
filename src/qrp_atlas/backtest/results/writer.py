@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from qrp_atlas.config.paths import PROJECT_ROOT
+from qrp_atlas.config.settings import AppSettings, require_writable
 
 from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
 from .analytics import (
@@ -279,19 +279,26 @@ def _skipped_payload(
 
 
 def _default_runs_dir() -> Path:
-    import os
-
-    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "backtest_runs"
+    return AppSettings.load().paths.backtest_runs_dir
 
 
 class BacktestRunWriter:
     """Write portfolio output through a temporary result directory."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else _default_runs_dir()
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        settings: AppSettings | None = None,
+    ) -> None:
+        effective = settings or AppSettings.load()
+        configured_root = effective.paths.backtest_runs_dir
+        self.root = Path(root) if root is not None else configured_root
+        self._write_settings = (
+            effective
+            if self.root.resolve(strict=False) == configured_root.resolve(strict=False)
+            else None
+        )
 
     def write_portfolio_run(
         self,
@@ -314,6 +321,11 @@ class BacktestRunWriter:
         execution_targets: Any | None = None,
         reproducibility_snapshot: dict[str, Any] | None = None,
     ) -> Path:
+        if self._write_settings is not None:
+            require_writable(
+                self._write_settings,
+                operation="writing configured backtest run storage",
+            )
         _validate_run_id(run_id)
         run_dir = self.root / run_id
         if run_dir.exists() and not overwrite:

@@ -1,17 +1,20 @@
 [Unit]
-Description=QRP Atlas API - Market data backend
+Description=QRP Atlas API
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=claire
-WorkingDirectory=/home/claire/projects/qrp-atlas
-ExecStart=/home/claire/projects/qrp-atlas/.venv/bin/uvicorn qrp_atlas.api.server:app --host 0.0.0.0 --port 8000
-Restart=always
+User=qrp-atlas
+Group=qrp-atlas
+WorkingDirectory=/opt/qrp-atlas
+EnvironmentFile=/etc/qrp-atlas/qrp-atlas.env
+ExecStartPre=/opt/qrp-atlas/.venv/bin/qrp-atlas-config --env-file /etc/qrp-atlas/qrp-atlas.env doctor
+ExecStart=/opt/qrp-atlas/.venv/bin/qrp-atlas-api
+Restart=on-failure
 RestartSec=5
-
-# 日志
+NoNewPrivileges=true
+PrivateTmp=true
 StandardOutput=journal
 StandardError=journal
 
