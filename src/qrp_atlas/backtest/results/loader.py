@@ -21,7 +21,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR, PROJECT_ROOT
+from qrp_atlas.config.paths import BACKTEST_FIXTURE_RUNS_DIR
+from qrp_atlas.config.settings import AppSettings
 
 
 class RunNotFoundError(Exception):
@@ -52,12 +53,7 @@ def _validate_run_id(run_id: str) -> str:
 
 
 def _product_runs_dir() -> Path:
-    import os
-
-    env = os.getenv("QRP_ATLAS_BACKTEST_RUNS_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "backtest_runs"
+    return AppSettings.load().paths.backtest_runs_dir
 
 
 class BacktestRunsLoader:

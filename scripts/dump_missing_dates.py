@@ -1,10 +1,8 @@
 """Query trading calendar and save pre-2013 trading dates"""
 import duckdb
-from pathlib import Path
+from qrp_atlas.config import DATA_DIR, DB_PATH
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "db" / "quant.db"
-OUTPUT = PROJECT_ROOT / "data" / "historical_dates_to_fill.txt"
+OUTPUT = DATA_DIR / "historical_dates_to_fill.txt"
 
 con = duckdb.connect(str(DB_PATH))
 

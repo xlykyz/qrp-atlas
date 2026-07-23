@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from qrp_atlas.backtest.results.writer import BacktestRunWriter
-from qrp_atlas.config.paths import PROJECT_ROOT
+from qrp_atlas.config.settings import AppSettings, require_writable
 from qrp_atlas.pipeline.pit_backfill.safety import FileLock
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -49,19 +49,26 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _default_root() -> Path:
-    import os
-
-    env = os.getenv("QRP_ATLAS_ROBUSTNESS_RUNS_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "robustness_runs"
+    return AppSettings.load().paths.robustness_runs_dir
 
 
 class ResidualRobustnessWriter:
     """Persist a residual robustness study under an atomic run directory."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else _default_root()
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        settings: AppSettings | None = None,
+    ) -> None:
+        effective = settings or AppSettings.load()
+        configured_root = effective.paths.robustness_runs_dir
+        self.root = Path(root) if root is not None else configured_root
+        self._write_settings = (
+            effective
+            if self.root.resolve(strict=False) == configured_root.resolve(strict=False)
+            else None
+        )
 
     def write(
         self,
@@ -71,6 +78,11 @@ class ResidualRobustnessWriter:
         overwrite: bool = False,
         created_at: str | None = None,
     ) -> Path:
+        if self._write_settings is not None:
+            require_writable(
+                self._write_settings,
+                operation="writing configured robustness result storage",
+            )
         # Lazy import avoids product/results <-> research circular import at module load.
         from qrp_atlas.backtest.research.robustness import ResidualRobustnessResult
 

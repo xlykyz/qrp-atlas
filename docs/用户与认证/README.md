@@ -15,9 +15,9 @@
 
 ```env
 QRP_AUTH_MODE=local
-QRP_LOCAL_USER_ID=f445c8c9-96d8-4ce7-9f8a-9e884dd038d8
-QRP_LOCAL_USERNAME=ryan
-QRP_LOCAL_DISPLAY_NAME=Ryan
+QRP_LOCAL_USER_ID=00000000-0000-4000-8000-000000000001
+QRP_LOCAL_USERNAME=local-user
+QRP_LOCAL_DISPLAY_NAME=Local User
 ```
 
 ### Database
@@ -26,7 +26,7 @@ QRP_LOCAL_DISPLAY_NAME=Ryan
 
 ```env
 QRP_AUTH_MODE=database
-QRP_AUTH_DATABASE_URL=postgresql://qrp_auth:***@127.0.0.1:5432/qrp_auth
+QRP_AUTH_DATABASE_URL=postgresql://USER:PASSWORD@db.example.com:5432/qrp_atlas
 QRP_AUTH_SESSION_TTL_SECONDS=604800
 ```
 
@@ -47,7 +47,7 @@ Local 模式下 `/me` 直接返回固定用户；登录和退出端点明确返�
 3. 创建首个用户：
 
 ```bash
-python -m qrp_atlas.auth.cli create-user --username ryan --display-name Ryan
+python -m qrp_atlas.auth.cli create-user --username local-user --display-name "Local User"
 ```
 
 ## 业务层约束

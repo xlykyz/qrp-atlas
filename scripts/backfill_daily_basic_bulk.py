@@ -14,15 +14,15 @@ import pandas as pd
 from datetime import date, timedelta
 from pathlib import Path
 
-from qrp_atlas.config import get_tushare_pro
+from qrp_atlas.config import DB_PATH, RAW_DIR as QRP_RAW_DIR, STATE_DIR, get_tushare_pro
 from qrp_atlas.pipeline.daily_basic.clean import clean_daily_basic
 from qrp_atlas.contracts import (
     CREATED_AT, DAILY_BASIC, align_to_schema, quick_validate,
 )
 from qrp_atlas.contracts.schema import init_database
 
-RAW_DIR = "data/raw/daily_basic_raw"
-CHECKPOINT_FILE = "data/db/.daily_basic_backfill_checkpoint"
+RAW_DIR = str(QRP_RAW_DIR / "daily_basic_raw")
+CHECKPOINT_FILE = str(STATE_DIR / ".daily_basic_backfill_checkpoint")
 
 
 def load_checkpoint() -> date | None:
@@ -50,7 +50,7 @@ def raw_csv_path(trade_date: date) -> str:
 
 def fetch_all():
     """逐日 fetch，存 raw CSV"""
-    con = duckdb.connect("data/db/quant.db")
+    con = duckdb.connect(str(DB_PATH))
     all_days = con.execute(
         "SELECT DISTINCT trade_date FROM daily_market_snapshot ORDER BY trade_date"
     ).fetchdf()
@@ -141,7 +141,7 @@ def load_all():
     print(f"找到 {len(raw_files)} 个 raw CSV，开始批量入库...")
 
     total_loaded = 0
-    con = duckdb.connect("data/db/quant.db")
+    con = duckdb.connect(str(DB_PATH))
     init_database(con)
 
     for batch_start in range(0, len(raw_files), 500):
@@ -175,7 +175,7 @@ def load_all():
         print(f"[LOAD] batch {batch_start//500 + 1}/{(len(raw_files)-1)//500 + 1}: {len(clean_df)} rows → {total_loaded} total")
 
     con.close()
-    con = duckdb.connect("data/db/quant.db")
+    con = duckdb.connect(str(DB_PATH))
     r = con.execute("SELECT MIN(trade_date)::VARCHAR, MAX(trade_date)::VARCHAR, COUNT(DISTINCT trade_date), COUNT(*) FROM daily_basic").fetchone()
     con.close()
     print(f"\n[LOAD DONE] daily_basic: {r[0]} ~ {r[1]}, {r[2]} 天, {r[3]} 行")

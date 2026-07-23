@@ -5,9 +5,9 @@ import duckdb
 import pandas as pd
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-HISTORY_DIR = BASE_DIR / "data" / "history"
-DB_PATH = BASE_DIR / "data" / "db" / "quant.db"
+from qrp_atlas.config import DATA_DIR, DB_PATH
+
+HISTORY_DIR = DATA_DIR / "history"
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 

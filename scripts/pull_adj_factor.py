@@ -21,12 +21,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from qrp_atlas.config import DB_PATH, LOG_DIR, STATE_DIR
+
 import duckdb
 import pandas as pd
 
 # --- 配置 ---
-PROGRESS_FILE = PROJECT_ROOT / "data" / ".adj_factor_progress.json"
-LOG_FILE = PROJECT_ROOT / "data" / "adj_factor_pull.log"
+PROGRESS_FILE = STATE_DIR / ".adj_factor_progress.json"
+LOG_FILE = LOG_DIR / "adj_factor_pull.log"
 BATCH_INTERVAL = 0.15  # API 调用间隔（秒）
 MAX_RETRIES = 3
 
@@ -150,7 +152,7 @@ def main(resume: bool = False):
     log(f"{'断点续传模式' if resume else '全量模式'}")
 
     # 连接数据库
-    db = duckdb.connect(str(PROJECT_ROOT / "data" / "db" / "quant.db"))
+    db = duckdb.connect(str(DB_PATH))
     pro = get_tushare_pro_client()
 
     # 获取股票列表

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,8 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-from qrp_atlas.config import DB_PATH, PROJECT_ROOT, ensure_dirs
+from qrp_atlas.config import ensure_dirs
+from qrp_atlas.config.settings import AppSettings, redact_secrets
 from qrp_atlas.pipeline.fundamentals.clean import clean_financial
 from qrp_atlas.pipeline.fundamentals.fetch import fetch_financial_by_period
 from qrp_atlas.pipeline.fundamentals.load_duckdb import load_financial
@@ -80,15 +80,17 @@ LOGGER_NAME = "qrp_atlas.pipeline.pit_backfill"
 
 
 def default_paths(run_tag: str = RUN_TAG) -> dict[str, Path]:
-    data = PROJECT_ROOT / "data"
+    settings = AppSettings.load()
+    paths = settings.paths
+    state_dir = paths.state_dir / f"pit_backfill_{run_tag}"
     return {
-        "raw_dir": data / "raw" / "pit_backfill" / run_tag,
-        "cleaned_dir": data / "canonical" / "pit_backfill" / run_tag,
-        "state_dir": data / "state" / f"pit_backfill_{run_tag}",
-        "log_path": data / "logs" / f"pit_backfill_{run_tag}.log",
-        "manifest_path": data / "state" / f"pit_backfill_{run_tag}" / "manifest.jsonl",
-        "plan_path": data / "state" / f"pit_backfill_{run_tag}" / "plan.json",
-        "db_path": Path(DB_PATH),
+        "raw_dir": paths.raw_dir / "pit_backfill" / run_tag,
+        "cleaned_dir": paths.canonical_dir / "pit_backfill" / run_tag,
+        "state_dir": state_dir,
+        "log_path": paths.log_dir / f"pit_backfill_{run_tag}.log",
+        "manifest_path": state_dir / "manifest.jsonl",
+        "plan_path": state_dir / "plan.json",
+        "db_path": paths.duckdb_path,
     }
 
 
@@ -111,13 +113,7 @@ def setup_logging(log_path: str | Path) -> logging.Logger:
 
 def _sanitize_error(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}"
-    token = os.getenv("TUSHARE_TOKEN") or ""
-    if token and token in text:
-        text = text.replace(token, "***")
-    lowered = text.lower()
-    if any(k in lowered for k in ("token=", "authorization", "bearer ")):
-        text = text[:200] + " ...[redacted]"
-    return text[:2000]
+    return redact_secrets(text)[:2000]
 
 
 def parse_stages(raw: str | Sequence[str] | None) -> tuple[str, ...]:

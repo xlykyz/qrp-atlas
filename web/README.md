@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-开发服务默认运行在 `http://localhost:3000`。
+开发服务默认运行在 `http://localhost:5100`。
 
 ## API 地址
 

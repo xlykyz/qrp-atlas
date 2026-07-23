@@ -11,8 +11,7 @@ import duckdb
 import pandas as pd
 import akshare as ak
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "data" / "db" / "quant.db"
+from qrp_atlas.config import DB_PATH
 
 INDICES = [
     ("sh000001", "上证综指"),
