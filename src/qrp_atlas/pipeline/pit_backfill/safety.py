@@ -13,10 +13,10 @@ from typing import Iterator
 
 import duckdb
 
-from qrp_atlas.config import DB_PATH, PROJECT_ROOT
+from qrp_atlas.config import DB_PATH, STATE_DIR
 
 MIN_FREE_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
-DEFAULT_LOCK_PATH = PROJECT_ROOT / "data" / "state" / "quant.db.write.lock"
+DEFAULT_LOCK_PATH = STATE_DIR / "quant.db.write.lock"
 BACKUP_MARKER_NAME = "backup_marker.json"
 
 

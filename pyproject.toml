@@ -25,6 +25,11 @@ dependencies = [
     "filelock>=3.13",
 ]
 
+[project.scripts]
+qrp-atlas-config = "qrp_atlas.config.cli:main"
+qrp-atlas-api = "qrp_atlas.api.cli:main"
+qrp-atlas-auth = "qrp_atlas.auth.cli:main"
+
 [project.optional-dependencies]
 test = [
     "pytest",

@@ -22,10 +22,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from qrp_atlas.config import DATA_DIR, LOG_DIR, STATE_DIR
+
 # --- 配置 ---
-DATES_FILE = PROJECT_ROOT / "data" / "historical_dates_to_fill.txt"
-PROGRESS_FILE = PROJECT_ROOT / "data" / ".backfill_progress.json"
-LOG_FILE = PROJECT_ROOT / "data" / "backfill_history.log"
+DATES_FILE = DATA_DIR / "historical_dates_to_fill.txt"
+PROGRESS_FILE = STATE_DIR / ".backfill_progress.json"
+LOG_FILE = LOG_DIR / "backfill_history.log"
 
 API_INTERVAL = 0.3   # API 调用间隔（秒）
 MAX_RETRIES = 3

@@ -200,6 +200,94 @@ npm run build
 
 默认认证模式为本地单用户模式；数据库认证必须通过环境变量显式启用。具体说明见 [`docs/用户与认证/README.md`](docs/用户与认证/README.md)。
 
+## 运行配置与部署
+
+QRP v1.0 的运行配置统一由 `qrp_atlas.config.settings` 解析。新用户无需手写 `.env`，首次安装后运行交互式向导：
+
+```bash
+qrp-atlas-config setup
+qrp-atlas-api
+```
+
+向导依次选择 `local`、`lan` 或 `production` 场景，配置仓库外运行/数据目录、DuckDB、API、认证、可选 Tushare 与代理，显示脱敏摘要后才写入。保存后自动执行目录初始化、空库创建或已有库只读验证，以及 `doctor`。现有配置不会被静默覆盖，重复运行 `setup` 可安全更新；POSIX 配置文件权限收紧为 `0600`。
+
+数据库可选择：
+
+- 创建只含 v1.0 三张基础表、零业务数据的空 DuckDB；
+- 只读验证并复用已有 DuckDB；
+- 暂不创建数据库，此时真实数据库接口尚不可用。
+
+自定义配置文件可直接交给向导和 API：
+
+```bash
+qrp-atlas-config setup --env-file /path/to/qrp-atlas.env
+qrp-atlas-api --env-file /path/to/qrp-atlas.env
+```
+
+Windows 示例：
+
+```powershell
+qrp-atlas-config setup --env-file 'D:\QRP Atlas\qrp-atlas.env'
+qrp-atlas-api --env-file 'D:\QRP Atlas\qrp-atlas.env'
+```
+
+自动化环境使用确定性入口；秘密只允许来自进程环境或已有受保护配置文件，不接受秘密命令行参数：
+
+```bash
+qrp-atlas-config setup \
+  --profile local \
+  --env-file /srv/qrp-atlas/qrp-atlas.env \
+  --home /srv/qrp-atlas/runtime \
+  --data-dir /srv/qrp-atlas/data \
+  --database create \
+  --non-interactive --yes
+```
+
+`lan` 仅用于可信局域网；`production` 强制 `database` 认证、PostgreSQL DSN、显式 CORS 和仓库外数据目录。向导不连接或修改 PostgreSQL schema，也不验证 Tushare Token。
+
+### 高级手工配置
+
+未配置时仍使用仓库内 `data/`，因此现有本地开发方式保持兼容；高级部署也可直接管理 `.env` 或服务环境变量。
+
+配置优先级固定为：
+
+```text
+显式参数 / qrp-atlas-config --set
+> 进程环境变量
+> QRP_ENV_FILE 或仓库根 .env
+> 稳定默认值
+```
+
+### 手工检查与初始化
+
+```bash
+python -m qrp_atlas.config show
+python -m qrp_atlas.config doctor
+python -m qrp_atlas.config init
+qrp-atlas-api
+```
+
+`show` 只显示脱敏后的最终配置；`doctor` 不写文件并以非零状态报告阻塞错误；`init` 幂等创建目录，但不会创建或覆盖数据库。
+
+### Linux systemd 部署
+
+通用 unit 示例位于 `deploy/qrp-atlas-api.service`，默认采用 `/opt/qrp-atlas` 代码目录和 `/etc/qrp-atlas/qrp-atlas.env` 配置文件。数据位置由服务环境中的 `QRP_DATA_DIR` 决定，不要求放在代码仓库内。启动服务前应以服务用户运行 `qrp-atlas-config doctor` 和 `init`。
+
+### PostgreSQL 认证模式
+
+```env
+QRP_RUNTIME_ENV=production
+QRP_AUTH_MODE=database
+QRP_AUTH_DATABASE_URL=postgresql://USER:PASSWORD@db.example.com:5432/qrp_atlas
+QRP_AUTH_SESSION_TTL_SECONDS=86400
+```
+
+`database` 模式缺少 DSN 会立即失败且不会降级到本地认证。真实 DSN、Tushare token 和带认证信息的代理 URL 必须由安全环境注入，不得提交、打印或写入诊断结果。正式环境还应显式收紧 `QRP_API_CORS_ORIGINS`。
+
+旧的 `QRP_DB_READ_ONLY` 和 `QRP_ATLAS_*_DIR` 路径变量仍作为兼容别名，但新部署应使用 `.env.example` 中的 `QRP_*` 名称。应用不会自动迁移已有数据。
+
+完整变量清单、路径派生、Windows/Linux 示例、只读模式、systemd 和迁移边界见 [运行配置与部署文档](docs/runtime-configuration.md)。
+
 ## 数据目录
 
 `data/` 用于本地运行数据，通常不提交 Git：

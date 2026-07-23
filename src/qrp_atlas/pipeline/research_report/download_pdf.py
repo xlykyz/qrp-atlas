@@ -17,7 +17,7 @@ from pathlib import Path
 
 import duckdb
 
-from qrp_atlas.config.paths import DB_PATH
+from qrp_atlas.config.paths import DB_PATH, RESEARCH_PDFS_DIR
 
 from .config import INTERVAL_MAX, INTERVAL_MIN
 
@@ -192,7 +192,7 @@ def main() -> None:
     )
 
     # 数据目录
-    pdf_base_dir = Path(__file__).resolve().parents[4] / "data" / "pdfs" / "research_report"
+    pdf_base_dir = RESEARCH_PDFS_DIR / "research_report"
 
     rows = query_reports(args.mode, pdf_base_dir)
     total = len(rows)

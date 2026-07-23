@@ -5,17 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/projects/qrp-atlas
+User=qrp-atlas
+Group=qrp-atlas
+WorkingDirectory=/opt/qrp-atlas
 Environment=PYTHONUNBUFFERED=1
-Environment=QRP_PROJECT_ROOT=%h/projects/qrp-atlas
-Environment=QRP_ATLAS_ROOT=%h/projects/qrp-atlas
-EnvironmentFile=-%h/projects/qrp-atlas/.env
-# Portable user-unit paths via %h; override with a drop-in if repo root differs.
-ExecStart=%h/projects/qrp-atlas/.venv/bin/python -m qrp_atlas.pipeline.pit_backfill --mode full --resume --stages fetch --run-tag 20260714 --no-backup
+EnvironmentFile=/etc/qrp-atlas/qrp-atlas.env
+ExecStart=/opt/qrp-atlas/.venv/bin/python -m qrp_atlas.pipeline.pit_backfill --mode full --resume --stages fetch --run-tag 20260714 --no-backup
 RemainAfterExit=yes
-StandardOutput=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.fetch.out
-StandardError=append:%h/projects/qrp-atlas/data/logs/pit_backfill_20260714.fetch.err
+StandardOutput=journal
+StandardError=journal
 TimeoutStartSec=infinity
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

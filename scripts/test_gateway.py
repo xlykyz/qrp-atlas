@@ -1,30 +1,28 @@
-"""Test custom API gateway without local token"""
-import os, sys
+"""Verify the configured Tushare gateway without printing credentials."""
+
+import os
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from dotenv import load_dotenv
-load_dotenv()
+from qrp_atlas.config.settings import AppSettings
+from qrp_atlas.config.tushare_client import get_tushare_pro
 
-import tushare as ts
-
-# Try with minimal placeholder token via custom gateway
-CUSTOM_API = "http://124.220.22.110:8020/"
-pro = ts.pro_api("test_placeholder")
-pro._DataApi__http_url = CUSTOM_API
-
+settings = AppSettings.load()
+print(f"Gateway: {settings.external_services.tushare_api_url}")
+print(
+    "Credential: configured"
+    if settings.external_services.tushare_token
+    else "Credential: not configured"
+)
 try:
-    df = pro.index_basic(limit=3)
-    print(f"SUCCESS: {len(df)} rows")
-    print(df.to_string())
-
-    # Try a daily query
-    df2 = pro.daily(trade_date="20100104")
-    print(f"\nDaily 20100104: {len(df2)} rows")
-    if len(df2) > 0:
-        print(df2.head(3))
-except Exception as e:
-    print(f"FAILED: {e}")
+    pro = get_tushare_pro(settings=settings)
+    frame = pro.index_basic(limit=3)
+except Exception as exc:
+    print(f"Gateway test: FAILED ({type(exc).__name__})")
+    raise SystemExit(1) from exc
+else:
+    print(f"Gateway test: SUCCESS, got {len(frame)} rows")

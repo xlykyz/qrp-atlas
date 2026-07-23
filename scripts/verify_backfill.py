@@ -6,11 +6,11 @@
 
 import duckdb
 
-DB_PATH = "/home/claire/projects/qrp-atlas/data/db/quant.db"
+from qrp_atlas.config import DB_PATH
 START = "2014-05-14"
 END = "2026-02-13"
 
-con = duckdb.connect(DB_PATH)
+con = duckdb.connect(str(DB_PATH))
 
 dates = con.execute(
     "SELECT trade_date::DATE FROM trading_calendar "

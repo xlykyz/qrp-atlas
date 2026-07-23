@@ -75,3 +75,9 @@ def test_unsafe_or_unavailable_requests_are_rejected(client, url, payload):
     response = client.request("POST", url, headers=auth_headers(), json=payload)
 
     assert response.status_code in {400, 404, 422}
+
+
+def test_gateway_settings_repr_redacts_token(sample_db_path):
+    token = "sensitive-gateway-token" * 2
+    settings = GatewaySettings(database_path=sample_db_path, token=token)
+    assert token not in repr(settings)

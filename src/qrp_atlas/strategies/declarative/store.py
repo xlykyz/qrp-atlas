@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from filelock import FileLock
 
-from qrp_atlas.config.paths import PROJECT_ROOT
+from qrp_atlas.config.settings import AppSettings, require_writable
 from qrp_atlas.strategies.registry import list_strategies
 
 from .evaluator import DeclarativeStrategy
@@ -39,12 +39,7 @@ def _now() -> str:
 
 
 def _default_root() -> Path:
-    import os
-
-    env = os.getenv("QRP_ATLAS_DECLARATIVE_STRATEGIES_DIR")
-    if env:
-        return Path(env)
-    return PROJECT_ROOT / "data" / "declarative_strategies"
+    return AppSettings.load().paths.declarative_strategies_dir
 
 
 def deterministic_json(payload: Any) -> str:
@@ -120,11 +115,31 @@ def validate_declarative_payload(payload: dict[str, Any]) -> DeclarativeStrategy
 class DeclarativeStrategyStore:
     """Filesystem store: one JSON file per code@version under owner namespace."""
 
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = Path(root) if root is not None else _default_root()
-        self.root.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        settings: AppSettings | None = None,
+    ) -> None:
+        effective = settings or AppSettings.load()
+        configured_root = effective.paths.declarative_strategies_dir
+        self.root = Path(root) if root is not None else configured_root
+        self._write_settings = (
+            effective
+            if self.root.resolve(strict=False) == configured_root.resolve(strict=False)
+            else None
+        )
+        if self._write_settings is None or not effective.runtime.read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._file_lock_path = self.root / ".store.lock"
+
+    def _require_writable(self) -> None:
+        if self._write_settings is not None:
+            require_writable(
+                self._write_settings,
+                operation="writing configured declarative strategy storage",
+            )
 
     @contextmanager
     def _exclusive(self):
@@ -192,6 +207,7 @@ class DeclarativeStrategyStore:
         callers explicitly rather than silently changing behavior.
         """
 
+        self._require_writable()
         owner = str(owner_user_id)
         spec = validate_declarative_payload(payload)
         builtin_codes = {definition.code for definition in list_strategies()}
@@ -299,6 +315,7 @@ class DeclarativeStrategyStore:
         owner_user_id: str | UUID,
         status: str,
     ) -> DeclarativeStrategyRecord:
+        self._require_writable()
         if status not in {"active", "archived", "disabled"}:
             raise DeclarativeStoreError("status must be active|archived|disabled")
         owner = str(owner_user_id)
@@ -335,6 +352,7 @@ class DeclarativeStrategyStore:
             return updated
 
     def mark_referenced(self, code: str, version: str, *, owner_user_id: str | UUID) -> None:
+        self._require_writable()
         owner = str(owner_user_id)
         path = self._path(owner, code, version)
         if not path.exists():
