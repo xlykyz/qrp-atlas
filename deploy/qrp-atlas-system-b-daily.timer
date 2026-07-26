@@ -1,0 +1,10 @@
+[Unit]
+Description=Run QRP Atlas System B monitoring after market data readiness window
+
+[Timer]
+OnCalendar=Mon..Fri 18:30:00 Asia/Shanghai
+Persistent=true
+Unit=qrp-atlas-system-b-daily.service
+
+[Install]
+WantedBy=timers.target
