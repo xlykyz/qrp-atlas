@@ -58,12 +58,6 @@ def _history_sql(where: str) -> str:
           ON run.production_run_id = observation.production_run_id
          AND run.status = 'SUCCEEDED'
         WHERE {where}
-        QUALIFY row_number() OVER (
-            PARTITION BY observation.asset_id, observation.trade_date
-            ORDER BY run.completed_at DESC NULLS LAST,
-                     observation.created_at DESC,
-                     observation.input_snapshot_id DESC
-        ) = 1
     """
 
 

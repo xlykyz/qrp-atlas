@@ -69,7 +69,7 @@ primary_document: docs/15_交易系统2.0(初稿).md
 - `04_SystemB工程映射.md`：业务规则到 QRP 模块的映射；
 - `05_验收与变更控制.md`：测试、发布和规则变更治理。
 - `task03/README.md`：System B 2.0 纯历史事实派生模型、NULL 与生命周期语义。
-- `task04/README.md`：System B 全市场事实统计、独立求值、批量初始化、每日增量、查询与部署说明。
+- `task04/README.md`：System B 全市场事实统计、独立求值、范围原子覆盖、每日定点计算、查询与部署说明。
 
 ## 6. 分支治理
 

@@ -42,20 +42,15 @@ INSUFFICIENT_STATE_FACTS
 BROKEN_TRADING_SEQUENCE
 MISSING_PREVIOUS_ACTUAL_TRADING_FACT
 NO_UNIQUE_STATE_MATCH
+INCOMPLETE_MA5_WINDOW
+UNCERTAIN_LISTING_TRADING_DAY_NUMBER
 ```
 
 后续日期仍重新根据截至当日的历史事实独立求值。
 
 ## 4. 生命周期
 
-```text
-listing_trading_day_number <= 10
-→ lifecycle_state = NEW_LISTING_WARMUP
-→ trend_state = NULL
-
-listing_trading_day_number >= 11
-→ lifecycle_state = NORMAL
-```
+精确实际交易日序号可证明时，前 10 个实际交易日为 `NEW_LISTING_WARMUP`，第 11 日起为 `NORMAL`。发生 `UNRESOLVED_MISSING` 后，`listing_trading_day_number=NULL`、`listing_trading_day_number_is_exact=false`，并另存 `confirmed_listing_trading_day_count`。确认交易日已超过 10 个时仍可证明 `NORMAL`；否则生命周期也为 NULL，不提前解除预热。
 
 预热不删除历史行情事实。第 11 个实际交易日直接使用第 10 日及此前事实判定，不从 BASE 启动、不清零任何事实统计。
 
@@ -65,7 +60,7 @@ listing_trading_day_number >= 11
 - `EXPLICIT_NON_TRADING`：明确停牌或正式零成交量日；不进入实际交易日序列，状态从截至当日最近的完整实际交易事实派生；
 - `UNRESOLVED_MISSING`：无日线且无明确停牌等无法解释的缺口；破坏实际交易日连续性证明。
 
-缺口后的首个确认实际交易日：线下可直接判定 BASE；线上因无法证明前一实际交易关系而为 NULL。此后两个确认实际交易日均在线上可重新得到 ACTIVE；确认线下后首日线上可得到 CANDIDATE。
+MA5 必须由同一连续可证明片段中的当前实际交易日和前 4 个实际交易日组成。`UNRESOLVED_MISSING` 会切断片段，禁止跳过缺口并使用更早价格补窗。缺口后第 1—4 个确认实际交易日 MA5 为 NULL，第 5 日首次形成可信 MA5：当日线下可判定 BASE；CANDIDATE/ACTIVE 还要求紧邻前一实际交易日也具有可信 MA5，通常从第 6 日起恢复。
 
 ## 6. 标准事实输入
 
@@ -75,9 +70,14 @@ listing_trading_day_number >= 11
 latest_actual_trade_date
 latest_actual_close
 latest_actual_ma5
+latest_actual_ma5_window_complete
 latest_actual_is_above_or_equal_ma5
 previous_actual_trade_date
 previous_actual_is_above_or_equal_ma5
+previous_actual_ma5_window_complete
+ma5_window_complete
+confirmed_listing_trading_day_count
+listing_trading_day_number_is_exact
 state_basis_sequence_intact
 actual_pair_contiguous
 ```
@@ -104,9 +104,9 @@ state_changed
 ## 9. 版本
 
 ```text
-rule_version_set_id = system_b_2_0_fact_derived_1__user_20260726
-parameter_set_id = system_b_2_0_fact_derived_1_params_1
-calculation_version = system_b_fact_derived_state@2.0.0
+rule_version_set_id = system_b_2_0_fact_derived_ma5_complete_1__user_20260726
+parameter_set_id = system_b_2_0_fact_derived_ma5_complete_1_params_1
+calculation_version = system_b_fact_derived_state@2.1.0
 ```
 
 旧递推计算版本不覆盖、不复用。

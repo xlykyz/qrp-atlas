@@ -29,7 +29,7 @@
 ### 输入
 
 - 前复权日线；
-- 个股实际交易日；
+- 个股实际交易日及序号确定性；
 - 上市日期；
 - 停复牌事实。
 
@@ -44,7 +44,9 @@
 事实不足或无法唯一匹配 → trend_state = NULL + diagnostics
 ```
 
-`NEW_LISTING_WARMUP` 只写入 `lifecycle_state`。前 10 个实际交易日 `trend_state=NULL`；第 11 日直接使用既有市场事实计算，不默认从 BASE 启动。`previous_trend_state` 和 `state_changed` 仅用于计算完成后的审计比较。
+MA5 只使用同一可证明连续片段中的 5 个确认实际交易日。明确停牌和正式零成交量不进入窗口但不切断片段；`UNRESOLVED_MISSING` 切断片段，缺口后重新累计 5 个确认实际交易日才恢复 MA5。
+
+`NEW_LISTING_WARMUP` 只写入 `lifecycle_state`。前 10 个可证明实际交易日 `trend_state=NULL`；第 11 日直接使用既有市场事实计算，不默认从 BASE 启动。若缺口使精确交易日序号不可证明，则序号和生命周期按可确定性输出 NULL，不以确认行数冒充精确序号。`previous_trend_state` 和 `state_changed` 仅用于计算完成后的审计比较。
 
 行情轮次至少输出：
 

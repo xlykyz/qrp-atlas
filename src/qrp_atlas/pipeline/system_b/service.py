@@ -49,10 +49,8 @@ from .repository import (
     ensure_system_b_schema,
     execute_standard_input,
     fail_run,
-    find_succeeded_run,
     import_staging,
     iter_asset_batches,
-    latest_success_trade_date,
     open_database,
     update_run_metrics,
     validate_source_schema,
@@ -169,9 +167,19 @@ def _validate_staging(
                       AND trend_state NOT IN ('BASE','CANDIDATE','ACTIVE')
                 ) AS invalid_states,
                 count(*) FILTER (
-                    WHERE lifecycle_state NOT IN ('NEW_LISTING_WARMUP','NORMAL')
+                    WHERE lifecycle_state IS NOT NULL
+                      AND lifecycle_state NOT IN ('NEW_LISTING_WARMUP','NORMAL')
                 ) AS invalid_lifecycle_states,
-                count(*) FILTER (WHERE listing_trading_day_number >= 11 AND is_trading_day AND ma5 IS NULL) AS missing_ma5,
+                count(*) FILTER (
+                    WHERE (ma5_window_complete AND ma5 IS NULL)
+                       OR (NOT ma5_window_complete AND ma5 IS NOT NULL)
+                       OR (latest_actual_ma5_window_complete AND latest_actual_ma5 IS NULL)
+                       OR (NOT latest_actual_ma5_window_complete AND latest_actual_ma5 IS NOT NULL)
+                       OR (listing_trading_day_number_is_exact
+                           AND listing_trading_day_number IS DISTINCT FROM confirmed_listing_trading_day_count)
+                       OR (NOT listing_trading_day_number_is_exact
+                           AND listing_trading_day_number IS NOT NULL)
+                ) AS invalid_fact_proofs,
                 count(DISTINCT rule_version_set_id) AS rule_versions,
                 count(DISTINCT parameter_set_id) AS parameter_versions
             FROM {relation}
@@ -181,14 +189,14 @@ def _validate_staging(
         connection.close()
     if row is None:
         raise SystemBProductionError("EMPTY_STAGING", "staging validation returned no result")
-    rows, assets, duplicates, invalid_states, invalid_lifecycle_states, missing_ma5, rules, parameters = row
+    rows, assets, duplicates, invalid_states, invalid_lifecycle_states, invalid_fact_proofs, rules, parameters = row
     failures = {
         "rows": (rows, expected_rows),
         "assets": (assets, expected_assets),
         "duplicates": (duplicates, 0),
         "invalid_states": (invalid_states, 0),
         "invalid_lifecycle_states": (invalid_lifecycle_states, 0),
-        "missing_ma5": (missing_ma5, 0),
+        "invalid_fact_proofs": (invalid_fact_proofs, 0),
         "rule_versions": (rules, 1),
         "parameter_versions": (parameters, 1),
     }
@@ -346,21 +354,9 @@ def initialize_history(
             "peak_memory_mb": _peak_memory_mb(),
         }
 
-        existing = None
-        if output is not None:
-            existing = find_succeeded_run(
-                output,
-                run_type="INITIALIZE",
-                target_start_date=start_date,
-                target_end_date=end_date,
-                rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
-                parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
-                input_snapshot_id=input_snapshot_id,
-            )
         import_seconds = 0.0
         status = "DRY_RUN" if dry_run else "SUCCEEDED"
-        existing_id = str(existing["production_run_id"]) if existing else None
-        if not dry_run and existing is None:
+        if not dry_run:
             import_started = time.perf_counter()
             import_staging(
                 output,
@@ -369,19 +365,14 @@ def initialize_history(
                 input_snapshot_id=input_snapshot_id,
                 calculation_version=SYSTEM_B_CALCULATION_VERSION,
                 metrics={**metrics, "import_seconds": 0.0},
-                require_empty_rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
-                require_empty_parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
+                replace_start_date=start_date or market_start,
+                replace_end_date=end_date,
+                replace_asset_ids=asset_ids,
             )
             import_seconds = time.perf_counter() - import_started
-        elif not dry_run and existing is not None:
-            output.execute(
-                "DELETE FROM system_b_production_run WHERE production_run_id = ?",
-                [run_id],
-            )
-            status = "IDEMPOTENT_NOOP"
 
         total_seconds = time.perf_counter() - started
-        if not dry_run and existing is None:
+        if not dry_run:
             update_run_metrics(
                 output,
                 production_run_id=run_id,
@@ -393,7 +384,7 @@ def initialize_history(
                 },
             )
         report = SystemBRunReport(
-            production_run_id=None if dry_run else (existing_id or run_id),
+            production_run_id=None if dry_run else run_id,
             run_type="INITIALIZE",
             status=status,
             input_snapshot_id=input_snapshot_id,
@@ -418,7 +409,7 @@ def initialize_history(
             total_seconds=total_seconds,
             peak_memory_mb=_peak_memory_mb(),
             staging_directory=str(staging_dir),
-            idempotent_existing_run_id=existing_id,
+            idempotent_existing_run_id=None,
         )
         (staging_dir / "manifest.json").write_text(
             json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
@@ -472,41 +463,27 @@ def run_daily(
     run_id = uuid.uuid4().hex
     staging_dir = _make_staging_dir(staging_root, run_id)
     same_database = source_database.resolve() == output_database.resolve()
-    if same_database:
-        output = open_database(output_database, read_only=dry_run)
+    if dry_run:
+        source = open_database(source_database, read_only=True)
+        output = None
+    elif same_database:
+        output = open_database(output_database, read_only=False)
         source = output
     else:
         source = open_database(source_database, read_only=True)
-        output = open_database(output_database, read_only=dry_run)
+        output = open_database(output_database, read_only=False)
     created_run = False
     completed = False
     metrics: dict[str, Any] = {}
     try:
         validate_source_schema(source)
-        if dry_run:
-            if not all(
-                output.execute(
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-                    [name],
-                ).fetchone()[0]
-                for name in ("system_b_state_observation", "system_b_production_run")
-            ):
-                raise SystemBProductionError(
-                    "MISSING_SYSTEM_B_SCHEMA",
-                    "daily dry-run requires existing System B history schema",
-                )
-        else:
+        if not dry_run:
             ensure_system_b_schema(output)
         is_open = source.execute(
             "SELECT is_open FROM trading_calendar WHERE trade_date = ?", [trade_date]
         ).fetchone()
         if not is_open or not bool(is_open[0]):
             raise SystemBProductionError("TARGET_NOT_MARKET_TRADING_DAY", str(trade_date))
-        latest_success_date = latest_success_trade_date(
-            output,
-            rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
-            parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
-        )
         if not dry_run:
             create_run(
                 output,
@@ -519,13 +496,6 @@ def run_daily(
                 calculation_version=SYSTEM_B_CALCULATION_VERSION,
             )
             created_run = True
-        if latest_success_date is not None and trade_date < latest_success_date:
-            raise SystemBProductionError(
-                "BACKDATED_RECOMPUTE_REQUIRED",
-                f"target {trade_date} is earlier than latest successful state date "
-                f"{latest_success_date}; use a future recompute-from workflow",
-            )
-
         read_started = time.perf_counter()
         frame = execute_standard_input(
             source,
@@ -540,58 +510,6 @@ def run_daily(
         _update_hash(digest, frame)
         input_snapshot_id = f"sha256:{digest.hexdigest()}"
         asset_ids = sorted(frame[ASSET_ID].astype(str).unique())
-        existing = None
-        if not dry_run:
-            existing = find_succeeded_run(
-                output,
-                run_type="DAILY",
-                target_start_date=trade_date,
-                target_end_date=trade_date,
-                rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
-                parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
-                input_snapshot_id=input_snapshot_id,
-            )
-        if existing is not None:
-            output.execute(
-                "DELETE FROM system_b_production_run WHERE production_run_id = ?",
-                [run_id],
-            )
-            existing_metrics = json.loads(str(existing.get("metrics") or "{}"))
-            total_seconds = time.perf_counter() - started
-            report = SystemBRunReport(
-                production_run_id=str(existing["production_run_id"]),
-                run_type="DAILY",
-                status="IDEMPOTENT_NOOP",
-                input_snapshot_id=input_snapshot_id,
-                asset_count=int(existing_metrics.get("asset_count", len(asset_ids))),
-                market_start_date=trade_date.isoformat(),
-                market_end_date=trade_date.isoformat(),
-                input_row_count=len(frame),
-                calculated_row_count=0,
-                output_row_count=int(existing_metrics.get("output_row_count", len(frame))),
-                state_counts=dict(existing_metrics.get("state_counts", {})),
-                null_state_count=int(existing_metrics.get("null_state_count", 0)),
-                explicit_non_trading_count=int(existing_metrics.get("explicit_non_trading_count", 0)),
-                unresolved_market_fact_count=int(existing_metrics.get("unresolved_market_fact_count", 0)),
-                error_count=0,
-                sql_query_count=1,
-                batch_count=0,
-                asset_batch_size=len(asset_ids),
-                read_seconds=read_seconds,
-                calculation_seconds=0.0,
-                staging_write_seconds=0.0,
-                import_seconds=0.0,
-                total_seconds=total_seconds,
-                peak_memory_mb=_peak_memory_mb(),
-                staging_directory=str(staging_dir),
-                idempotent_existing_run_id=str(existing["production_run_id"]),
-            )
-            (staging_dir / "manifest.json").write_text(
-                json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            completed = True
-            return report
         calculation_started = time.perf_counter()
         result = calculate_system_b_2_0_states(_request(frame))
         calculation_seconds = time.perf_counter() - calculation_started
@@ -632,7 +550,6 @@ def run_daily(
         }
         import_seconds = 0.0
         status = "DRY_RUN" if dry_run else "SUCCEEDED"
-        existing_id = None
         if not dry_run:
             import_started = time.perf_counter()
             import_staging(
@@ -642,6 +559,8 @@ def run_daily(
                 input_snapshot_id=input_snapshot_id,
                 calculation_version=SYSTEM_B_CALCULATION_VERSION,
                 metrics={**metrics, "import_seconds": 0.0},
+                replace_start_date=trade_date,
+                replace_end_date=trade_date,
             )
             import_seconds = time.perf_counter() - import_started
         total_seconds = time.perf_counter() - started
@@ -657,7 +576,7 @@ def run_daily(
                 },
             )
         report = SystemBRunReport(
-            production_run_id=None if dry_run else (existing_id or run_id),
+            production_run_id=None if dry_run else run_id,
             run_type="DAILY",
             status=status,
             input_snapshot_id=input_snapshot_id,
@@ -682,7 +601,7 @@ def run_daily(
             total_seconds=total_seconds,
             peak_memory_mb=_peak_memory_mb(),
             staging_directory=str(staging_dir),
-            idempotent_existing_run_id=existing_id,
+            idempotent_existing_run_id=None,
         )
         (staging_dir / "manifest.json").write_text(
             json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
@@ -717,7 +636,7 @@ def run_daily(
         raise
     finally:
         source.close()
-        if output is not source:
+        if output is not None and output is not source:
             output.close()
         if completed and not keep_staging and staging_dir.exists():
             shutil.rmtree(staging_dir)

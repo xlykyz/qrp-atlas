@@ -17,6 +17,7 @@ from qrp_atlas.contracts import (
     CALCULATION_VERSION,
     CLOSE,
     COMPLETED_AT,
+    CONFIRMED_LISTING_TRADING_DAY_COUNT,
     CREATED_AT,
     DIAGNOSTICS,
     INPUT_SNAPSHOT_ID,
@@ -25,13 +26,17 @@ from qrp_atlas.contracts import (
     LATEST_ACTUAL_CLOSE,
     LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
     LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_MA5_WINDOW_COMPLETE,
     LATEST_ACTUAL_TRADE_DATE,
     LIFECYCLE_STATE,
     LISTING_TRADING_DAY_NUMBER,
+    LISTING_TRADING_DAY_NUMBER_IS_EXACT,
     MA5,
+    MA5_WINDOW_COMPLETE,
     MARKET_FACT_STATUS,
     PARAMETER_SET_ID,
     PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE,
     PREVIOUS_ACTUAL_TRADE_DATE,
     PREVIOUS_TREND_STATE,
     PRICE_ADJUSTMENT,
@@ -40,6 +45,8 @@ from qrp_atlas.contracts import (
     SOURCE_RULE_IDS,
     STATE_CHANGED,
     STATE_BASIS_SEQUENCE_INTACT,
+    SYSTEM_B_2_0_PARAMETER_SET_ID,
+    SYSTEM_B_2_0_RULE_VERSION_SET_ID,
     SYSTEM_B_LATEST_STATE_VIEW,
     SYSTEM_B_PRODUCTION_RUN,
     SYSTEM_B_PRODUCTION_RUN_TABLE,
@@ -72,15 +79,20 @@ STATE_INSERT_COLUMNS = (
     MARKET_FACT_STATUS,
     IS_TRADING_DAY,
     LISTING_TRADING_DAY_NUMBER,
+    CONFIRMED_LISTING_TRADING_DAY_COUNT,
+    LISTING_TRADING_DAY_NUMBER_IS_EXACT,
     CLOSE,
     MA5,
+    MA5_WINDOW_COMPLETE,
     IS_ABOVE_OR_EQUAL_MA5,
     LATEST_ACTUAL_TRADE_DATE,
     LATEST_ACTUAL_CLOSE,
     LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_MA5_WINDOW_COMPLETE,
     LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
     PREVIOUS_ACTUAL_TRADE_DATE,
     PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE,
     STATE_BASIS_SEQUENCE_INTACT,
     ACTUAL_PAIR_CONTIGUOUS,
     PRICE_ADJUSTMENT,
@@ -130,7 +142,14 @@ def ensure_system_b_schema(connection: duckdb.DuckDBPyConnection) -> None:
         ).fetchall()
     ]
     expected_columns = [column.name for column in SYSTEM_B_STATE_OBSERVATION.columns]
-    if actual_columns != expected_columns:
+    actual_primary_key = [
+        row[1]
+        for row in connection.execute(
+            f"SELECT * FROM pragma_table_info('{SYSTEM_B_STATE_OBSERVATION_TABLE}') WHERE pk ORDER BY pk"
+        ).fetchall()
+    ]
+    expected_primary_key = list(SYSTEM_B_STATE_OBSERVATION.primary_key)
+    if actual_columns != expected_columns or actual_primary_key != expected_primary_key:
         raise SystemBProductionError(
             "SYSTEM_B_SCHEMA_RECREATION_REQUIRED",
             "existing System B state schema belongs to an incompatible calculation model",
@@ -149,31 +168,17 @@ def ensure_system_b_schema(connection: duckdb.DuckDBPyConnection) -> None:
               ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
              AND run.status = 'SUCCEEDED'
             GROUP BY 1, 2, 3
-        ), candidates AS (
-            SELECT
-                observation.*,
-                row_number() OVER (
-                    PARTITION BY observation.{ASSET_ID},
-                                 observation.{RULE_VERSION_SET_ID},
-                                 observation.{PARAMETER_SET_ID}
-                    ORDER BY observation.{TRADE_DATE} DESC,
-                             run.{COMPLETED_AT} DESC NULLS LAST,
-                             observation.{CREATED_AT} DESC,
-                             observation.{INPUT_SNAPSHOT_ID} DESC
-                ) AS _latest_rank
-            FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
-            JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
-              ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
-             AND run.status = 'SUCCEEDED'
-            JOIN latest_date
-              ON latest_date.{ASSET_ID} = observation.{ASSET_ID}
-             AND latest_date.{RULE_VERSION_SET_ID} = observation.{RULE_VERSION_SET_ID}
-             AND latest_date.{PARAMETER_SET_ID} = observation.{PARAMETER_SET_ID}
-             AND latest_date.{TRADE_DATE} = observation.{TRADE_DATE}
         )
-        SELECT * EXCLUDE (_latest_rank)
-        FROM candidates
-        WHERE _latest_rank = 1
+        SELECT observation.*
+        FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
+        JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
+          ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
+         AND run.status = 'SUCCEEDED'
+        JOIN latest_date
+          ON latest_date.{ASSET_ID} = observation.{ASSET_ID}
+         AND latest_date.{RULE_VERSION_SET_ID} = observation.{RULE_VERSION_SET_ID}
+         AND latest_date.{PARAMETER_SET_ID} = observation.{PARAMETER_SET_ID}
+         AND latest_date.{TRADE_DATE} = observation.{TRADE_DATE}
         """
     )
 
@@ -273,7 +278,10 @@ def standard_input_sql(
                 fact.unresolved_count,
                 coalesce(factor.adj_factor, 1.0) AS adj_factor,
                 row_number() OVER (PARTITION BY fact.asset_id ORDER BY fact.trade_date)::INTEGER
-                    AS listing_trading_day_number
+                    AS confirmed_listing_trading_day_count,
+                row_number() OVER (
+                    PARTITION BY fact.asset_id, fact.unresolved_count ORDER BY fact.trade_date
+                )::INTEGER AS confirmed_segment_trading_day_count
             FROM domain_fact AS fact
             ASOF LEFT JOIN adj_factor_changes AS factor
               ON fact.asset_id = factor.ticker AND fact.trade_date >= factor.trade_date
@@ -288,7 +296,8 @@ def standard_input_sql(
                 actual.asset_id,
                 actual.trade_date,
                 actual.unresolved_count,
-                actual.listing_trading_day_number,
+                actual.confirmed_listing_trading_day_count,
+                actual.confirmed_segment_trading_day_count,
                 actual.raw_close * actual.adj_factor / latest.latest_adj_factor AS close
             FROM raw_actual AS actual
             JOIN latest_factor AS latest USING (asset_id)
@@ -298,11 +307,13 @@ def standard_input_sql(
                 asset_id,
                 trade_date,
                 unresolved_count,
-                listing_trading_day_number,
+                confirmed_listing_trading_day_count,
+                confirmed_segment_trading_day_count,
                 close,
-                CASE WHEN listing_trading_day_number >= 5 THEN
+                confirmed_segment_trading_day_count >= 5 AS ma5_window_complete,
+                CASE WHEN confirmed_segment_trading_day_count >= 5 THEN
                     avg(close) OVER (
-                        PARTITION BY asset_id ORDER BY trade_date
+                        PARTITION BY asset_id, unresolved_count ORDER BY trade_date
                         ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
                     )
                 END AS ma5
@@ -319,12 +330,12 @@ def standard_input_sql(
                     AS previous_actual_trade_date,
                 lag(is_above) OVER (PARTITION BY asset_id ORDER BY trade_date)
                     AS previous_actual_is_above,
+                lag(ma5_window_complete) OVER (PARTITION BY asset_id ORDER BY trade_date)
+                    AS previous_actual_ma5_window_complete,
                 coalesce(
                     unresolved_count = lag(unresolved_count) OVER (
                         PARTITION BY asset_id ORDER BY trade_date
-                    ) AND lag(is_above) OVER (
-                        PARTITION BY asset_id ORDER BY trade_date
-                    ) IS NOT NULL,
+                    ),
                     FALSE
                 ) AS actual_pair_contiguous
             FROM actual_relation
@@ -335,16 +346,29 @@ def standard_input_sql(
                 fact.trade_date,
                 fact.{MARKET_FACT_STATUS},
                 fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' AS is_trading_day,
-                coalesce(actual.listing_trading_day_number, 0)::INTEGER
-                    AS listing_trading_day_number,
+                CASE WHEN fact.unresolved_count = 0
+                     THEN coalesce(actual.confirmed_listing_trading_day_count, 0)::INTEGER
+                END AS listing_trading_day_number,
+                coalesce(actual.confirmed_listing_trading_day_count, 0)::INTEGER
+                    AS confirmed_listing_trading_day_count,
+                fact.unresolved_count = 0 AS listing_trading_day_number_is_exact,
                 CASE WHEN fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' THEN actual.close END AS close,
                 CASE WHEN fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' THEN actual.ma5 END AS ma5,
+                coalesce(
+                    fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}'
+                    AND actual.ma5_window_complete,
+                    FALSE
+                ) AS ma5_window_complete,
                 actual.trade_date AS latest_actual_trade_date,
                 actual.close AS latest_actual_close,
                 actual.ma5 AS latest_actual_ma5,
+                coalesce(actual.ma5_window_complete, FALSE)
+                    AS latest_actual_ma5_window_complete,
                 actual.is_above AS latest_actual_is_above,
                 actual.previous_actual_trade_date,
                 actual.previous_actual_is_above,
+                coalesce(actual.previous_actual_ma5_window_complete, FALSE)
+                    AS previous_actual_ma5_window_complete,
                 coalesce(fact.unresolved_count = actual.unresolved_count, FALSE)
                     AS state_basis_sequence_intact,
                 coalesce(actual.actual_pair_contiguous, FALSE) AS actual_pair_contiguous
@@ -358,14 +382,19 @@ def standard_input_sql(
             {MARKET_FACT_STATUS},
             is_trading_day,
             listing_trading_day_number,
+            confirmed_listing_trading_day_count,
+            listing_trading_day_number_is_exact,
             close,
             ma5,
+            ma5_window_complete,
             latest_actual_trade_date,
             latest_actual_close,
             latest_actual_ma5,
+            latest_actual_ma5_window_complete,
             latest_actual_is_above AS latest_actual_is_above_or_equal_ma5,
             previous_actual_trade_date,
             previous_actual_is_above AS previous_actual_is_above_or_equal_ma5,
+            previous_actual_ma5_window_complete,
             state_basis_sequence_intact,
             actual_pair_contiguous
         FROM observation_basis
@@ -417,27 +446,6 @@ def iter_asset_batches(
             pending = pending.loc[~mask].reset_index(drop=True)
     if not pending.empty:
         yield pending.reset_index(drop=True)
-
-
-def latest_success_trade_date(
-    connection: duckdb.DuckDBPyConnection,
-    *,
-    rule_version_set_id: str,
-    parameter_set_id: str,
-) -> date | None:
-    row = connection.execute(
-        f"""
-        SELECT max(observation.trade_date)
-        FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
-        JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
-          ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
-         AND run.status = 'SUCCEEDED'
-        WHERE observation.rule_version_set_id = ?
-          AND observation.parameter_set_id = ?
-        """,
-        [rule_version_set_id, parameter_set_id],
-    ).fetchone()
-    return row[0] if row and row[0] is not None else None
 
 
 def create_run(
@@ -499,42 +507,6 @@ def fail_run(
     )
 
 
-def find_succeeded_run(
-    connection: duckdb.DuckDBPyConnection,
-    *,
-    run_type: str,
-    target_start_date: date | None,
-    target_end_date: date | None,
-    rule_version_set_id: str,
-    parameter_set_id: str,
-    input_snapshot_id: str,
-) -> dict[str, Any] | None:
-    cursor = connection.execute(
-        f"""
-        SELECT * FROM {SYSTEM_B_PRODUCTION_RUN_TABLE}
-        WHERE status = 'SUCCEEDED'
-          AND run_type = ?
-          AND target_start_date IS NOT DISTINCT FROM ?
-          AND target_end_date IS NOT DISTINCT FROM ?
-          AND rule_version_set_id = ?
-          AND parameter_set_id = ?
-          AND input_snapshot_id = ?
-        ORDER BY completed_at DESC
-        LIMIT 1
-        """,
-        [
-            run_type,
-            target_start_date,
-            target_end_date,
-            rule_version_set_id,
-            parameter_set_id,
-            input_snapshot_id,
-        ],
-    )
-    row = cursor.fetchone()
-    return dict(zip([item[0] for item in cursor.description], row, strict=True)) if row else None
-
-
 def import_staging(
     connection: duckdb.DuckDBPyConnection,
     *,
@@ -543,36 +515,35 @@ def import_staging(
     input_snapshot_id: str,
     calculation_version: str,
     metrics: dict[str, Any],
-    require_empty_rule_version_set_id: str | None = None,
-    require_empty_parameter_set_id: str | None = None,
+    replace_start_date: date,
+    replace_end_date: date,
+    replace_asset_ids: Sequence[str] | None = None,
 ) -> None:
+    if replace_start_date > replace_end_date:
+        raise ValueError("replace_start_date must not be after replace_end_date")
     state_columns = ", ".join(STATE_INSERT_COLUMNS)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     connection.execute("BEGIN")
     try:
-        if (
-            require_empty_rule_version_set_id is not None
-            or require_empty_parameter_set_id is not None
-        ):
-            if (
-                require_empty_rule_version_set_id is None
-                or require_empty_parameter_set_id is None
-            ):
-                raise ValueError("both initialization emptiness versions are required")
-            existing_state = connection.execute(
-                f"""
-                SELECT 1
-                FROM {SYSTEM_B_STATE_OBSERVATION_TABLE}
-                WHERE rule_version_set_id = ? AND parameter_set_id = ?
-                LIMIT 1
-                """,
-                [require_empty_rule_version_set_id, require_empty_parameter_set_id],
-            ).fetchone()
-            if existing_state is not None:
-                raise SystemBProductionError(
-                    "SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY",
-                    "initialize is bootstrap-only; use a future recompute-from workflow",
-                )
+        delete_sql = f"""
+            DELETE FROM {SYSTEM_B_STATE_OBSERVATION_TABLE}
+            WHERE rule_version_set_id = ?
+              AND parameter_set_id = ?
+              AND trade_date BETWEEN ? AND ?
+        """
+        delete_params: list[Any] = [
+            SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+            SYSTEM_B_2_0_PARAMETER_SET_ID,
+            replace_start_date,
+            replace_end_date,
+        ]
+        if replace_asset_ids is not None:
+            normalized = sorted({str(asset_id) for asset_id in replace_asset_ids})
+            if not normalized:
+                raise SystemBProductionError("EMPTY_ASSET_FILTER", "replacement asset scope is empty")
+            delete_sql += f" AND asset_id IN ({', '.join('?' for _ in normalized)})"
+            delete_params.extend(normalized)
+        connection.execute(delete_sql, delete_params)
         connection.execute(
             f"""
             INSERT INTO {SYSTEM_B_STATE_OBSERVATION_TABLE} (

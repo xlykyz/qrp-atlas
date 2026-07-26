@@ -10,17 +10,22 @@ from qrp_atlas.contracts import (
     ACTUAL_PAIR_CONTIGUOUS,
     ASSET_ID,
     CLOSE,
+    CONFIRMED_LISTING_TRADING_DAY_COUNT,
     DIAGNOSTICS,
     IS_TRADING_DAY,
     LATEST_ACTUAL_CLOSE,
     LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
     LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_MA5_WINDOW_COMPLETE,
     LATEST_ACTUAL_TRADE_DATE,
     LIFECYCLE_STATE,
     LISTING_TRADING_DAY_NUMBER,
+    LISTING_TRADING_DAY_NUMBER_IS_EXACT,
     MA5,
+    MA5_WINDOW_COMPLETE,
     MARKET_FACT_STATUS,
     PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE,
     PREVIOUS_ACTUAL_TRADE_DATE,
     PREVIOUS_TREND_STATE,
     STATE_BASIS_SEQUENCE_INTACT,
@@ -54,24 +59,45 @@ def _row(
     previous_above: bool | None = False,
     basis_intact: bool = True,
     pair_contiguous: bool = True,
+    listing_day_exact: bool = True,
+    latest_ma5_complete: bool | None = None,
+    previous_ma5_complete: bool | None = None,
 ) -> dict[str, object]:
     trade_date = pd.Timestamp("2026-01-01") + pd.Timedelta(days=day - 1)
     actual = status is SystemBMarketFactStatus.ACTUAL_TRADING
     latest_date = trade_date if actual else trade_date - pd.Timedelta(days=1)
+    effective_listing_day = listing_day if listing_day is not None else day
+    latest_complete = (
+        latest_ma5_complete
+        if latest_ma5_complete is not None
+        else latest_above is not None and effective_listing_day >= 5
+    )
+    previous_complete = (
+        previous_ma5_complete
+        if previous_ma5_complete is not None
+        else previous_above is not None and effective_listing_day >= 6
+    )
+    effective_latest_above = latest_above if latest_complete else None
+    effective_previous_above = previous_above if previous_complete else None
     return {
         ASSET_ID: asset_id,
         TRADE_DATE: trade_date,
         MARKET_FACT_STATUS: status.value,
         IS_TRADING_DAY: actual,
-        LISTING_TRADING_DAY_NUMBER: listing_day if listing_day is not None else day,
+        LISTING_TRADING_DAY_NUMBER: effective_listing_day if listing_day_exact else None,
+        CONFIRMED_LISTING_TRADING_DAY_COUNT: effective_listing_day,
+        LISTING_TRADING_DAY_NUMBER_IS_EXACT: listing_day_exact,
         CLOSE: 11.0 if actual and latest_above is True else (9.0 if actual else None),
-        MA5: 10.0 if actual and day >= 5 else None,
+        MA5: 10.0 if actual and latest_complete else None,
+        MA5_WINDOW_COMPLETE: actual and latest_complete,
         LATEST_ACTUAL_TRADE_DATE: latest_date if latest_above is not None else None,
         LATEST_ACTUAL_CLOSE: 11.0 if latest_above is True else (9.0 if latest_above is False else None),
-        LATEST_ACTUAL_MA5: 10.0 if latest_above is not None else None,
-        LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: latest_above,
+        LATEST_ACTUAL_MA5: 10.0 if latest_complete else None,
+        LATEST_ACTUAL_MA5_WINDOW_COMPLETE: latest_complete,
+        LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: effective_latest_above,
         PREVIOUS_ACTUAL_TRADE_DATE: latest_date - pd.Timedelta(days=1) if previous_above is not None else None,
-        PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: previous_above,
+        PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: effective_previous_above,
+        PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE: previous_complete,
         STATE_BASIS_SEQUENCE_INTACT: basis_intact,
         ACTUAL_PAIR_CONTIGUOUS: pair_contiguous,
     }
@@ -94,6 +120,28 @@ def test_warmup_is_lifecycle_and_trend_is_null() -> None:
     assert pd.isna(row[TREND_STATE])
     assert row[DIAGNOSTICS] == ("NEW_LISTING_WARMUP",)
     assert pd.isna(row[STATE_CHANGED])
+
+
+def test_uncertain_listing_day_does_not_leave_warmup_early() -> None:
+    result = calculate_system_b_2_0_states(
+        _request(
+            pd.DataFrame(
+                [_row(8, listing_day=8, listing_day_exact=False, latest_above=False)]
+            )
+        )
+    ).frame.iloc[0]
+    assert pd.isna(result[LISTING_TRADING_DAY_NUMBER])
+    assert pd.isna(result[LIFECYCLE_STATE])
+    assert pd.isna(result[TREND_STATE])
+    assert result[DIAGNOSTICS] == ("UNCERTAIN_LISTING_TRADING_DAY_NUMBER",)
+
+
+def test_inconsistent_ma5_window_proof_is_rejected() -> None:
+    row = _row(11, latest_above=True, previous_above=True)
+    row[MA5_WINDOW_COMPLETE] = False
+    with pytest.raises(SystemBStateMachineError) as exc_info:
+        calculate_system_b_2_0_states(_request(pd.DataFrame([row])))
+    assert exc_info.value.code == "INCONSISTENT_MA5_WINDOW_FACT"
 
 
 @pytest.mark.parametrize(

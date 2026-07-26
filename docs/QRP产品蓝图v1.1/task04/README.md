@@ -11,13 +11,13 @@ Linux 正式市场事实
 → 按完整资产边界有界分批
 → calculate_system_b_2_0_states
 → Parquet staging + 完整性校验
-→ 单事务 INSERT INTO ... SELECT
+→ 单事务删除目标范围旧物化结果并 INSERT INTO ... SELECT
 → API / CLI 消费
 ```
 
 状态机保持纯计算，不访问数据库、配置、时钟、文件系统或生产运行管理。
 
-> **System B 状态历史只有一张正式事实表；最新状态通过视图获取，不维护独立 checkpoint 表。**
+> **System B 只有一张正式状态物化事实表；最新状态通过视图获取，不维护独立 checkpoint 表。**
 
 ## 2. 数据来源
 
@@ -28,7 +28,7 @@ Linux 正式市场事实
 | 行情 | `daily_market_snapshot` | 有效非零成交量日线为实际交易 |
 | 停牌 | `suspend_d` | 明确非交易，不进入实际交易序列 |
 | 前复权 | `daily_market_snapshot.close` + `adj_factor_changes` | `FORWARD_ADJUSTED` |
-| MA5 | 同一前复权实际交易日序列 | 完整 5 日窗口，停牌不进入窗口 |
+| MA5 | 同一前复权实际交易日序列 | 同一可证明连续片段内完整 5 日窗口 |
 
 市场事实分类：
 
@@ -38,7 +38,7 @@ EXPLICIT_NON_TRADING
 UNRESOLVED_MISSING
 ```
 
-`UNRESOLVED_MISSING` 不再伪装成停牌，也不通过保持旧状态获得确定结果；它写入观察事实并通过 `trend_state=NULL` 与诊断表达连续性破坏。
+`UNRESOLVED_MISSING` 不伪装成停牌。它切断 MA5 可证明片段；缺口后第 1—4 个确认实际交易日 MA5 为 NULL，第 5 日首次恢复可信 MA5，且 CANDIDATE/ACTIVE 还要求前一实际交易日的 MA5 关系可信。
 
 ## 3. 状态事实表
 
@@ -53,12 +53,16 @@ state_changed NULLABLE
 market_fact_status
 is_trading_day
 listing_trading_day_number
-close, ma5, is_above_or_equal_ma5
+confirmed_listing_trading_day_count
+listing_trading_day_number_is_exact
+close, ma5, ma5_window_complete, is_above_or_equal_ma5
 latest_actual_trade_date
 latest_actual_close, latest_actual_ma5
+latest_actual_ma5_window_complete
 latest_actual_is_above_or_equal_ma5
 previous_actual_trade_date
 previous_actual_is_above_or_equal_ma5
+previous_actual_ma5_window_complete
 state_basis_sequence_intact
 actual_pair_contiguous
 price_adjustment
@@ -68,7 +72,7 @@ production_run_id, input_snapshot_id
 calculation_version, created_at
 ```
 
-`trend_state` 只允许非空值 `BASE/CANDIDATE/ACTIVE`；NULL 是事实不足造成的计算缺失，不是第四状态。`system_b_latest_state` 仍按资产、规则版本、参数版本选择最新成功事实。
+`trend_state` 只允许非空值 `BASE/CANDIDATE/ACTIVE`；NULL 是事实不足造成的计算缺失，不是第四状态。逻辑唯一键为 `asset_id + trade_date + rule_version_set_id + parameter_set_id`，`input_snapshot_id` 只保留运行审计用途。`system_b_latest_state` 按资产、规则版本、参数版本选择最新当前物化结果。
 
 ## 4. 独立求值
 
@@ -77,7 +81,7 @@ calculation_version, created_at
 - 全历史：输出上市日至目标日全部观察；
 - 区间：仍读取完整历史，只按 `start_date` 过滤输出；
 - 单日：SQL 返回目标日及前一市场观察日，目标日状态由历史统计事实独立计算，前一行只用于审计比较；
-- 每日增量：不加载状态 checkpoint，即使目标库没有任何 System B 状态也能计算任意目标日。
+- 每日定点：不加载状态 checkpoint，即使目标库没有任何 System B 状态也能计算任意目标日。
 
 固定种子的随机多资产、多历史日期测试逐点比较单日与完整重放，状态、事实统计和诊断完全一致。
 
@@ -89,11 +93,9 @@ qrp-atlas-system-b run-daily --trade-date YYYY-MM-DD
 qrp-atlas-system-b readiness --trade-date YYYY-MM-DD
 ```
 
-初始化继续 bootstrap-only：空目标允许；完全相同范围和快照返回 `IDEMPOTENT_NOOP`；非空目标上的不同初始化以 `SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY` 拒绝。
+`initialize` 对指定范围独立重放并原子覆盖该范围；`start_date` 只是输出和覆盖边界，计算仍读取更早行情事实。`run-daily` 对任意指定市场交易日独立计算并原子新增或覆盖，即使目标库为空或已存在更晚日期结果也可运行。
 
-每日修订继续 fail-closed：早于最新成功日期返回 `BACKDATED_RECOMPUTE_REQUIRED`；同日修订允许，且结果与完整重放一致。未来历史修订必须由 `recompute-from` 从修订日起正向重算至最新日期，本任务不实现该入口。
-
-readiness 分别报告实际交易、明确非交易和 unresolved 数量。有效实际交易日在预热结束后缺失 close/MA5 仍属于关键输入错误；unresolved 作为可审计的不确定事实进入 NULL 计算，不被改写为停牌。
+readiness 分别报告实际交易、明确非交易和 unresolved 数量。System B 不判断行情事实是否正确，也不识别修订范围；unresolved 和不完整 MA5 按契约进入 NULL 计算，不被改写为停牌或有效 MA5。
 
 ## 6. 幂等、批量与原子性
 
@@ -102,9 +104,10 @@ readiness 分别报告实际交易、明确非交易和 unresolved 数量。有�
 - 无逐行 INSERT/UPDATE；
 - 无每资产事务；
 - 资产边界批次默认 100；
-- Parquet staging 完整性校验后一次批量导入；
-- 相同范围、版本和 `input_snapshot_id` 重跑 no-op；
-- 失败运行不产生部分状态事实。
+- Parquet staging 完整性校验后，在一个事务内删除目标范围旧结果并一次批量导入；
+- 全市场覆盖会清除目标范围内已不在新资产集合中的旧行；资产子集运行只替换指定资产；
+- 相同输入重复覆盖后的最终事实表完全相同；
+- 删除或导入任一步失败均回滚，保留覆盖前完整结果。
 
 ## 7. API
 
@@ -122,9 +125,9 @@ API 原样返回 JSON `null`。迁移接口只统计两个非空业务状态之�
 ## 8. 版本治理
 
 ```text
-rule_version_set_id = system_b_2_0_fact_derived_1__user_20260726
-parameter_set_id = system_b_2_0_fact_derived_1_params_1
-calculation_version = system_b_fact_derived_state@2.0.0
+rule_version_set_id = system_b_2_0_fact_derived_ma5_complete_1__user_20260726
+parameter_set_id = system_b_2_0_fact_derived_ma5_complete_1_params_1
+calculation_version = system_b_fact_derived_state@2.1.0
 ```
 
 旧递推版本不静默覆盖。PR #44 未向正式库写入 System B 状态事实；新 schema 应在合并后按独立部署窗口创建。
@@ -140,12 +143,12 @@ calculation_version = system_b_fact_derived_state@2.0.0
 事实输入行数: 11,030（目标日 + 前一观察日）
 输出行数: 5,515
 业务数据 SQL: 1
-读取: 12.723 秒
-计算: 1.086 秒
-staging: 0.036 秒
-导入: 0.053 秒
-总耗时: 14.097 秒
-峰值内存: 9,334 MB
+读取: 13.583 秒
+计算: 0.143 秒
+staging: 0.301 秒
+原子覆盖导入: 0.057 秒
+总耗时: 14.277 秒
+峰值内存: 9,415 MB
 状态: BASE 4,244 / CANDIDATE 165 / ACTIVE 1,106
 ```
 
@@ -157,27 +160,27 @@ staging: 0.036 秒
 业务数据 SQL: 1
 资产批次: 59
 批量大小: 100
-读取: 28.009 秒
-计算: 202.471 秒
-staging: 50.275 秒
-单事务导入: 105.977 秒
-总耗时: 582.661 秒（9 分 42.7 秒）
-峰值内存: 14,289 MB
-NULL 状态: 415,381
+读取: 28.965 秒
+计算: 205.375 秒
+staging: 48.156 秒
+单事务原子覆盖导入: 77.046 秒
+总耗时: 564.369 秒（9 分 24.4 秒）
+峰值内存: 14,697 MB
+NULL 状态: 434,222
 明确非交易观察: 667,499
 UNRESOLVED_MISSING: 328,569
 ```
 
-新模型完整初始化比旧递推实现的 649.148 秒基准更快。2026-07-24 的完整历史结果与独立每日计算在状态、审计、统计事实和诊断列上双向 `EXCEPT=0`。
+新模型完整初始化比旧递推实现的 649.148 秒基准更快。专项测试证明全历史、区间、单日、每日入口和重复覆盖在共同日期的状态、统计证明与诊断一致；多次复权只按相同比例缩放 close/MA5，不改变关系或状态。
 
 ## 10. 测试与边界
 
-专项覆盖三个独立谓词、NULL、生命周期、停牌、零成交量、缺口破坏与恢复、审计三值逻辑、任意日期独立求值、随机定点对比、多次复权不变性、幂等、bootstrap-only 和回补防护。
+专项覆盖三个独立谓词、NULL、生命周期、停牌、零成交量、缺口分段 MA5 与恢复、审计三值逻辑、任意日期独立求值、随机定点对比、多次复权不变性、重复覆盖、资产缩集和事务回滚。
 
 ```text
-System B 状态机/生产/API 专项: 28 passed
-旧 detector、system_b_basic 与 registry 兼容集合: 31 passed
-全量测试: 778 passed
+System B 状态机/生产/API 专项: 33 passed
+旧 detector、system_b_basic 与指标兼容集合: 35 passed
+全量测试: 783 passed
 python -m compileall -q src tests: passed
 OpenAPI System B 路径: 6 passed
 git diff --check: passed

@@ -11,19 +11,24 @@ from qrp_atlas.contracts import (
     ACTUAL_PAIR_CONTIGUOUS,
     ASSET_ID,
     CLOSE,
+    CONFIRMED_LISTING_TRADING_DAY_COUNT,
     DIAGNOSTICS,
     IS_ABOVE_OR_EQUAL_MA5,
     IS_TRADING_DAY,
     LATEST_ACTUAL_CLOSE,
     LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
     LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_MA5_WINDOW_COMPLETE,
     LATEST_ACTUAL_TRADE_DATE,
     LIFECYCLE_STATE,
     LISTING_TRADING_DAY_NUMBER,
+    LISTING_TRADING_DAY_NUMBER_IS_EXACT,
     MA5,
+    MA5_WINDOW_COMPLETE,
     MARKET_FACT_STATUS,
     PARAMETER_SET_ID,
     PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE,
     PREVIOUS_ACTUAL_TRADE_DATE,
     PREVIOUS_TREND_STATE,
     PRICE_ADJUSTMENT,
@@ -59,6 +64,8 @@ DIAGNOSTIC_BROKEN_SEQUENCE = "BROKEN_TRADING_SEQUENCE"
 DIAGNOSTIC_MISSING_PREVIOUS_ACTUAL = "MISSING_PREVIOUS_ACTUAL_TRADING_FACT"
 DIAGNOSTIC_NO_UNIQUE_MATCH = "NO_UNIQUE_STATE_MATCH"
 DIAGNOSTIC_NON_TRADING_DERIVATION = "NON_TRADING_DAY_FACT_DERIVED"
+DIAGNOSTIC_INCOMPLETE_MA5_WINDOW = "INCOMPLETE_MA5_WINDOW"
+DIAGNOSTIC_UNCERTAIN_LISTING_DAY = "UNCERTAIN_LISTING_TRADING_DAY_NUMBER"
 
 
 class SystemBStateMachineError(ValueError):
@@ -157,43 +164,95 @@ def calculate_system_b_2_0_states(request: SystemBStateMachineRequest) -> System
         _raise("INCONSISTENT_MARKET_FACT_STATUS", "is_trading_day disagrees with market_fact_status")
 
     listing_day = pd.to_numeric(observations[LISTING_TRADING_DAY_NUMBER], errors="coerce")
-    if listing_day.isna().any() or (listing_day < 0).any() or (listing_day % 1 != 0).any():
-        _raise("INVALID_LISTING_TRADING_DAY_NUMBER", "listing day must be a non-negative integer")
-    listing_day = listing_day.astype(int)
+    invalid_listing_day = listing_day.notna() & ((listing_day < 0) | (listing_day % 1 != 0))
+    if invalid_listing_day.any():
+        _raise("INVALID_LISTING_TRADING_DAY_NUMBER", "listing day must be NULL or a non-negative integer")
+    listing_day = listing_day.astype("Int64")
+    confirmed_listing_day = pd.to_numeric(
+        observations[CONFIRMED_LISTING_TRADING_DAY_COUNT], errors="coerce"
+    )
+    if (
+        confirmed_listing_day.isna().any()
+        or (confirmed_listing_day < 0).any()
+        or (confirmed_listing_day % 1 != 0).any()
+    ):
+        _raise("INVALID_CONFIRMED_TRADING_DAY_COUNT", "confirmed count must be a non-negative integer")
+    confirmed_listing_day = confirmed_listing_day.astype(int)
+    listing_day_exact = _nullable_bool_series(observations, LISTING_TRADING_DAY_NUMBER_IS_EXACT)
+    if listing_day_exact.isna().any():
+        _raise("MISSING_LISTING_DAY_CERTAINTY", "listing day certainty cannot be NULL")
+    if (listing_day_exact & listing_day.ne(confirmed_listing_day)).any():
+        _raise("INCONSISTENT_LISTING_DAY_FACT", "exact listing day must equal confirmed count")
+    if ((~listing_day_exact) & listing_day.notna()).any():
+        _raise("INCONSISTENT_LISTING_DAY_FACT", "uncertain listing day must be NULL")
     latest_relation = _nullable_bool_series(observations, LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5)
     previous_relation = _nullable_bool_series(observations, PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5)
+    ma5_window_complete = _nullable_bool_series(observations, MA5_WINDOW_COMPLETE)
+    latest_ma5_window_complete = _nullable_bool_series(
+        observations, LATEST_ACTUAL_MA5_WINDOW_COMPLETE
+    )
+    previous_ma5_window_complete = _nullable_bool_series(
+        observations, PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE
+    )
     basis_intact = _nullable_bool_series(observations, STATE_BASIS_SEQUENCE_INTACT)
     pair_contiguous = _nullable_bool_series(observations, ACTUAL_PAIR_CONTIGUOUS)
-    if basis_intact.isna().any() or pair_contiguous.isna().any():
-        _raise("MISSING_SEQUENCE_FACT", "sequence proof fields cannot be NULL")
-
-    lifecycle = pd.Series(
-        np.where(
-            listing_day <= request.parameters.warmup_trading_days,
-            SystemBLifecycleState.NEW_LISTING_WARMUP.value,
-            SystemBLifecycleState.NORMAL.value,
-        ),
-        index=observations.index,
-        dtype="string",
+    proof_fields = (
+        ma5_window_complete,
+        latest_ma5_window_complete,
+        previous_ma5_window_complete,
+        basis_intact,
+        pair_contiguous,
     )
-    normal = lifecycle.eq(SystemBLifecycleState.NORMAL.value)
+    if any(field.isna().any() for field in proof_fields):
+        _raise("MISSING_SEQUENCE_FACT", "sequence and MA5 proof fields cannot be NULL")
+    close = _numeric_series(observations, CLOSE)
+    ma5 = _numeric_series(observations, MA5)
+    latest_ma5 = _numeric_series(observations, LATEST_ACTUAL_MA5)
+    if (
+        (ma5_window_complete & (~trading | ma5.isna())).any()
+        or ((~ma5_window_complete) & ma5.notna()).any()
+        or (latest_ma5_window_complete & (latest_ma5.isna() | latest_relation.isna())).any()
+        or ((~latest_ma5_window_complete) & (latest_ma5.notna() | latest_relation.notna())).any()
+        or (previous_ma5_window_complete & previous_relation.isna()).any()
+        or ((~previous_ma5_window_complete) & previous_relation.notna()).any()
+    ):
+        _raise("INCONSISTENT_MA5_WINDOW_FACT", "MA5 values and relation facts disagree with window proof")
+
+    lifecycle = pd.Series(pd.NA, index=observations.index, dtype="string")
+    exact_warmup = listing_day_exact & listing_day.le(request.parameters.warmup_trading_days)
+    provably_normal = (
+        (listing_day_exact & listing_day.gt(request.parameters.warmup_trading_days))
+        | confirmed_listing_day.gt(request.parameters.warmup_trading_days)
+    )
+    lifecycle.loc[exact_warmup] = SystemBLifecycleState.NEW_LISTING_WARMUP.value
+    lifecycle.loc[provably_normal] = SystemBLifecycleState.NORMAL.value
+    normal = lifecycle.eq(SystemBLifecycleState.NORMAL.value).fillna(False)
     unresolved = status.eq(SystemBMarketFactStatus.UNRESOLVED_MISSING.value)
     eligible = normal & ~unresolved
-    base = eligible & latest_relation.eq(False).fillna(False) & basis_intact.fillna(False)
+    base = (
+        eligible
+        & latest_ma5_window_complete
+        & latest_relation.eq(False).fillna(False)
+        & basis_intact
+    ).fillna(False)
     candidate = (
         eligible
         & latest_relation.eq(True).fillna(False)
         & previous_relation.eq(False).fillna(False)
-        & basis_intact.fillna(False)
-        & pair_contiguous.fillna(False)
-    )
+        & latest_ma5_window_complete
+        & previous_ma5_window_complete
+        & basis_intact
+        & pair_contiguous
+    ).fillna(False)
     active = (
         eligible
         & latest_relation.eq(True).fillna(False)
         & previous_relation.eq(True).fillna(False)
-        & basis_intact.fillna(False)
-        & pair_contiguous.fillna(False)
-    )
+        & latest_ma5_window_complete
+        & previous_ma5_window_complete
+        & basis_intact
+        & pair_contiguous
+    ).fillna(False)
     match_count = base.astype(int) + candidate.astype(int) + active.astype(int)
     if match_count.gt(1).any():
         _raise("CONFLICTING_STATE_FACTS", "multiple state predicates matched")
@@ -204,33 +263,40 @@ def calculate_system_b_2_0_states(request: SystemBStateMachineRequest) -> System
     trend.loc[active] = SystemBTrendState.ACTIVE.value
 
     diagnostics = pd.Series([()] * len(observations), index=observations.index, dtype=object)
-    warmup = ~normal
+    warmup = lifecycle.eq(SystemBLifecycleState.NEW_LISTING_WARMUP.value)
     diagnostics.loc[warmup] = [(DIAGNOSTIC_WARMUP,)] * int(warmup.sum())
     warmup_unresolved = warmup & unresolved
     diagnostics.loc[warmup_unresolved] = [
         (DIAGNOSTIC_WARMUP, DIAGNOSTIC_BROKEN_SEQUENCE)
     ] * int(warmup_unresolved.sum())
+    uncertain_lifecycle = lifecycle.isna()
+    diagnostics.loc[uncertain_lifecycle] = [
+        (DIAGNOSTIC_UNCERTAIN_LISTING_DAY,)
+    ] * int(uncertain_lifecycle.sum())
     diagnostics.loc[normal & unresolved] = [(DIAGNOSTIC_BROKEN_SEQUENCE,)] * int((normal & unresolved).sum())
     derived_non_trading = trend.notna() & ~trading.fillna(False)
     diagnostics.loc[derived_non_trading] = [(DIAGNOSTIC_NON_TRADING_DERIVATION,)] * int(derived_non_trading.sum())
     unmatched = normal & ~unresolved & trend.isna()
     broken_basis = unmatched & ~basis_intact.fillna(False)
-    insufficient = unmatched & ~broken_basis & latest_relation.isna()
+    incomplete_ma5 = unmatched & ~broken_basis & ~latest_ma5_window_complete
+    insufficient = unmatched & ~broken_basis & ~incomplete_ma5 & latest_relation.isna()
     missing_previous = (
-        unmatched & ~broken_basis
-        & latest_relation.eq(True).fillna(False) & previous_relation.isna()
+        unmatched & ~broken_basis & ~incomplete_ma5
+        & latest_relation.eq(True).fillna(False)
+        & (~previous_ma5_window_complete | previous_relation.isna())
     )
-    broken = unmatched & ~insufficient & ~missing_previous & (
+    broken = unmatched & ~incomplete_ma5 & ~insufficient & ~missing_previous & (
         broken_basis | ~pair_contiguous.fillna(False)
     )
-    no_unique = unmatched & ~insufficient & ~missing_previous & ~broken
+    no_unique = unmatched & ~incomplete_ma5 & ~insufficient & ~missing_previous & ~broken
+    diagnostics.loc[incomplete_ma5] = [
+        (DIAGNOSTIC_INCOMPLETE_MA5_WINDOW,)
+    ] * int(incomplete_ma5.sum())
     diagnostics.loc[insufficient] = [(DIAGNOSTIC_INSUFFICIENT,)] * int(insufficient.sum())
     diagnostics.loc[missing_previous] = [(DIAGNOSTIC_MISSING_PREVIOUS_ACTUAL,)] * int(missing_previous.sum())
     diagnostics.loc[broken] = [(DIAGNOSTIC_BROKEN_SEQUENCE,)] * int(broken.sum())
     diagnostics.loc[no_unique] = [(DIAGNOSTIC_NO_UNIQUE_MATCH,)] * int(no_unique.sum())
 
-    close = _numeric_series(observations, CLOSE)
-    ma5 = _numeric_series(observations, MA5)
     current_relation = (close >= ma5).astype("boolean")
     current_relation.loc[~trading.fillna(False) | close.isna() | ma5.isna()] = pd.NA
 
@@ -245,15 +311,20 @@ def calculate_system_b_2_0_states(request: SystemBStateMachineRequest) -> System
             MARKET_FACT_STATUS: status,
             IS_TRADING_DAY: trading.astype(bool),
             LISTING_TRADING_DAY_NUMBER: listing_day,
+            CONFIRMED_LISTING_TRADING_DAY_COUNT: confirmed_listing_day,
+            LISTING_TRADING_DAY_NUMBER_IS_EXACT: listing_day_exact.astype(bool),
             CLOSE: close,
             MA5: ma5,
+            MA5_WINDOW_COMPLETE: ma5_window_complete.astype(bool),
             IS_ABOVE_OR_EQUAL_MA5: current_relation,
             LATEST_ACTUAL_TRADE_DATE: _date_series(observations, LATEST_ACTUAL_TRADE_DATE),
             LATEST_ACTUAL_CLOSE: _numeric_series(observations, LATEST_ACTUAL_CLOSE),
-            LATEST_ACTUAL_MA5: _numeric_series(observations, LATEST_ACTUAL_MA5),
+            LATEST_ACTUAL_MA5: latest_ma5,
+            LATEST_ACTUAL_MA5_WINDOW_COMPLETE: latest_ma5_window_complete.astype(bool),
             LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: latest_relation,
             PREVIOUS_ACTUAL_TRADE_DATE: _date_series(observations, PREVIOUS_ACTUAL_TRADE_DATE),
             PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5: previous_relation,
+            PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE: previous_ma5_window_complete.astype(bool),
             STATE_BASIS_SEQUENCE_INTACT: basis_intact.astype(bool),
             ACTUAL_PAIR_CONTIGUOUS: pair_contiguous.astype(bool),
             PRICE_ADJUSTMENT: request.input_price_adjustment.value,

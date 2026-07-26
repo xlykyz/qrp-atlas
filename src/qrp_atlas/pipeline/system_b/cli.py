@@ -109,17 +109,8 @@ def _readiness(path: Path, trade_date: date) -> dict[str, object]:
         target = frame.loc[frame["trade_date"].dt.date == trade_date].copy()
         unresolved = target.loc[target[MARKET_FACT_STATUS] == UNRESOLVED_MISSING]
         missing_close = int((target["is_trading_day"] & target["close"].isna()).sum())
-        missing_ma5 = int(
-            (
-                target["is_trading_day"]
-                & (target["listing_trading_day_number"] >= 11)
-                & target["ma5"].isna()
-            ).sum()
-        )
         if missing_close:
             raise SystemBProductionError("MISSING_FORWARD_ADJUSTED_CLOSE", str(missing_close))
-        if missing_ma5:
-            raise SystemBProductionError("MISSING_MA5_AFTER_WARMUP", str(missing_ma5))
         return {
             "status": "READY",
             "trade_date": trade_date.isoformat(),
