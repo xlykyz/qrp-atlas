@@ -89,6 +89,8 @@ qrp-atlas-system-b initialize --output-database /tmp/system-b.duckdb --keep-stag
 
 即使指定 `--start-date`，计算输入仍从每只股票上市第 1 个实际交易日正序开始，只过滤最终持久化日期；不会对截断历史猜测初始状态。
 
+`initialize` 是 bootstrap-only 入口：目标库中不存在同规则、同参数的状态事实时允许首次初始化；相同范围和 `input_snapshot_id` 的成功初始化返回 `IDEMPOTENT_NOOP`；只要目标库已有状态而本次范围或输入快照不同，就在批量导入事务内以 `SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY` 拒绝。它不承担历史修订，避免向已有路径追加局部快照。
+
 读取使用一条按 `asset_id, trade_date` 排序的集合化 SQL，通过 DuckDB record-vector 分块读取，并在观察到下一个资产后按完整资产边界切批。`--asset-batch-size` 默认 100，可按内存调整。同一资产不会在无 checkpoint 情况下被截断，多资产状态互不串扰。
 
 每批结果写入独立 Parquet staging part。所有 part 完成后统一检查行数、资产数、重复键、合法状态、规则/参数唯一性以及第 11 个实际交易日后的 MA5。通过后仅执行一次正式状态 `INSERT INTO ... SELECT FROM read_parquet(...)`，并与生产运行成功更新处于同一事务。
@@ -121,7 +123,7 @@ qrp-atlas-system-b run-daily --trade-date YYYY-MM-DD
 
 输入标准行按稳定顺序计算 SHA-256，形成 `input_snapshot_id`。相同运行类型、日期范围、规则版本、参数版本和快照已有成功运行时返回 `IDEMPOTENT_NOOP`，不重复插入。
 
-上游行情或复权因子修订会形成新的快照 ID，追加一套可追溯事实；查询按最新成功运行选择，不覆盖旧快照。同日最新状态允许修订，早于最新成功日期的修订必须等待级联重算入口，不能产生非级联历史。失败运行保留稳定错误码、错误详情和 staging，不会被标记成功。
+上游行情或复权因子修订会形成新的快照 ID，追加一套可追溯事实；查询按最新成功运行选择，不覆盖旧快照。同日最新状态允许通过 `run-daily` 修订；早于最新成功日期的每日修订，以及任何针对非空目标库的非幂等 `initialize`，都必须等待级联重算入口，不能产生非级联历史。失败运行保留稳定错误码、错误详情和 staging，不会被标记成功。
 
 多次复权稳定性测试分别以不同截止日生成前复权历史：共同日期上的 `close` 与 `ma5` 可以随最新复权因子按相同比例缩放，但 `close / ma5`、线上/线下关系、状态、前后状态和连续计数必须逐日一致。该性质说明多次复权需要通过 `input_snapshot_id` 和审计口径治理显示数值版本，不应改变 System B 状态迁移语义。
 
@@ -227,9 +229,9 @@ staging 写入耗时: 0.152 秒
 ## 11. 测试与兼容性证据
 
 ```text
-System B 状态生产/API 专项: 16 passed
+System B 状态生产/API 专项: 17 passed
 System B 契约、2.0 状态机与旧版兼容集合: 59 passed
-全量测试: 794 passed
+全量测试: 795 passed
 python -m compileall -q src tests: passed
 OpenAPI System B 路径检查: 6 paths passed
 git diff --check: passed

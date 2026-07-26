@@ -38,7 +38,7 @@ COMPLETED_AT = "completed_at"
 SYSTEM_B_STATE_OBSERVATION_TABLE = "system_b_state_observation"
 SYSTEM_B_LATEST_STATE_VIEW = "system_b_latest_state"
 SYSTEM_B_PRODUCTION_RUN_TABLE = "system_b_production_run"
-SYSTEM_B_CALCULATION_VERSION = "system_b_state_monitoring@1.0.1"
+SYSTEM_B_CALCULATION_VERSION = "system_b_state_monitoring@1.0.2"
 
 SYSTEM_B_2_0_RULE_VERSION_SET_ID = "system_b_2_0_draft_1__mts_8236965"
 SYSTEM_B_2_0_PARAMETER_SET_ID = "system_b_2_0_draft_1_params_1"

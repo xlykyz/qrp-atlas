@@ -399,6 +399,8 @@ def initialize_history(
                 input_snapshot_id=input_snapshot_id,
                 calculation_version=SYSTEM_B_CALCULATION_VERSION,
                 metrics={**metrics, "import_seconds": 0.0},
+                require_empty_rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+                require_empty_parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
             )
             import_seconds = time.perf_counter() - import_started
         elif not dry_run and existing is not None:

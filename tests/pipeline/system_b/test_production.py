@@ -387,6 +387,59 @@ def test_full_initialization_matches_daily_incremental_and_is_idempotent(tmp_pat
     assert duplicate_keys == 0
 
 
+def test_initialization_rejects_partial_revision_of_nonempty_target(tmp_path: Path) -> None:
+    source = tmp_path / "source.duckdb"
+    dates = _seed_market(source)
+    output = tmp_path / "output.duckdb"
+    initialize_history(
+        source_database=source,
+        output_database=output,
+        staging_root=tmp_path / "initial-stage",
+        end_date=dates[11],
+    )
+    connection = duckdb.connect(str(output), read_only=True)
+    try:
+        before_count = connection.execute(
+            "SELECT count(*) FROM system_b_state_observation"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    connection = duckdb.connect(str(source))
+    try:
+        connection.execute(
+            "UPDATE daily_market_snapshot SET close = close + 3 WHERE ticker = 'A' AND trade_date = ?",
+            [dates[10]],
+        )
+    finally:
+        connection.close()
+
+    with pytest.raises(SystemBProductionError) as exc_info:
+        initialize_history(
+            source_database=source,
+            output_database=output,
+            staging_root=tmp_path / "revision-stage",
+            end_date=dates[10],
+        )
+    assert exc_info.value.code == "SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY"
+
+    connection = duckdb.connect(str(output), read_only=True)
+    try:
+        assert connection.execute(
+            "SELECT count(*) FROM system_b_state_observation"
+        ).fetchone()[0] == before_count
+        assert connection.execute(
+            """
+            SELECT status, error_code
+            FROM system_b_production_run
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone() == ("FAILED", "SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY")
+    finally:
+        connection.close()
+
+
 def test_daily_requires_prior_checkpoint_for_continuing_assets(tmp_path: Path) -> None:
     source = tmp_path / "source.duckdb"
     dates = _seed_market(source)

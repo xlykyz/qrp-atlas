@@ -719,11 +719,36 @@ def import_staging(
     input_snapshot_id: str,
     calculation_version: str,
     metrics: dict[str, Any],
+    require_empty_rule_version_set_id: str | None = None,
+    require_empty_parameter_set_id: str | None = None,
 ) -> None:
     state_columns = ", ".join(STATE_INSERT_COLUMNS)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     connection.execute("BEGIN")
     try:
+        if (
+            require_empty_rule_version_set_id is not None
+            or require_empty_parameter_set_id is not None
+        ):
+            if (
+                require_empty_rule_version_set_id is None
+                or require_empty_parameter_set_id is None
+            ):
+                raise ValueError("both initialization emptiness versions are required")
+            existing_state = connection.execute(
+                f"""
+                SELECT 1
+                FROM {SYSTEM_B_STATE_OBSERVATION_TABLE}
+                WHERE rule_version_set_id = ? AND parameter_set_id = ?
+                LIMIT 1
+                """,
+                [require_empty_rule_version_set_id, require_empty_parameter_set_id],
+            ).fetchone()
+            if existing_state is not None:
+                raise SystemBProductionError(
+                    "SYSTEM_B_INITIALIZATION_TARGET_NOT_EMPTY",
+                    "initialize is bootstrap-only; use a future recompute-from workflow",
+                )
         connection.execute(
             f"""
             INSERT INTO {SYSTEM_B_STATE_OBSERVATION_TABLE} (
