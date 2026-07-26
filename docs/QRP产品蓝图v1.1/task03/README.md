@@ -66,7 +66,9 @@ ma5
 其中：
 
 - `listing_trading_day_number` 是由正式数据管道或调用方注入的上市实际交易日事实；指标内部不查询上市日期或数据库；
-- `is_trading_day=true` 的行必须提供有限的最终前复权 `close` 和 `ma5`；
+- 所有 `is_trading_day=true` 的行都必须提供有限的最终前复权 `close`；
+- 上市实际交易日 1—10 的 `ma5` 允许为空；如已提供则必须为有限值，仅作为审计字段使用；
+- 第 11 个实际交易日起必须提供有限的 `ma5`，缺失或非有限值以稳定错误码 `MISSING_NUMERIC_INPUT` 拒绝；
 - `is_trading_day=false` 表示停牌或非该股实际交易日，上市交易日序号必须与上一观察一致；该行不读取价格，不推进连续计数；
 - 无 checkpoint 的全量历史必须从上市实际交易日 1 开始，避免对截断历史猜测先前状态；
 - `trade_date` 是交易日标签。timezone-aware 输入保留本地日历日期，不先转 UTC；
@@ -129,7 +131,9 @@ diagnostics
 - 第 10 个实际交易日仍处于预热；
 - 停牌日不增加 `listing_trading_day_number`，也不会使预热提前结束；
 - 第 11 个实际交易日从 `BASE` 开始执行正常迁移：线上进入 `CANDIDATE`，线下保持 `BASE`；
-- 预热期价格相对 MA5 仅作为审计事实输出，不带入第 11 日的连续确认计数。
+- 预热期 MA5 缺失时输出 `ma5=null`、`is_above_or_equal_ma5=null`，不影响正式预热状态；
+- 预热期 MA5 已形成时，价格相对 MA5 仅作为审计事实输出，不参与连续计数，也不带入第 11 日；
+- 第 11 个实际交易日不继承任何预热计数，并从 `BASE` 按当日有效 MA5 正常迁移。
 
 ## 8. 停牌处理
 
@@ -190,6 +194,7 @@ src/qrp_atlas/strategies/builtin/system_b_basic.py
 专项测试覆盖：
 
 - 预热 1—10 日与第 11 日边界；
+- 上市第 1—4 日标准 MA5 未形成时仍完成预热，第 11 日缺失 MA5 明确失败；
 - 预热跨停牌；
 - 表驱动状态迁移；
 - 两类停牌连续语义；
@@ -213,9 +218,9 @@ python -m compileall -q src tests
 
 本分支最终证据：
 
-- System B 2.0 专项：26 passed；
-- System B 专项加旧版兼容集合：45 passed；
-- 全量测试：776 passed；
+- System B 2.0 专项：28 passed；
+- System B 专项加旧版兼容集合：47 passed；
+- 全量测试：778 passed；
 - `python -m compileall -q src tests`：通过；
 - `git diff --check`：通过。
 

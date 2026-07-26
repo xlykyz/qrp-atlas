@@ -139,6 +139,38 @@ def test_listing_days_one_through_ten_are_warmup_and_day_eleven_enters_normal_ma
     assert bool(result.frame.loc[10, STATE_CHANGED]) is True
 
 
+def test_warmup_allows_missing_ma5_before_standard_window_exists() -> None:
+    rows = [_row("NEW", f"2026-02-{day:02d}", day, above=True) for day in range(1, 12)]
+    for row in rows[:4]:
+        row[MA5] = np.nan
+
+    result = calculate_system_b_2_0_states(_request(pd.DataFrame(rows)))
+    early_warmup = result.frame.iloc[:4]
+    later_warmup = result.frame.iloc[4:10]
+    day_eleven = result.frame.iloc[10]
+
+    assert early_warmup[TREND_STATE].eq(SystemBTrendState.NEW_LISTING_WARMUP.value).all()
+    assert early_warmup[UNDERLYING_TREND_STATE].eq(SystemBTrendState.BASE.value).all()
+    assert early_warmup[MA5].isna().all()
+    assert early_warmup[IS_ABOVE_OR_EQUAL_MA5].isna().all()
+    assert early_warmup[CONSECUTIVE_ABOVE_MA5_DAYS].eq(0).all()
+    assert early_warmup[CONSECUTIVE_BELOW_MA5_DAYS].eq(0).all()
+    assert later_warmup[IS_ABOVE_OR_EQUAL_MA5].eq(True).all()
+    assert later_warmup[CONSECUTIVE_ABOVE_MA5_DAYS].eq(0).all()
+    assert day_eleven[TREND_STATE] == SystemBTrendState.CANDIDATE.value
+    assert day_eleven[CONSECUTIVE_ABOVE_MA5_DAYS] == 1
+
+
+def test_day_eleven_requires_finite_ma5() -> None:
+    rows = [_row("NEW", f"2026-02-{day:02d}", day, above=True) for day in range(1, 12)]
+    rows[10][MA5] = np.nan
+
+    with pytest.raises(SystemBStateMachineError) as exc_info:
+        calculate_system_b_2_0_states(_request(pd.DataFrame(rows)))
+
+    assert exc_info.value.code == "MISSING_NUMERIC_INPUT"
+
+
 def test_warmup_counts_actual_trading_days_and_crosses_suspensions() -> None:
     rows: list[dict[str, object]] = []
     listing_day = 0

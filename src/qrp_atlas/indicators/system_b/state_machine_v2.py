@@ -102,6 +102,29 @@ def _require_finite_number(name: str, value: Any, *, asset_id: str, trade_date: 
     return number
 
 
+def _optional_finite_number(
+    name: str,
+    value: Any,
+    *,
+    asset_id: str,
+    trade_date: pd.Timestamp,
+) -> float | None:
+    """Return None for a missing optional value, otherwise require a finite number."""
+
+    try:
+        is_missing = pd.isna(value)
+    except (TypeError, ValueError):
+        is_missing = False
+    if isinstance(is_missing, (bool, np.bool_)) and bool(is_missing):
+        return None
+    return _require_finite_number(
+        name,
+        value,
+        asset_id=asset_id,
+        trade_date=trade_date,
+    )
+
+
 def _validate_definition(request: SystemBStateMachineRequest) -> None:
     parameters = request.parameters
     if not isinstance(parameters, SystemBStateMachineParameters):
@@ -394,21 +417,27 @@ def calculate_system_b_2_0_states(
                 asset_id=asset_id,
                 trade_date=trade_date,
             )
-            ma5_value = _require_finite_number(
-                MA5,
-                record[MA5],
-                asset_id=asset_id,
-                trade_date=trade_date,
-            )
-            is_above = close_value >= ma5_value
-
             if listing_day <= request.parameters.warmup_trading_days:
+                ma5_value = _optional_finite_number(
+                    MA5,
+                    record[MA5],
+                    asset_id=asset_id,
+                    trade_date=trade_date,
+                )
+                is_above = close_value >= ma5_value if ma5_value is not None else None
                 state = SystemBTrendState.NEW_LISTING_WARMUP
                 underlying_state = SystemBTrendState.BASE
                 above_days = 0
                 below_days = 0
                 row_diagnostics = (DIAGNOSTIC_WARMUP,)
             else:
+                ma5_value = _require_finite_number(
+                    MA5,
+                    record[MA5],
+                    asset_id=asset_id,
+                    trade_date=trade_date,
+                )
+                is_above = close_value >= ma5_value
                 if previous_state is SystemBTrendState.NEW_LISTING_WARMUP:
                     previous_underlying = SystemBTrendState.BASE
                     previous_above_days = 0
