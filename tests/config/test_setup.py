@@ -96,7 +96,8 @@ def test_non_interactive_setup_creates_empty_database_and_custom_launch(tmp_path
 
     assert result.database_status == "已创建"
     assert result.launch_command == f'qrp-atlas-api --env-file "{tmp_path / "runtime.env"}"'
-    assert result.env_file.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert result.env_file.stat().st_mode & 0o777 == 0o600
     assert validate_existing_database(result.settings.paths.duckdb_path) == tuple(sorted(BASE_TABLES))
     connection = duckdb.connect(str(result.settings.paths.duckdb_path), read_only=True)
     try:

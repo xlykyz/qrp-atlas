@@ -60,6 +60,8 @@ from qrp_atlas.indicators.stock import (
     calculate_stock_trend,
 )
 from qrp_atlas.indicators.system_b import (
+    SystemBStateMachineError,
+    calculate_system_b_2_0_states,
     detect_system_b_basic_state,
     detect_system_b_basic_state_from_prices,
 )
@@ -179,6 +181,8 @@ __all__ = [
     "RESIDUAL_CALCULATION_VERSION",
     "detect_system_b_basic_state",
     "detect_system_b_basic_state_from_prices",
+    "SystemBStateMachineError",
+    "calculate_system_b_2_0_states",
     "calculate_daily_market_snapshot",
     # 横截面指标与因子
     "CrossSectionFrameError",
