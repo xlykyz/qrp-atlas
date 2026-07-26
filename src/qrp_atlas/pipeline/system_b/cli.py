@@ -106,20 +106,14 @@ def _readiness(path: Path, trade_date: date) -> dict[str, object]:
         ).fetchdf()
         if frame.empty:
             raise SystemBProductionError("EMPTY_DAILY_UNIVERSE", str(trade_date))
-        unresolved = frame.loc[frame[MARKET_FACT_STATUS] == UNRESOLVED_MISSING]
-        if not unresolved.empty:
-            sample = unresolved["asset_id"].astype(str).head(10).tolist()
-            raise SystemBProductionError(
-                "MISSING_DAILY_MARKET_FACT",
-                f"{len(unresolved)} target-date assets lack daily or suspension facts; "
-                f"sample={sample}",
-            )
-        missing_close = int((frame["is_trading_day"] & frame["close"].isna()).sum())
+        target = frame.loc[frame["trade_date"].dt.date == trade_date].copy()
+        unresolved = target.loc[target[MARKET_FACT_STATUS] == UNRESOLVED_MISSING]
+        missing_close = int((target["is_trading_day"] & target["close"].isna()).sum())
         missing_ma5 = int(
             (
-                frame["is_trading_day"]
-                & (frame["listing_trading_day_number"] >= 11)
-                & frame["ma5"].isna()
+                target["is_trading_day"]
+                & (target["listing_trading_day_number"] >= 11)
+                & target["ma5"].isna()
             ).sum()
         )
         if missing_close:
@@ -129,10 +123,11 @@ def _readiness(path: Path, trade_date: date) -> dict[str, object]:
         return {
             "status": "READY",
             "trade_date": trade_date.isoformat(),
-            "asset_count": int(frame["asset_id"].nunique()),
-            "row_count": len(frame),
-            "trading_asset_count": int(frame["is_trading_day"].sum()),
-            "suspended_asset_count": int((~frame["is_trading_day"]).sum()),
+            "asset_count": int(target["asset_id"].nunique()),
+            "row_count": len(target),
+            "trading_asset_count": int(target["is_trading_day"].sum()),
+            "suspended_asset_count": int((target[MARKET_FACT_STATUS] == "EXPLICIT_NON_TRADING").sum()),
+            "unresolved_asset_count": len(unresolved),
             "price_adjustment": "FORWARD_ADJUSTED",
         }
     finally:

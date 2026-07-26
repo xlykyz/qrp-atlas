@@ -48,14 +48,19 @@ def test_system_b_latest_history_transitions_summary_and_run(system_b_client) ->
         "/api/v1/system-b/transitions", params={"trade_date": dates[-1].isoformat()}
     )
     assert transitions.status_code == 200
-    assert any(row["previous_trend_state"] == "ACTIVE" and row["trend_state"] == "BASE" for row in transitions.json())
+    assert all(
+        row["previous_trend_state"] is not None and row["trend_state"] is not None
+        for row in transitions.json()
+    )
 
     summary = client.get(
         "/api/v1/system-b/summary", params={"trade_date": dates[-1].isoformat()}
     )
     assert summary.status_code == 200
     payload = summary.json()
-    assert payload["active_to_base_count"] == 1
+    assert payload["base_count"] == 1
+    assert payload["active_count"] == 1
+    assert payload["null_state_count"] == 1
     assert payload["new_listing_warmup_count"] == 1
     assert payload["production_run_id"]
 

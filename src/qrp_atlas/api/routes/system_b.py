@@ -167,7 +167,9 @@ def transitions(
                 "AND observation.parameter_set_id = ?"
             )
             + ") SELECT previous_trend_state, trend_state, count(*) AS count "
-            "FROM selected GROUP BY 1, 2 ORDER BY 1, 2",
+            "FROM selected "
+            "WHERE previous_trend_state IS NOT NULL AND trend_state IS NOT NULL "
+            "GROUP BY 1, 2 ORDER BY 1, 2",
             [trade_date, rule_version_set_id, parameter_set_id],
         )
         return _fetch_dicts(cursor)
@@ -193,16 +195,20 @@ def summary(
             + """
             )
             SELECT
-                count(*) FILTER (WHERE trend_state = 'NEW_LISTING_WARMUP') AS new_listing_warmup_count,
+                count(*) FILTER (WHERE lifecycle_state = 'NEW_LISTING_WARMUP') AS new_listing_warmup_count,
                 count(*) FILTER (WHERE trend_state = 'BASE') AS base_count,
                 count(*) FILTER (WHERE trend_state = 'CANDIDATE') AS candidate_count,
                 count(*) FILTER (WHERE trend_state = 'ACTIVE') AS active_count,
+                count(*) FILTER (WHERE trend_state IS NULL) AS null_state_count,
                 count(*) FILTER (WHERE previous_trend_state = 'BASE' AND trend_state = 'CANDIDATE') AS base_to_candidate_count,
                 count(*) FILTER (WHERE previous_trend_state = 'CANDIDATE' AND trend_state = 'ACTIVE') AS candidate_to_active_count,
                 count(*) FILTER (WHERE previous_trend_state = 'ACTIVE' AND trend_state = 'BASE') AS active_to_base_count,
                 count(*) FILTER (WHERE previous_trend_state = 'ACTIVE' AND trend_state = 'ACTIVE') AS active_held_count,
-                count(*) FILTER (WHERE is_trading_day = FALSE) AS suspended_hold_count,
-                count(*) FILTER (WHERE diagnostics NOT IN ('[]', '["NON_TRADING_DAY_STATE_HELD"]')) AS anomaly_count,
+                count(*) FILTER (WHERE market_fact_status = 'EXPLICIT_NON_TRADING') AS explicit_non_trading_count,
+                count(*) FILTER (WHERE market_fact_status = 'UNRESOLVED_MISSING') AS unresolved_missing_count,
+                count(*) FILTER (
+                    WHERE diagnostics NOT IN ('[]', '["NON_TRADING_DAY_FACT_DERIVED"]')
+                ) AS diagnostic_count,
                 any_value(rule_version_set_id) AS rule_version_set_id,
                 any_value(parameter_set_id) AS parameter_set_id,
                 arg_max(production_run_id, created_at) AS production_run_id,

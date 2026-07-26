@@ -12,26 +12,34 @@ import duckdb
 import pandas as pd
 
 from qrp_atlas.contracts import (
+    ACTUAL_PAIR_CONTIGUOUS,
     ASSET_ID,
     CALCULATION_VERSION,
     CLOSE,
     COMPLETED_AT,
-    CONSECUTIVE_ABOVE_MA5_DAYS,
-    CONSECUTIVE_BELOW_MA5_DAYS,
     CREATED_AT,
     DIAGNOSTICS,
     INPUT_SNAPSHOT_ID,
     IS_ABOVE_OR_EQUAL_MA5,
     IS_TRADING_DAY,
+    LATEST_ACTUAL_CLOSE,
+    LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_TRADE_DATE,
+    LIFECYCLE_STATE,
     LISTING_TRADING_DAY_NUMBER,
     MA5,
+    MARKET_FACT_STATUS,
     PARAMETER_SET_ID,
+    PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_TRADE_DATE,
     PREVIOUS_TREND_STATE,
     PRICE_ADJUSTMENT,
     PRODUCTION_RUN_ID,
     RULE_VERSION_SET_ID,
     SOURCE_RULE_IDS,
     STATE_CHANGED,
+    STATE_BASIS_SEQUENCE_INTACT,
     SYSTEM_B_LATEST_STATE_VIEW,
     SYSTEM_B_PRODUCTION_RUN,
     SYSTEM_B_PRODUCTION_RUN_TABLE,
@@ -39,9 +47,6 @@ from qrp_atlas.contracts import (
     SYSTEM_B_STATE_OBSERVATION_TABLE,
     TRADE_DATE,
     TREND_STATE,
-    UNDERLYING_TREND_STATE,
-    SystemBStateCheckpoint,
-    SystemBTrendState,
 )
 
 
@@ -53,7 +58,6 @@ REQUIRED_INPUT_TABLES = (
     "suspend_d",
 )
 
-MARKET_FACT_STATUS = "_market_fact_status"
 ACTUAL_TRADING = "ACTUAL_TRADING"
 EXPLICIT_NON_TRADING = "EXPLICIT_NON_TRADING"
 UNRESOLVED_MISSING = "UNRESOLVED_MISSING"
@@ -61,17 +65,24 @@ UNRESOLVED_MISSING = "UNRESOLVED_MISSING"
 STATE_INSERT_COLUMNS = (
     ASSET_ID,
     TRADE_DATE,
+    LIFECYCLE_STATE,
     TREND_STATE,
-    UNDERLYING_TREND_STATE,
     PREVIOUS_TREND_STATE,
     STATE_CHANGED,
+    MARKET_FACT_STATUS,
     IS_TRADING_DAY,
     LISTING_TRADING_DAY_NUMBER,
     CLOSE,
     MA5,
     IS_ABOVE_OR_EQUAL_MA5,
-    CONSECUTIVE_ABOVE_MA5_DAYS,
-    CONSECUTIVE_BELOW_MA5_DAYS,
+    LATEST_ACTUAL_TRADE_DATE,
+    LATEST_ACTUAL_CLOSE,
+    LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_TRADE_DATE,
+    PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    STATE_BASIS_SEQUENCE_INTACT,
+    ACTUAL_PAIR_CONTIGUOUS,
     PRICE_ADJUSTMENT,
     RULE_VERSION_SET_ID,
     PARAMETER_SET_ID,
@@ -106,6 +117,24 @@ def table_exists(connection: duckdb.DuckDBPyConnection, name: str) -> bool:
 def ensure_system_b_schema(connection: duckdb.DuckDBPyConnection) -> None:
     connection.execute(SYSTEM_B_STATE_OBSERVATION.duckdb_create_sql())
     connection.execute(SYSTEM_B_PRODUCTION_RUN.duckdb_create_sql())
+    actual_columns = [
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = ?
+            ORDER BY ordinal_position
+            """,
+            [SYSTEM_B_STATE_OBSERVATION_TABLE],
+        ).fetchall()
+    ]
+    expected_columns = [column.name for column in SYSTEM_B_STATE_OBSERVATION.columns]
+    if actual_columns != expected_columns:
+        raise SystemBProductionError(
+            "SYSTEM_B_SCHEMA_RECREATION_REQUIRED",
+            "existing System B state schema belongs to an incompatible calculation model",
+        )
     connection.execute(
         f"""
         CREATE OR REPLACE VIEW {SYSTEM_B_LATEST_STATE_VIEW} AS
@@ -174,279 +203,176 @@ def _register_asset_filter(
 def standard_input_sql(
     *,
     end_date: date,
+    target_date: date | None,
     asset_filter_join: str,
 ) -> tuple[str, list[Any]]:
+    target_filter = "" if target_date is None else "QUALIFY row_number() OVER (PARTITION BY asset_id ORDER BY trade_date DESC) <= 2"
+    target_stock_filter = (
+        "" if target_date is None
+        else "AND (stock.delist_date IS NULL OR stock.delist_date >= ?)"
+    )
+    params: list[Any] = [end_date]
+    if target_date is not None:
+        params.append(target_date)
+    params.append(end_date)
     return (
         f"""
         WITH selected_stock AS (
             SELECT stock.ticker, stock.list_date, stock.delist_date
             FROM stock_info AS stock
             {asset_filter_join}
-            WHERE stock.list_date IS NOT NULL
-              AND stock.list_date <= ?
+            WHERE stock.list_date IS NOT NULL AND stock.list_date <= ?
+              {target_stock_filter}
         ),
         market_calendar AS (
-            SELECT trade_date
-            FROM trading_calendar
-            WHERE is_open = TRUE
-              AND trade_date <= ?
+            SELECT trade_date FROM trading_calendar
+            WHERE is_open = TRUE AND trade_date <= ?
         ),
         domain AS (
-            SELECT
-                stock.ticker AS asset_id,
-                calendar.trade_date
+            SELECT stock.ticker AS asset_id, calendar.trade_date
             FROM selected_stock AS stock
             JOIN market_calendar AS calendar
               ON calendar.trade_date >= stock.list_date
              AND (stock.delist_date IS NULL OR calendar.trade_date <= stock.delist_date)
-            WHERE TRUE
         ),
         explicit_suspension AS (
             SELECT DISTINCT ticker AS asset_id, trade_date
             FROM suspend_d
             WHERE upper(coalesce(suspend_type, '')) NOT LIKE '%复牌%'
         ),
-        raw_actual AS (
-            SELECT
-                daily.ticker AS asset_id,
-                daily.trade_date,
-                daily.close AS raw_close,
-                coalesce(factor.adj_factor, 1.0) AS adj_factor,
-                row_number() OVER (
-                    PARTITION BY daily.ticker ORDER BY daily.trade_date
-                )::INTEGER AS listing_trading_day_number
-            FROM daily_market_snapshot AS daily
-            JOIN selected_stock AS stock ON stock.ticker = daily.ticker
-            ASOF LEFT JOIN adj_factor_changes AS factor
-              ON daily.ticker = factor.ticker
-             AND daily.trade_date >= factor.trade_date
-            WHERE daily.trade_date <= ?
-              AND daily.trade_date >= stock.list_date
-              AND (stock.delist_date IS NULL OR daily.trade_date <= stock.delist_date)
-              AND daily.close IS NOT NULL
-              AND coalesce(daily.volume, 0) > 0
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM suspend_d AS suspension
-                  WHERE suspension.ticker = daily.ticker
-                    AND suspension.trade_date = daily.trade_date
-                    AND upper(coalesce(suspension.suspend_type, '')) NOT LIKE '%复牌%'
-              )
-        ),
-        latest_factor AS (
-            SELECT asset_id, coalesce(arg_max(adj_factor, trade_date), 1.0) AS latest_adj_factor
-            FROM raw_actual
-            GROUP BY asset_id
-        ),
-        adjusted_actual AS (
-            SELECT
-                actual.asset_id,
-                actual.trade_date,
-                actual.listing_trading_day_number,
-                actual.raw_close * actual.adj_factor / latest.latest_adj_factor AS close
-            FROM raw_actual AS actual
-            JOIN latest_factor AS latest USING (asset_id)
-        ),
-        indicators AS (
-            SELECT
-                asset_id,
-                trade_date,
-                listing_trading_day_number,
-                close,
-                CASE
-                    WHEN listing_trading_day_number >= 5 THEN
-                        avg(close) OVER (
-                            PARTITION BY asset_id ORDER BY trade_date
-                            ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
-                        )
-                    ELSE NULL
-                END AS ma5
-            FROM adjusted_actual
-        ),
-        observation AS (
+        domain_fact AS (
             SELECT
                 domain.asset_id,
                 domain.trade_date,
                 CASE
                     WHEN suspension.asset_id IS NOT NULL THEN '{EXPLICIT_NON_TRADING}'
-                    WHEN daily.ticker IS NOT NULL AND daily.volume = 0
-                        THEN '{EXPLICIT_NON_TRADING}'
-                    WHEN daily.ticker IS NOT NULL
-                         AND daily.close IS NOT NULL
-                         AND coalesce(daily.volume, 0) > 0
-                        THEN '{ACTUAL_TRADING}'
+                    WHEN daily.ticker IS NOT NULL AND daily.volume = 0 THEN '{EXPLICIT_NON_TRADING}'
+                    WHEN daily.ticker IS NOT NULL AND daily.close IS NOT NULL
+                         AND coalesce(daily.volume, 0) > 0 THEN '{ACTUAL_TRADING}'
                     ELSE '{UNRESOLVED_MISSING}'
                 END AS {MARKET_FACT_STATUS},
-                CASE
-                    WHEN suspension.asset_id IS NOT NULL THEN FALSE
-                    WHEN daily.ticker IS NOT NULL AND daily.volume = 0 THEN FALSE
-                    WHEN daily.ticker IS NOT NULL
-                         AND daily.close IS NOT NULL
-                         AND coalesce(daily.volume, 0) > 0
-                        THEN TRUE
-                    ELSE FALSE
-                END AS is_trading_day,
-                coalesce(indicators.listing_trading_day_number, 0)::INTEGER
-                    AS listing_trading_day_number,
-                CASE
-                    WHEN daily.ticker IS NOT NULL
-                         AND daily.close IS NOT NULL
-                         AND coalesce(daily.volume, 0) > 0
-                         AND suspension.asset_id IS NULL
-                    THEN indicators.close
-                END
-                    AS close,
-                CASE
-                    WHEN daily.ticker IS NOT NULL
-                         AND daily.close IS NOT NULL
-                         AND coalesce(daily.volume, 0) > 0
-                         AND suspension.asset_id IS NULL
-                    THEN indicators.ma5
-                END
-                    AS ma5
+                daily.close AS raw_close,
+                sum(CASE
+                    WHEN suspension.asset_id IS NULL
+                     AND NOT (daily.ticker IS NOT NULL AND daily.volume = 0)
+                     AND NOT (daily.ticker IS NOT NULL AND daily.close IS NOT NULL
+                              AND coalesce(daily.volume, 0) > 0)
+                    THEN 1 ELSE 0 END
+                ) OVER (PARTITION BY domain.asset_id ORDER BY domain.trade_date) AS unresolved_count
             FROM domain
             LEFT JOIN daily_market_snapshot AS daily
-              ON daily.ticker = domain.asset_id
-             AND daily.trade_date = domain.trade_date
+              ON daily.ticker = domain.asset_id AND daily.trade_date = domain.trade_date
             LEFT JOIN explicit_suspension AS suspension
-              ON suspension.asset_id = domain.asset_id
-             AND suspension.trade_date = domain.trade_date
-            ASOF LEFT JOIN indicators
-              ON domain.asset_id = indicators.asset_id
-             AND domain.trade_date >= indicators.trade_date
-        )
-        SELECT asset_id, trade_date, {MARKET_FACT_STATUS}, is_trading_day,
-               listing_trading_day_number, close, ma5
-        FROM observation
-        ORDER BY asset_id, trade_date
-        """,
-        [end_date, end_date, end_date],
-    )
-
-
-def daily_standard_input_sql(
-    *,
-    target_date: date,
-    asset_filter_join: str,
-) -> tuple[str, list[Any]]:
-    return (
-        f"""
-        WITH selected_stock AS (
-            SELECT stock.ticker, stock.list_date, stock.delist_date
-            FROM stock_info AS stock
-            {asset_filter_join}
-            WHERE stock.list_date IS NOT NULL
-              AND stock.list_date <= ?
-              AND (stock.delist_date IS NULL OR stock.delist_date >= ?)
+              ON suspension.asset_id = domain.asset_id AND suspension.trade_date = domain.trade_date
+        ),
+        raw_actual AS (
+            SELECT
+                fact.asset_id,
+                fact.trade_date,
+                fact.raw_close,
+                fact.unresolved_count,
+                coalesce(factor.adj_factor, 1.0) AS adj_factor,
+                row_number() OVER (PARTITION BY fact.asset_id ORDER BY fact.trade_date)::INTEGER
+                    AS listing_trading_day_number
+            FROM domain_fact AS fact
+            ASOF LEFT JOIN adj_factor_changes AS factor
+              ON fact.asset_id = factor.ticker AND fact.trade_date >= factor.trade_date
+            WHERE fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}'
         ),
         latest_factor AS (
-            SELECT ticker, coalesce(arg_max(adj_factor, trade_date), 1.0) AS latest_adj_factor
-            FROM adj_factor_changes
-            WHERE trade_date <= ?
-            GROUP BY ticker
+            SELECT asset_id, coalesce(arg_max(adj_factor, trade_date), 1.0) AS latest_adj_factor
+            FROM raw_actual GROUP BY asset_id
         ),
         adjusted_actual AS (
             SELECT
-                daily.ticker AS asset_id,
-                daily.trade_date,
-                daily.close * coalesce(factor.adj_factor, 1.0)
-                    / coalesce(latest.latest_adj_factor, 1.0) AS close
-            FROM daily_market_snapshot AS daily
-            JOIN selected_stock AS stock ON stock.ticker = daily.ticker
-            LEFT JOIN latest_factor AS latest ON latest.ticker = daily.ticker
-            ASOF LEFT JOIN adj_factor_changes AS factor
-              ON daily.ticker = factor.ticker
-             AND daily.trade_date >= factor.trade_date
-            WHERE daily.trade_date <= ?
-              AND daily.trade_date >= stock.list_date
-              AND daily.close IS NOT NULL
-              AND coalesce(daily.volume, 0) > 0
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM suspend_d AS suspension
-                  WHERE suspension.ticker = daily.ticker
-                    AND suspension.trade_date = daily.trade_date
-                    AND upper(coalesce(suspension.suspend_type, '')) NOT LIKE '%复牌%'
-              )
+                actual.asset_id,
+                actual.trade_date,
+                actual.unresolved_count,
+                actual.listing_trading_day_number,
+                actual.raw_close * actual.adj_factor / latest.latest_adj_factor AS close
+            FROM raw_actual AS actual
+            JOIN latest_factor AS latest USING (asset_id)
         ),
-        latest_observation AS (
+        indicator_values AS (
             SELECT
                 asset_id,
-                count(*)::INTEGER AS listing_trading_day_number,
-                max(trade_date) AS latest_trade_date,
-                arg_max(close, trade_date) AS latest_close,
-                list_avg(
-                    list_transform(
-                        list_sort(
-                            max_by(
-                                struct_pack(trade_date := trade_date, value := close),
-                                trade_date,
-                                5
-                            )
-                        ),
-                        item -> item.value
+                trade_date,
+                unresolved_count,
+                listing_trading_day_number,
+                close,
+                CASE WHEN listing_trading_day_number >= 5 THEN
+                    avg(close) OVER (
+                        PARTITION BY asset_id ORDER BY trade_date
+                        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
                     )
-                ) AS latest_ma5
+                END AS ma5
             FROM adjusted_actual
-            GROUP BY asset_id
         ),
-        target_daily AS (
-            SELECT ticker AS asset_id, close, volume
-            FROM daily_market_snapshot
-            WHERE trade_date = ?
+        actual_relation AS (
+            SELECT *, CASE WHEN ma5 IS NULL THEN NULL ELSE close >= ma5 END AS is_above
+            FROM indicator_values
         ),
-        target_suspension AS (
-            SELECT DISTINCT ticker AS asset_id
-            FROM suspend_d
-            WHERE trade_date = ?
-              AND upper(coalesce(suspend_type, '')) NOT LIKE '%复牌%'
+        actual_history AS (
+            SELECT
+                *,
+                lag(trade_date) OVER (PARTITION BY asset_id ORDER BY trade_date)
+                    AS previous_actual_trade_date,
+                lag(is_above) OVER (PARTITION BY asset_id ORDER BY trade_date)
+                    AS previous_actual_is_above,
+                coalesce(
+                    unresolved_count = lag(unresolved_count) OVER (
+                        PARTITION BY asset_id ORDER BY trade_date
+                    ) AND lag(is_above) OVER (
+                        PARTITION BY asset_id ORDER BY trade_date
+                    ) IS NOT NULL,
+                    FALSE
+                ) AS actual_pair_contiguous
+            FROM actual_relation
+        ),
+        observation_basis AS (
+            SELECT
+                fact.asset_id,
+                fact.trade_date,
+                fact.{MARKET_FACT_STATUS},
+                fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' AS is_trading_day,
+                coalesce(actual.listing_trading_day_number, 0)::INTEGER
+                    AS listing_trading_day_number,
+                CASE WHEN fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' THEN actual.close END AS close,
+                CASE WHEN fact.{MARKET_FACT_STATUS} = '{ACTUAL_TRADING}' THEN actual.ma5 END AS ma5,
+                actual.trade_date AS latest_actual_trade_date,
+                actual.close AS latest_actual_close,
+                actual.ma5 AS latest_actual_ma5,
+                actual.is_above AS latest_actual_is_above,
+                actual.previous_actual_trade_date,
+                actual.previous_actual_is_above,
+                coalesce(fact.unresolved_count = actual.unresolved_count, FALSE)
+                    AS state_basis_sequence_intact,
+                coalesce(actual.actual_pair_contiguous, FALSE) AS actual_pair_contiguous
+            FROM domain_fact AS fact
+            ASOF LEFT JOIN actual_history AS actual
+              ON fact.asset_id = actual.asset_id AND fact.trade_date >= actual.trade_date
         )
         SELECT
-            stock.ticker AS asset_id,
-            ?::DATE AS trade_date,
-            CASE
-                WHEN suspension.asset_id IS NOT NULL THEN '{EXPLICIT_NON_TRADING}'
-                WHEN daily.asset_id IS NOT NULL AND daily.volume = 0
-                    THEN '{EXPLICIT_NON_TRADING}'
-                WHEN daily.asset_id IS NOT NULL
-                     AND daily.close IS NOT NULL
-                     AND coalesce(daily.volume, 0) > 0
-                    THEN '{ACTUAL_TRADING}'
-                ELSE '{UNRESOLVED_MISSING}'
-            END AS {MARKET_FACT_STATUS},
-            CASE
-                WHEN suspension.asset_id IS NOT NULL THEN FALSE
-                WHEN daily.asset_id IS NOT NULL AND daily.volume = 0 THEN FALSE
-                WHEN daily.asset_id IS NOT NULL
-                     AND daily.close IS NOT NULL
-                     AND coalesce(daily.volume, 0) > 0
-                    THEN TRUE
-                ELSE FALSE
-            END AS is_trading_day,
-            coalesce(latest.listing_trading_day_number, 0)::INTEGER
-                AS listing_trading_day_number,
-            CASE
-                WHEN suspension.asset_id IS NULL
-                     AND daily.asset_id IS NOT NULL
-                     AND daily.close IS NOT NULL
-                     AND coalesce(daily.volume, 0) > 0
-                THEN latest.latest_close
-            END AS close,
-            CASE
-                WHEN suspension.asset_id IS NULL
-                     AND daily.asset_id IS NOT NULL
-                     AND daily.close IS NOT NULL
-                     AND coalesce(daily.volume, 0) > 0
-                     AND latest.listing_trading_day_number >= 5
-                THEN latest.latest_ma5
-            END AS ma5
-        FROM selected_stock AS stock
-        LEFT JOIN latest_observation AS latest ON latest.asset_id = stock.ticker
-        LEFT JOIN target_daily AS daily ON daily.asset_id = stock.ticker
-        LEFT JOIN target_suspension AS suspension ON suspension.asset_id = stock.ticker
-        ORDER BY stock.ticker
+            asset_id,
+            trade_date,
+            {MARKET_FACT_STATUS},
+            is_trading_day,
+            listing_trading_day_number,
+            close,
+            ma5,
+            latest_actual_trade_date,
+            latest_actual_close,
+            latest_actual_ma5,
+            latest_actual_is_above AS latest_actual_is_above_or_equal_ma5,
+            previous_actual_trade_date,
+            previous_actual_is_above AS previous_actual_is_above_or_equal_ma5,
+            state_basis_sequence_intact,
+            actual_pair_contiguous
+        FROM observation_basis
+        {target_filter}
+        ORDER BY asset_id, trade_date
         """,
-        [target_date] * 7,
+        params,
     )
 
 
@@ -459,16 +385,11 @@ def execute_standard_input(
 ) -> duckdb.DuckDBPyConnection:
     validate_source_schema(connection)
     asset_join = _register_asset_filter(connection, asset_ids)
-    if target_date is not None:
-        sql, params = daily_standard_input_sql(
-            target_date=target_date,
-            asset_filter_join=asset_join,
-        )
-    else:
-        sql, params = standard_input_sql(
-            end_date=end_date,
-            asset_filter_join=asset_join,
-        )
+    sql, params = standard_input_sql(
+        end_date=end_date,
+        target_date=target_date,
+        asset_filter_join=asset_join,
+    )
     return connection.execute(sql, params)
 
 
@@ -496,103 +417,6 @@ def iter_asset_batches(
             pending = pending.loc[~mask].reset_index(drop=True)
     if not pending.empty:
         yield pending.reset_index(drop=True)
-
-
-def load_checkpoints(
-    connection: duckdb.DuckDBPyConnection,
-    *,
-    before_date: date,
-    rule_version_set_id: str,
-    parameter_set_id: str,
-    asset_ids: Sequence[str],
-) -> tuple[SystemBStateCheckpoint, ...]:
-    if not asset_ids:
-        return ()
-    connection.register(
-        "system_b_checkpoint_assets",
-        pd.DataFrame({ASSET_ID: sorted(set(asset_ids))}),
-    )
-    latest_rows = connection.execute(
-        f"""
-        SELECT observation.*
-        FROM {SYSTEM_B_LATEST_STATE_VIEW} AS observation
-        JOIN system_b_checkpoint_assets AS selected USING (asset_id)
-        WHERE observation.rule_version_set_id = ?
-          AND observation.parameter_set_id = ?
-        ORDER BY observation.asset_id
-        """,
-        [rule_version_set_id, parameter_set_id],
-    ).fetchdf()
-    if latest_rows.empty:
-        rows = latest_rows
-        fallback_assets: list[str] = []
-    else:
-        latest_dates = pd.to_datetime(latest_rows[TRADE_DATE]).dt.date
-        rows = latest_rows.loc[latest_dates < before_date].copy()
-        fallback_assets = latest_rows.loc[
-            latest_dates >= before_date, ASSET_ID
-        ].astype(str).tolist()
-
-    if fallback_assets:
-        connection.register(
-            "system_b_checkpoint_fallback_assets",
-            pd.DataFrame({ASSET_ID: sorted(set(fallback_assets))}),
-        )
-        fallback = connection.execute(
-            f"""
-            WITH previous_date AS (
-                SELECT max(observation.trade_date) AS trade_date
-                FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
-                JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
-                  ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
-                 AND run.status = 'SUCCEEDED'
-                WHERE observation.trade_date < ?
-                  AND observation.rule_version_set_id = ?
-                  AND observation.parameter_set_id = ?
-            ), candidates AS (
-                SELECT observation.*, run.completed_at
-                FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
-                JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
-                  ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
-                 AND run.status = 'SUCCEEDED'
-                JOIN system_b_checkpoint_fallback_assets AS selected
-                  ON selected.asset_id = observation.asset_id
-                JOIN previous_date ON previous_date.trade_date = observation.trade_date
-                WHERE observation.rule_version_set_id = ?
-                  AND observation.parameter_set_id = ?
-            )
-            SELECT candidates.* EXCLUDE (completed_at)
-            FROM candidates
-            QUALIFY row_number() OVER (
-                PARTITION BY candidates.asset_id
-                ORDER BY candidates.completed_at DESC NULLS LAST,
-                         candidates.created_at DESC,
-                         candidates.input_snapshot_id DESC
-            ) = 1
-            ORDER BY candidates.asset_id
-            """,
-            [
-                before_date,
-                rule_version_set_id,
-                parameter_set_id,
-                rule_version_set_id,
-                parameter_set_id,
-            ],
-        ).fetchdf()
-        rows = pd.concat([rows, fallback], ignore_index=True)
-    rows = rows.sort_values(ASSET_ID, kind="mergesort").reset_index(drop=True)
-    return tuple(
-        SystemBStateCheckpoint(
-            asset_id=str(row[ASSET_ID]),
-            last_observation_date=pd.Timestamp(row[TRADE_DATE]),
-            trend_state=SystemBTrendState(str(row[TREND_STATE])),
-            underlying_trend_state=SystemBTrendState(str(row[UNDERLYING_TREND_STATE])),
-            listing_trading_day_number=int(row[LISTING_TRADING_DAY_NUMBER]),
-            consecutive_above_ma5_days=int(row[CONSECUTIVE_ABOVE_MA5_DAYS]),
-            consecutive_below_ma5_days=int(row[CONSECUTIVE_BELOW_MA5_DAYS]),
-        )
-        for row in rows.to_dict(orient="records")
-    )
 
 
 def latest_success_trade_date(

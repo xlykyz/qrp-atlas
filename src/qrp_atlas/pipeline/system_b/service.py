@@ -30,18 +30,18 @@ from qrp_atlas.contracts import (
     SYSTEM_B_2_0_PARAMETER_SET_ID,
     SYSTEM_B_2_0_PARAMETERS,
     SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+    SYSTEM_B_2_0_SOURCE_RULE_IDS,
     SYSTEM_B_CALCULATION_VERSION,
     SYSTEM_B_STATE_OUTPUT_COLUMNS,
     TRADE_DATE,
     TREND_STATE,
     PriceAdjustment,
-    SystemBStateCheckpoint,
     SystemBStateMachineRequest,
-    SystemBTrendState,
 )
 from qrp_atlas.indicators.system_b import calculate_system_b_2_0_states
 
 from .repository import (
+    EXPLICIT_NON_TRADING,
     MARKET_FACT_STATUS,
     UNRESOLVED_MISSING,
     SystemBProductionError,
@@ -53,7 +53,6 @@ from .repository import (
     import_staging,
     iter_asset_batches,
     latest_success_trade_date,
-    load_checkpoints,
     open_database,
     update_run_metrics,
     validate_source_schema,
@@ -73,7 +72,9 @@ class SystemBRunReport:
     calculated_row_count: int
     output_row_count: int
     state_counts: dict[str, int]
-    suspended_hold_count: int
+    null_state_count: int
+    explicit_non_trading_count: int
+    unresolved_market_fact_count: int
     error_count: int
     sql_query_count: int
     batch_count: int
@@ -91,18 +92,13 @@ class SystemBRunReport:
         return asdict(self)
 
 
-def _request(
-    frame: pd.DataFrame,
-    *,
-    checkpoints: tuple[SystemBStateCheckpoint, ...] = (),
-) -> SystemBStateMachineRequest:
+def _request(frame: pd.DataFrame) -> SystemBStateMachineRequest:
     return SystemBStateMachineRequest(
         observations=frame,
         parameters=SYSTEM_B_2_0_PARAMETERS,
         input_price_adjustment=PriceAdjustment.FORWARD_ADJUSTED,
         rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
         parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
-        initial_states=checkpoints,
     )
 
 
@@ -112,12 +108,19 @@ def _update_hash(digest: hashlib._Hash, frame: pd.DataFrame) -> None:
 
 def _serialize_output(frame: pd.DataFrame) -> pd.DataFrame:
     staged = frame.loc[:, SYSTEM_B_STATE_OUTPUT_COLUMNS].copy()
-    staged[SOURCE_RULE_IDS] = staged[SOURCE_RULE_IDS].map(
-        lambda value: json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
+    staged[TREND_STATE] = staged[TREND_STATE].astype("string")
+    staged["previous_trend_state"] = staged["previous_trend_state"].astype("string")
+    staged["state_changed"] = staged["state_changed"].astype("boolean")
+    staged[SOURCE_RULE_IDS] = json.dumps(
+        list(SYSTEM_B_2_0_SOURCE_RULE_IDS),
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    staged[DIAGNOSTICS] = staged[DIAGNOSTICS].map(
-        lambda value: json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
-    )
+    diagnostic_mapping = {
+        value: json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
+        for value in staged[DIAGNOSTICS].unique()
+    }
+    staged[DIAGNOSTICS] = staged[DIAGNOSTICS].map(diagnostic_mapping)
     return staged
 
 
@@ -145,18 +148,6 @@ def _unresolved_market_facts(frame: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
-def _validate_batch_input(frame: pd.DataFrame, seen_assets: set[str]) -> None:
-    for asset_id, group in frame.groupby(ASSET_ID, sort=False):
-        if asset_id not in seen_assets:
-            first = group.iloc[0]
-            if not bool(first[IS_TRADING_DAY]) or int(first[LISTING_TRADING_DAY_NUMBER]) != 1:
-                raise SystemBProductionError(
-                    "INVALID_HISTORY_START",
-                    f"{asset_id} does not start on actual listing trading day 1",
-                )
-            seen_assets.add(str(asset_id))
-
-
 def _validate_staging(
     staging_glob: str,
     *,
@@ -173,7 +164,13 @@ def _validate_staging(
                 count(*) AS rows,
                 count(DISTINCT asset_id) AS assets,
                 count(*) - count(DISTINCT (asset_id, trade_date, rule_version_set_id, parameter_set_id)) AS duplicates,
-                count(*) FILTER (WHERE trend_state NOT IN ('NEW_LISTING_WARMUP','BASE','CANDIDATE','ACTIVE')) AS invalid_states,
+                count(*) FILTER (
+                    WHERE trend_state IS NOT NULL
+                      AND trend_state NOT IN ('BASE','CANDIDATE','ACTIVE')
+                ) AS invalid_states,
+                count(*) FILTER (
+                    WHERE lifecycle_state NOT IN ('NEW_LISTING_WARMUP','NORMAL')
+                ) AS invalid_lifecycle_states,
                 count(*) FILTER (WHERE listing_trading_day_number >= 11 AND is_trading_day AND ma5 IS NULL) AS missing_ma5,
                 count(DISTINCT rule_version_set_id) AS rule_versions,
                 count(DISTINCT parameter_set_id) AS parameter_versions
@@ -184,12 +181,13 @@ def _validate_staging(
         connection.close()
     if row is None:
         raise SystemBProductionError("EMPTY_STAGING", "staging validation returned no result")
-    rows, assets, duplicates, invalid_states, missing_ma5, rules, parameters = row
+    rows, assets, duplicates, invalid_states, invalid_lifecycle_states, missing_ma5, rules, parameters = row
     failures = {
         "rows": (rows, expected_rows),
         "assets": (assets, expected_assets),
         "duplicates": (duplicates, 0),
         "invalid_states": (invalid_states, 0),
+        "invalid_lifecycle_states": (invalid_lifecycle_states, 0),
         "missing_ma5": (missing_ma5, 0),
         "rule_versions": (rules, 1),
         "parameter_versions": (parameters, 1),
@@ -258,9 +256,9 @@ def initialize_history(
         input_rows = calculated_rows = output_rows = batch_count = 0
         assets: set[str] = set()
         output_assets: set[str] = set()
-        seen_assets: set[str] = set()
         state_counts: Counter[str] = Counter()
-        suspended_count = 0
+        explicit_non_trading_count = 0
+        null_state_count = 0
         market_start: date | None = None
         market_end: date | None = None
         read_seconds = calculation_seconds = staging_seconds = 0.0
@@ -293,21 +291,7 @@ def initialize_history(
             market_start = frame_min if market_start is None else min(market_start, frame_min)
             market_end = frame_max if market_end is None else max(market_end, frame_max)
 
-            unresolved = _unresolved_market_facts(frame)
-            if not unresolved.empty:
-                unresolved_count += len(unresolved)
-                write_started = time.perf_counter()
-                _write_parquet(
-                    unresolved,
-                    staging_dir / f"unresolved-market-facts-{batch_count:05d}.parquet",
-                )
-                staging_seconds += time.perf_counter() - write_started
-                continue
-
-            if unresolved_count:
-                continue
-
-            _validate_batch_input(frame, seen_assets)
+            unresolved_count += len(_unresolved_market_facts(frame))
 
             calculation_started = time.perf_counter()
             result = calculate_system_b_2_0_states(_request(frame))
@@ -321,31 +305,15 @@ def initialize_history(
             serialized = _serialize_output(staged)
             output_rows += len(serialized)
             output_assets.update(serialized[ASSET_ID].astype(str).unique())
-            state_counts.update(serialized[TREND_STATE].astype(str))
-            suspended_count += int((~serialized[IS_TRADING_DAY].astype(bool)).sum())
+            state_counts.update(serialized[TREND_STATE].dropna().astype(str))
+            null_state_count += int(serialized[TREND_STATE].isna().sum())
+            explicit_non_trading_count += int(
+                (serialized[MARKET_FACT_STATUS] == EXPLICIT_NON_TRADING).sum()
+            )
             write_started = time.perf_counter()
             _write_parquet(serialized, staging_dir / f"part-{batch_count:05d}.parquet")
             staging_seconds += time.perf_counter() - write_started
 
-        if unresolved_count:
-            metrics = {
-                "asset_count": len(assets),
-                "input_row_count": input_rows,
-                "output_row_count": output_rows,
-                "unresolved_market_fact_count": unresolved_count,
-                "sql_query_count": 1,
-                "batch_count": batch_count,
-                "asset_batch_size": asset_batch_size,
-                "read_seconds": read_seconds,
-                "calculation_seconds": calculation_seconds,
-                "staging_write_seconds": staging_seconds,
-                "peak_memory_mb": _peak_memory_mb(),
-            }
-            raise SystemBProductionError(
-                "MISSING_DAILY_MARKET_FACT",
-                f"{unresolved_count} market-domain rows lack daily or suspension facts; "
-                f"see {staging_dir}/unresolved-market-facts-*.parquet",
-            )
 
         if input_rows == 0 or output_rows == 0:
             raise SystemBProductionError("EMPTY_STANDARD_INPUT", "no System B observations were generated")
@@ -365,7 +333,9 @@ def initialize_history(
             "calculated_row_count": calculated_rows,
             "output_row_count": output_rows,
             "state_counts": dict(state_counts),
-            "suspended_hold_count": suspended_count,
+            "null_state_count": null_state_count,
+            "explicit_non_trading_count": explicit_non_trading_count,
+            "unresolved_market_fact_count": unresolved_count,
             "error_count": 0,
             "sql_query_count": 1,
             "batch_count": batch_count,
@@ -434,7 +404,9 @@ def initialize_history(
             calculated_row_count=calculated_rows,
             output_row_count=output_rows,
             state_counts=dict(state_counts),
-            suspended_hold_count=suspended_count,
+            null_state_count=null_state_count,
+            explicit_non_trading_count=explicit_non_trading_count,
+            unresolved_market_fact_count=unresolved_count,
             error_count=0,
             sql_query_count=1,
             batch_count=batch_count,
@@ -563,36 +535,11 @@ def run_daily(
         read_seconds = time.perf_counter() - read_started
         if frame.empty:
             raise SystemBProductionError("EMPTY_DAILY_UNIVERSE", str(trade_date))
-        unresolved = _unresolved_market_facts(frame)
-        if not unresolved.empty:
-            staging_started = time.perf_counter()
-            _write_parquet(
-                unresolved,
-                staging_dir / "unresolved-market-facts-00001.parquet",
-            )
-            staging_seconds = time.perf_counter() - staging_started
-            metrics = {
-                "asset_count": int(frame[ASSET_ID].nunique()),
-                "input_row_count": len(frame),
-                "output_row_count": 0,
-                "unresolved_market_fact_count": len(unresolved),
-                "sql_query_count": 1,
-                "batch_count": 1,
-                "asset_batch_size": len(frame),
-                "read_seconds": read_seconds,
-                "calculation_seconds": 0.0,
-                "staging_write_seconds": staging_seconds,
-                "peak_memory_mb": _peak_memory_mb(),
-            }
-            raise SystemBProductionError(
-                "MISSING_DAILY_MARKET_FACT",
-                f"{len(unresolved)} target-date assets lack daily or suspension facts; "
-                f"see {staging_dir}/unresolved-market-facts-00001.parquet",
-            )
+        unresolved_count = len(_unresolved_market_facts(frame))
         digest = hashlib.sha256()
         _update_hash(digest, frame)
         input_snapshot_id = f"sha256:{digest.hexdigest()}"
-        asset_ids = frame[ASSET_ID].astype(str).tolist()
+        asset_ids = sorted(frame[ASSET_ID].astype(str).unique())
         existing = None
         if not dry_run:
             existing = find_succeeded_run(
@@ -623,7 +570,9 @@ def run_daily(
                 calculated_row_count=0,
                 output_row_count=int(existing_metrics.get("output_row_count", len(frame))),
                 state_counts=dict(existing_metrics.get("state_counts", {})),
-                suspended_hold_count=int(existing_metrics.get("suspended_hold_count", 0)),
+                null_state_count=int(existing_metrics.get("null_state_count", 0)),
+                explicit_non_trading_count=int(existing_metrics.get("explicit_non_trading_count", 0)),
+                unresolved_market_fact_count=int(existing_metrics.get("unresolved_market_fact_count", 0)),
                 error_count=0,
                 sql_query_count=1,
                 batch_count=0,
@@ -643,39 +592,24 @@ def run_daily(
             )
             completed = True
             return report
-        checkpoints = load_checkpoints(
-            output,
-            before_date=trade_date,
-            rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
-            parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
-            asset_ids=asset_ids,
-        )
-        checkpoint_by_asset = {item.asset_id: item for item in checkpoints}
-        missing_mask = (
-            ~frame[ASSET_ID].astype(str).isin(checkpoint_by_asset)
-            & (frame[LISTING_TRADING_DAY_NUMBER].astype(int) != 1)
-        )
-        missing = frame.loc[missing_mask, ASSET_ID].astype(str).tolist()
-        if missing:
-            raise SystemBProductionError(
-                "MISSING_PREVIOUS_SUCCESS_STATE",
-                f"{len(missing)} continuing assets lack checkpoints; sample={missing[:10]}",
-            )
-
         calculation_started = time.perf_counter()
-        result = calculate_system_b_2_0_states(_request(frame, checkpoints=checkpoints))
+        result = calculate_system_b_2_0_states(_request(frame))
         calculation_seconds = time.perf_counter() - calculation_started
-        serialized = _serialize_output(result.frame)
+        target_result = result.frame.loc[result.frame[TRADE_DATE].dt.date == trade_date].copy()
+        serialized = _serialize_output(target_result)
         staging_started = time.perf_counter()
         _write_parquet(serialized, staging_dir / "part-00001.parquet")
         staging_seconds = time.perf_counter() - staging_started
         _validate_staging(
             str(staging_dir / "part-*.parquet"),
-            expected_rows=len(frame),
+            expected_rows=len(serialized),
             expected_assets=len(asset_ids),
         )
-        state_counts = Counter(serialized[TREND_STATE].astype(str))
-        suspended_count = int((~serialized[IS_TRADING_DAY].astype(bool)).sum())
+        state_counts = Counter(serialized[TREND_STATE].dropna().astype(str))
+        explicit_non_trading_count = int(
+            (serialized[MARKET_FACT_STATUS] == EXPLICIT_NON_TRADING).sum()
+        )
+        null_state_count = int(serialized[TREND_STATE].isna().sum())
         metrics = {
             "asset_count": len(asset_ids),
             "market_start_date": trade_date.isoformat(),
@@ -683,10 +617,12 @@ def run_daily(
             "input_row_count": len(frame),
             "calculated_row_count": len(result.frame),
             "output_row_count": len(serialized),
+            "null_state_count": null_state_count,
+            "unresolved_market_fact_count": unresolved_count,
             "state_counts": dict(state_counts),
-            "suspended_hold_count": suspended_count,
+            "explicit_non_trading_count": explicit_non_trading_count,
             "error_count": 0,
-            "sql_query_count": 2,
+            "sql_query_count": 1,
             "batch_count": 1,
             "asset_batch_size": len(asset_ids),
             "read_seconds": read_seconds,
@@ -732,9 +668,11 @@ def run_daily(
             calculated_row_count=len(result.frame),
             output_row_count=len(serialized),
             state_counts=dict(state_counts),
-            suspended_hold_count=suspended_count,
+            null_state_count=null_state_count,
+            explicit_non_trading_count=explicit_non_trading_count,
+            unresolved_market_fact_count=unresolved_count,
             error_count=0,
-            sql_query_count=2,
+            sql_query_count=1,
             batch_count=1,
             asset_batch_size=len(asset_ids),
             read_seconds=read_seconds,
