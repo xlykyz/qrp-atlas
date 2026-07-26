@@ -17,6 +17,8 @@ from qrp_atlas.config.settings import (
 )
 
 from .repository import (
+    MARKET_FACT_STATUS,
+    UNRESOLVED_MISSING,
     SystemBProductionError,
     ensure_system_b_schema,
     execute_standard_input,
@@ -104,6 +106,14 @@ def _readiness(path: Path, trade_date: date) -> dict[str, object]:
         ).fetchdf()
         if frame.empty:
             raise SystemBProductionError("EMPTY_DAILY_UNIVERSE", str(trade_date))
+        unresolved = frame.loc[frame[MARKET_FACT_STATUS] == UNRESOLVED_MISSING]
+        if not unresolved.empty:
+            sample = unresolved["asset_id"].astype(str).head(10).tolist()
+            raise SystemBProductionError(
+                "MISSING_DAILY_MARKET_FACT",
+                f"{len(unresolved)} target-date assets lack daily or suspension facts; "
+                f"sample={sample}",
+            )
         missing_close = int((frame["is_trading_day"] & frame["close"].isna()).sum())
         missing_ma5 = int(
             (

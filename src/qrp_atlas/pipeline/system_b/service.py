@@ -42,6 +42,8 @@ from qrp_atlas.contracts import (
 from qrp_atlas.indicators.system_b import calculate_system_b_2_0_states
 
 from .repository import (
+    MARKET_FACT_STATUS,
+    UNRESOLVED_MISSING,
     SystemBProductionError,
     create_run,
     ensure_system_b_schema,
@@ -50,6 +52,7 @@ from .repository import (
     find_succeeded_run,
     import_staging,
     iter_asset_batches,
+    latest_success_trade_date,
     load_checkpoints,
     open_database,
     update_run_metrics,
@@ -128,6 +131,18 @@ def _write_parquet(frame: pd.DataFrame, path: Path) -> None:
         )
     finally:
         connection.close()
+
+
+def _unresolved_market_facts(frame: pd.DataFrame) -> pd.DataFrame:
+    if MARKET_FACT_STATUS not in frame.columns:
+        raise SystemBProductionError(
+            "MISSING_MARKET_FACT_CLASSIFICATION",
+            f"standard input is missing {MARKET_FACT_STATUS}",
+        )
+    return frame.loc[
+        frame[MARKET_FACT_STATUS] == UNRESOLVED_MISSING,
+        [ASSET_ID, TRADE_DATE, MARKET_FACT_STATUS],
+    ].copy()
 
 
 def _validate_batch_input(frame: pd.DataFrame, seen_assets: set[str]) -> None:
@@ -258,19 +273,41 @@ def initialize_history(
             asset_ids=asset_ids,
         )
         read_seconds += time.perf_counter() - query_started
-        for batch_count, frame in enumerate(
-            iter_asset_batches(cursor, asset_batch_size=asset_batch_size), start=1
-        ):
+        batch_iterator = iter_asset_batches(cursor, asset_batch_size=asset_batch_size)
+        unresolved_count = 0
+        batch_count = 0
+        while True:
             read_started = time.perf_counter()
+            try:
+                frame = next(batch_iterator)
+            except StopIteration:
+                read_seconds += time.perf_counter() - read_started
+                break
+            read_seconds += time.perf_counter() - read_started
+            batch_count += 1
             input_rows += len(frame)
             assets.update(frame[ASSET_ID].astype(str).unique())
-            _validate_batch_input(frame, seen_assets)
             _update_hash(digest, frame)
             frame_min = pd.Timestamp(frame[TRADE_DATE].min()).date()
             frame_max = pd.Timestamp(frame[TRADE_DATE].max()).date()
             market_start = frame_min if market_start is None else min(market_start, frame_min)
             market_end = frame_max if market_end is None else max(market_end, frame_max)
-            read_seconds += time.perf_counter() - read_started
+
+            unresolved = _unresolved_market_facts(frame)
+            if not unresolved.empty:
+                unresolved_count += len(unresolved)
+                write_started = time.perf_counter()
+                _write_parquet(
+                    unresolved,
+                    staging_dir / f"unresolved-market-facts-{batch_count:05d}.parquet",
+                )
+                staging_seconds += time.perf_counter() - write_started
+                continue
+
+            if unresolved_count:
+                continue
+
+            _validate_batch_input(frame, seen_assets)
 
             calculation_started = time.perf_counter()
             result = calculate_system_b_2_0_states(_request(frame))
@@ -289,6 +326,26 @@ def initialize_history(
             write_started = time.perf_counter()
             _write_parquet(serialized, staging_dir / f"part-{batch_count:05d}.parquet")
             staging_seconds += time.perf_counter() - write_started
+
+        if unresolved_count:
+            metrics = {
+                "asset_count": len(assets),
+                "input_row_count": input_rows,
+                "output_row_count": output_rows,
+                "unresolved_market_fact_count": unresolved_count,
+                "sql_query_count": 1,
+                "batch_count": batch_count,
+                "asset_batch_size": asset_batch_size,
+                "read_seconds": read_seconds,
+                "calculation_seconds": calculation_seconds,
+                "staging_write_seconds": staging_seconds,
+                "peak_memory_mb": _peak_memory_mb(),
+            }
+            raise SystemBProductionError(
+                "MISSING_DAILY_MARKET_FACT",
+                f"{unresolved_count} market-domain rows lack daily or suspension facts; "
+                f"see {staging_dir}/unresolved-market-facts-*.parquet",
+            )
 
         if input_rows == 0 or output_rows == 0:
             raise SystemBProductionError("EMPTY_STANDARD_INPUT", "no System B observations were generated")
@@ -471,6 +528,11 @@ def run_daily(
         ).fetchone()
         if not is_open or not bool(is_open[0]):
             raise SystemBProductionError("TARGET_NOT_MARKET_TRADING_DAY", str(trade_date))
+        latest_success_date = latest_success_trade_date(
+            output,
+            rule_version_set_id=SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+            parameter_set_id=SYSTEM_B_2_0_PARAMETER_SET_ID,
+        )
         if not dry_run:
             create_run(
                 output,
@@ -483,6 +545,12 @@ def run_daily(
                 calculation_version=SYSTEM_B_CALCULATION_VERSION,
             )
             created_run = True
+        if latest_success_date is not None and trade_date < latest_success_date:
+            raise SystemBProductionError(
+                "BACKDATED_RECOMPUTE_REQUIRED",
+                f"target {trade_date} is earlier than latest successful state date "
+                f"{latest_success_date}; use a future recompute-from workflow",
+            )
 
         read_started = time.perf_counter()
         frame = execute_standard_input(
@@ -493,6 +561,32 @@ def run_daily(
         read_seconds = time.perf_counter() - read_started
         if frame.empty:
             raise SystemBProductionError("EMPTY_DAILY_UNIVERSE", str(trade_date))
+        unresolved = _unresolved_market_facts(frame)
+        if not unresolved.empty:
+            staging_started = time.perf_counter()
+            _write_parquet(
+                unresolved,
+                staging_dir / "unresolved-market-facts-00001.parquet",
+            )
+            staging_seconds = time.perf_counter() - staging_started
+            metrics = {
+                "asset_count": int(frame[ASSET_ID].nunique()),
+                "input_row_count": len(frame),
+                "output_row_count": 0,
+                "unresolved_market_fact_count": len(unresolved),
+                "sql_query_count": 1,
+                "batch_count": 1,
+                "asset_batch_size": len(frame),
+                "read_seconds": read_seconds,
+                "calculation_seconds": 0.0,
+                "staging_write_seconds": staging_seconds,
+                "peak_memory_mb": _peak_memory_mb(),
+            }
+            raise SystemBProductionError(
+                "MISSING_DAILY_MARKET_FACT",
+                f"{len(unresolved)} target-date assets lack daily or suspension facts; "
+                f"see {staging_dir}/unresolved-market-facts-00001.parquet",
+            )
         digest = hashlib.sha256()
         _update_hash(digest, frame)
         input_snapshot_id = f"sha256:{digest.hexdigest()}"

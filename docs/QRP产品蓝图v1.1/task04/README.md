@@ -28,10 +28,12 @@ Linux DuckDB 正式行情事实
 |---|---|---|
 | 股票历史域 | `stock_info.list_date / delist_date` + `trading_calendar` | 每个市场交易日按当时上市/退市边界生成，禁止用当前 active 列表回填 |
 | 市场交易日 | `trading_calendar.is_open` | 不生成周末和休市日 |
-| 实际交易事实 | `daily_market_snapshot`，并排除 `suspend_d` 停牌事实与零成交量日 | 停牌日仍生成状态观察，但 `is_trading_day=false`；历史域从首个实际成交日开始 |
+| 实际交易事实 | `daily_market_snapshot` + `suspend_d` | 明确区分 `ACTUAL_TRADING`、`EXPLICIT_NON_TRADING`、`UNRESOLVED_MISSING`；历史域从上市日开始，不能把缺失行情静默解释为停牌 |
 | 上市实际交易日序号 | 集合化 SQL 对实际成交日 `row_number()` | 首个实际交易日为 1，停牌不推进，复牌继续 |
 | 前复权收盘 | `daily_market_snapshot.close` + `adj_factor_changes` as-of 变更点 | `raw_close * 当日有效因子 / 目标快照最新因子`；首个变更点前及无公司行动资产使用基准因子 1.0，声明 `FORWARD_ADJUSTED` |
 | MA5 | 同一前复权实际交易日序列 | 完整 5 个实际交易日窗口；停牌不进入窗口 |
+
+市场事实分类口径：当日存在明确 `suspend_d`，或存在日线且 `volume=0` 时，才允许生成 `is_trading_day=false`；存在非空收盘且成交量大于 0 的日线为 `ACTUAL_TRADING`。历史股票域内、市场开市日没有日线且没有停牌事实，或日线关键字段无法解释时，标记为 `UNRESOLVED_MISSING`，以稳定错误码 `MISSING_DAILY_MARKET_FACT` 整批失败。
 
 2026-07-26 的只读正式库审计位置为 `/home/claire/data/qrp-atlas/db/quant.db`。正式库包含：`stock_info` 5,840 行、`trading_calendar` 8,797 行、`daily_market_snapshot` 19,094,111 行、`adj_factor_changes` 88,598 行、`suspend_d` 604,326 行。代码不写死该路径，生产命令默认读取统一配置 `QRP_DUCKDB_PATH`；该绝对路径仅作为本次性能证据记录。
 
@@ -91,7 +93,7 @@ qrp-atlas-system-b initialize --output-database /tmp/system-b.duckdb --keep-stag
 
 每批结果写入独立 Parquet staging part。所有 part 完成后统一检查行数、资产数、重复键、合法状态、规则/参数唯一性以及第 11 个实际交易日后的 MA5。通过后仅执行一次正式状态 `INSERT INTO ... SELECT FROM read_parquet(...)`，并与生产运行成功更新处于同一事务。
 
-失败时正式状态表不写入，staging 与 `failure.json` 保留用于诊断；成功默认清理 staging，`--keep-staging` 可保留 manifest 和分片。
+历史输入发现无法解释的市场事实时，所有异常行写入 `unresolved-market-facts-*.parquet` 清单，停止计算和正式导入。失败时正式状态表不写入，staging 与 `failure.json` 保留用于诊断；成功默认清理 staging，`--keep-staging` 可保留 manifest 和分片。
 
 ## 5. 每日增量
 
@@ -104,20 +106,24 @@ qrp-atlas-system-b run-daily --trade-date YYYY-MM-DD
 
 流程：
 
-1. 检查目标日市场开市、五张上游表、股票域、前复权结果和 MA5；
+1. 检查目标日市场开市、五张上游表、股票域、市场事实分类、前复权结果和 MA5；
 2. 一条集合化 SQL 生成当日全市场输入；
 3. 一条集合化 SQL 读取目标日前同规则/参数的每股最近成功状态；
 4. 对全部资产一次调用状态机；
 5. 完整性校验并写一个 Parquet part；
 6. 一个事务批量导入当日状态并标记运行成功。
 
-继续上市的资产缺少上一成功状态时整批以 `MISSING_PREVIOUS_SUCCESS_STATE` 失败；上市实际交易日 1 的新股允许无 checkpoint。目标日非市场交易日以 `TARGET_NOT_MARKET_TRADING_DAY` 失败。
+继续上市的资产缺少上一成功状态时整批以 `MISSING_PREVIOUS_SUCCESS_STATE` 失败；上市实际交易日 1 的新股允许无 checkpoint。目标日非市场交易日以 `TARGET_NOT_MARKET_TRADING_DAY` 失败，缺失日线且没有明确停牌事实以 `MISSING_DAILY_MARKET_FACT` 失败。两类失败都不会写入部分状态或生成成功 production run。
+
+每日修订严格 fail-closed：目标日晚于最新成功状态日时正常续算；等于最新成功状态日时允许从前一日 checkpoint 重算同日；早于最新成功状态日时以 `BACKDATED_RECOMPUTE_REQUIRED` 拒绝，避免修订后的过去状态与旧路径计算的后续状态被拼接。未来的 `recompute-from --start-date` 应从修订日起正向重放至最新日期，并作为一致修订批次提交，本工作包尚未实现该能力。
 
 ## 6. 幂等、修订与恢复
 
 输入标准行按稳定顺序计算 SHA-256，形成 `input_snapshot_id`。相同运行类型、日期范围、规则版本、参数版本和快照已有成功运行时返回 `IDEMPOTENT_NOOP`，不重复插入。
 
-上游行情或复权因子修订会形成新的快照 ID，追加一套可追溯事实；查询按最新成功运行选择，不覆盖旧快照。失败运行保留稳定错误码、错误详情和 staging，不会被标记成功。
+上游行情或复权因子修订会形成新的快照 ID，追加一套可追溯事实；查询按最新成功运行选择，不覆盖旧快照。同日最新状态允许修订，早于最新成功日期的修订必须等待级联重算入口，不能产生非级联历史。失败运行保留稳定错误码、错误详情和 staging，不会被标记成功。
+
+多次复权稳定性测试分别以不同截止日生成前复权历史：共同日期上的 `close` 与 `ma5` 可以随最新复权因子按相同比例缩放，但 `close / ma5`、线上/线下关系、状态、前后状态和连续计数必须逐日一致。该性质说明多次复权需要通过 `input_snapshot_id` 和审计口径治理显示数值版本，不应改变 System B 状态迁移语义。
 
 ## 7. API
 
@@ -153,7 +159,9 @@ PR 合并前不得安装或启用 timer，也不得在正式库执行 migration 
 
 性能演练使用正式行情库只读输入、`/tmp` 临时 DuckDB 输出和临时 Parquet staging；没有修改正式数据库。
 
-### 全历史初始化实测
+### 全历史初始化性能基准
+
+以下成功导入性能数据来自缺失事实 fail-closed 规则加入前的同一批量主链，用于证明集合化读取、分批计算、Parquet staging 和单次导入的吞吐能力；它不再作为当前正式库全历史数据完整性通过证明。
 
 ```text
 正式输入库: /home/claire/data/qrp-atlas/db/quant.db（只读）
@@ -173,6 +181,12 @@ Parquet staging 写入耗时: 32.632 秒
 ```
 
 结果分布：`NEW_LISTING_WARMUP=59,029`、`BASE=7,396,530`、`CANDIDATE=1,903,813`、`ACTIVE=9,167,812`，停牌保持 990,152 行。完整性校验和一次正式批量导入均在临时输出库完成。
+
+### 缺失事实治理实测
+
+加入 fail-closed 分类和读取计时校准后，对同一正式库执行只读全历史演练：一条集合化 SQL 扫描 5,840 个资产、18,533,100 行，59 个资产批次，识别出 328,569 条 `UNRESOLVED_MISSING`，涉及 2,520 个资产和 1990-12-19 至 2014-04-21，写出 38 个异常 Parquet 分片后以 `MISSING_DAILY_MARKET_FACT` 失败；状态计算为 0，正式导入为 0。数据读取耗时 25.411 秒，异常 staging 写入 1.232 秒，峰值内存 10,031.99 MB。校准后的读取计时覆盖 `fetch_df_chunk()` 在生成器首次 `yield` 前发生的实际取数时间。
+
+该结果证明当前实现不会把历史行情缺口自动归类为停牌。正式初始化前必须治理异常清单或补齐权威停牌/行情事实；不得绕过该检查。
 
 ### 每日增量实测
 
@@ -213,9 +227,9 @@ staging 写入耗时: 0.152 秒
 ## 11. 测试与兼容性证据
 
 ```text
-System B 状态生产/API 专项: 9 passed
+System B 状态生产/API 专项: 16 passed
 System B 契约、2.0 状态机与旧版兼容集合: 59 passed
-全量测试: 787 passed
+全量测试: 794 passed
 python -m compileall -q src tests: passed
 OpenAPI System B 路径检查: 6 paths passed
 git diff --check: passed

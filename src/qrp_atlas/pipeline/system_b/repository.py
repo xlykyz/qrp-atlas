@@ -53,6 +53,11 @@ REQUIRED_INPUT_TABLES = (
     "suspend_d",
 )
 
+MARKET_FACT_STATUS = "_market_fact_status"
+ACTUAL_TRADING = "ACTUAL_TRADING"
+EXPLICIT_NON_TRADING = "EXPLICIT_NON_TRADING"
+UNRESOLVED_MISSING = "UNRESOLVED_MISSING"
+
 STATE_INSERT_COLUMNS = (
     ASSET_ID,
     TRADE_DATE,
@@ -180,22 +185,6 @@ def standard_input_sql(
             WHERE stock.list_date IS NOT NULL
               AND stock.list_date <= ?
         ),
-        first_actual_date AS (
-            SELECT daily.ticker AS asset_id, min(daily.trade_date) AS first_trade_date
-            FROM daily_market_snapshot AS daily
-            JOIN selected_stock AS stock ON stock.ticker = daily.ticker
-            WHERE daily.trade_date >= stock.list_date
-              AND daily.close IS NOT NULL
-              AND coalesce(daily.volume, 0) > 0
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM suspend_d AS suspension
-                  WHERE suspension.ticker = daily.ticker
-                    AND suspension.trade_date = daily.trade_date
-                    AND upper(coalesce(suspension.suspend_type, '')) NOT LIKE '%复牌%'
-              )
-            GROUP BY daily.ticker
-        ),
         market_calendar AS (
             SELECT trade_date
             FROM trading_calendar
@@ -207,11 +196,15 @@ def standard_input_sql(
                 stock.ticker AS asset_id,
                 calendar.trade_date
             FROM selected_stock AS stock
-            JOIN first_actual_date AS first_actual ON first_actual.asset_id = stock.ticker
             JOIN market_calendar AS calendar
-              ON calendar.trade_date >= first_actual.first_trade_date
+              ON calendar.trade_date >= stock.list_date
              AND (stock.delist_date IS NULL OR calendar.trade_date <= stock.delist_date)
             WHERE TRUE
+        ),
+        explicit_suspension AS (
+            SELECT DISTINCT ticker AS asset_id, trade_date
+            FROM suspend_d
+            WHERE upper(coalesce(suspend_type, '')) NOT LIKE '%复牌%'
         ),
         raw_actual AS (
             SELECT
@@ -274,19 +267,55 @@ def standard_input_sql(
             SELECT
                 domain.asset_id,
                 domain.trade_date,
-                coalesce(indicators.trade_date = domain.trade_date, FALSE) AS is_trading_day,
+                CASE
+                    WHEN suspension.asset_id IS NOT NULL THEN '{EXPLICIT_NON_TRADING}'
+                    WHEN daily.ticker IS NOT NULL AND daily.volume = 0
+                        THEN '{EXPLICIT_NON_TRADING}'
+                    WHEN daily.ticker IS NOT NULL
+                         AND daily.close IS NOT NULL
+                         AND coalesce(daily.volume, 0) > 0
+                        THEN '{ACTUAL_TRADING}'
+                    ELSE '{UNRESOLVED_MISSING}'
+                END AS {MARKET_FACT_STATUS},
+                CASE
+                    WHEN suspension.asset_id IS NOT NULL THEN FALSE
+                    WHEN daily.ticker IS NOT NULL AND daily.volume = 0 THEN FALSE
+                    WHEN daily.ticker IS NOT NULL
+                         AND daily.close IS NOT NULL
+                         AND coalesce(daily.volume, 0) > 0
+                        THEN TRUE
+                    ELSE FALSE
+                END AS is_trading_day,
                 coalesce(indicators.listing_trading_day_number, 0)::INTEGER
                     AS listing_trading_day_number,
-                CASE WHEN indicators.trade_date = domain.trade_date THEN indicators.close END
+                CASE
+                    WHEN daily.ticker IS NOT NULL
+                         AND daily.close IS NOT NULL
+                         AND coalesce(daily.volume, 0) > 0
+                         AND suspension.asset_id IS NULL
+                    THEN indicators.close
+                END
                     AS close,
-                CASE WHEN indicators.trade_date = domain.trade_date THEN indicators.ma5 END
+                CASE
+                    WHEN daily.ticker IS NOT NULL
+                         AND daily.close IS NOT NULL
+                         AND coalesce(daily.volume, 0) > 0
+                         AND suspension.asset_id IS NULL
+                    THEN indicators.ma5
+                END
                     AS ma5
             FROM domain
+            LEFT JOIN daily_market_snapshot AS daily
+              ON daily.ticker = domain.asset_id
+             AND daily.trade_date = domain.trade_date
+            LEFT JOIN explicit_suspension AS suspension
+              ON suspension.asset_id = domain.asset_id
+             AND suspension.trade_date = domain.trade_date
             ASOF LEFT JOIN indicators
               ON domain.asset_id = indicators.asset_id
              AND domain.trade_date >= indicators.trade_date
         )
-        SELECT asset_id, trade_date, is_trading_day,
+        SELECT asset_id, trade_date, {MARKET_FACT_STATUS}, is_trading_day,
                listing_trading_day_number, close, ma5
         FROM observation
         ORDER BY asset_id, trade_date
@@ -360,30 +389,64 @@ def daily_standard_input_sql(
                 ) AS latest_ma5
             FROM adjusted_actual
             GROUP BY asset_id
+        ),
+        target_daily AS (
+            SELECT ticker AS asset_id, close, volume
+            FROM daily_market_snapshot
+            WHERE trade_date = ?
+        ),
+        target_suspension AS (
+            SELECT DISTINCT ticker AS asset_id
+            FROM suspend_d
+            WHERE trade_date = ?
+              AND upper(coalesce(suspend_type, '')) NOT LIKE '%复牌%'
         )
         SELECT
-            asset_id,
+            stock.ticker AS asset_id,
             ?::DATE AS trade_date,
-            latest_trade_date = ? AS is_trading_day,
-            listing_trading_day_number,
-            CASE WHEN latest_trade_date = ? THEN latest_close END AS close,
             CASE
-                WHEN latest_trade_date = ? AND listing_trading_day_number >= 5
-                THEN latest_ma5
+                WHEN suspension.asset_id IS NOT NULL THEN '{EXPLICIT_NON_TRADING}'
+                WHEN daily.asset_id IS NOT NULL AND daily.volume = 0
+                    THEN '{EXPLICIT_NON_TRADING}'
+                WHEN daily.asset_id IS NOT NULL
+                     AND daily.close IS NOT NULL
+                     AND coalesce(daily.volume, 0) > 0
+                    THEN '{ACTUAL_TRADING}'
+                ELSE '{UNRESOLVED_MISSING}'
+            END AS {MARKET_FACT_STATUS},
+            CASE
+                WHEN suspension.asset_id IS NOT NULL THEN FALSE
+                WHEN daily.asset_id IS NOT NULL AND daily.volume = 0 THEN FALSE
+                WHEN daily.asset_id IS NOT NULL
+                     AND daily.close IS NOT NULL
+                     AND coalesce(daily.volume, 0) > 0
+                    THEN TRUE
+                ELSE FALSE
+            END AS is_trading_day,
+            coalesce(latest.listing_trading_day_number, 0)::INTEGER
+                AS listing_trading_day_number,
+            CASE
+                WHEN suspension.asset_id IS NULL
+                     AND daily.asset_id IS NOT NULL
+                     AND daily.close IS NOT NULL
+                     AND coalesce(daily.volume, 0) > 0
+                THEN latest.latest_close
+            END AS close,
+            CASE
+                WHEN suspension.asset_id IS NULL
+                     AND daily.asset_id IS NOT NULL
+                     AND daily.close IS NOT NULL
+                     AND coalesce(daily.volume, 0) > 0
+                     AND latest.listing_trading_day_number >= 5
+                THEN latest.latest_ma5
             END AS ma5
-        FROM latest_observation
-        ORDER BY asset_id
+        FROM selected_stock AS stock
+        LEFT JOIN latest_observation AS latest ON latest.asset_id = stock.ticker
+        LEFT JOIN target_daily AS daily ON daily.asset_id = stock.ticker
+        LEFT JOIN target_suspension AS suspension ON suspension.asset_id = stock.ticker
+        ORDER BY stock.ticker
         """,
-        [
-            target_date,
-            target_date,
-            target_date,
-            target_date,
-            target_date,
-            target_date,
-            target_date,
-            target_date,
-        ],
+        [target_date] * 7,
     )
 
 
@@ -530,6 +593,27 @@ def load_checkpoints(
         )
         for row in rows.to_dict(orient="records")
     )
+
+
+def latest_success_trade_date(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    rule_version_set_id: str,
+    parameter_set_id: str,
+) -> date | None:
+    row = connection.execute(
+        f"""
+        SELECT max(observation.trade_date)
+        FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} AS observation
+        JOIN {SYSTEM_B_PRODUCTION_RUN_TABLE} AS run
+          ON run.{PRODUCTION_RUN_ID} = observation.{PRODUCTION_RUN_ID}
+         AND run.status = 'SUCCEEDED'
+        WHERE observation.rule_version_set_id = ?
+          AND observation.parameter_set_id = ?
+        """,
+        [rule_version_set_id, parameter_set_id],
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
 
 
 def create_run(
