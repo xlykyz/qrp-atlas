@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import shutil
+from time import perf_counter
 import uuid
 
 import duckdb
@@ -30,7 +31,7 @@ from qrp_atlas.contracts import (
     TRADE_DATE,
     ZT_POOL,
 )
-from qrp_atlas.indicators.system_b import calculate_stock_pools
+from qrp_atlas.indicators.system_b import calculate_stock_pool
 from qrp_atlas.indicators.system_b.pools import EXITED, HEIGHT, CAPACITY, RECOGNITION, IN_POOL
 
 
@@ -92,7 +93,7 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(SYSTEM_B_POOL_RUN.duckdb_create_sql())
 
 
-def _load_market_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def _load_market_panel(con: duckdb.DuckDBPyConnection, end_date: date) -> pd.DataFrame:
     """Read the canonical facts and form one in-memory pool feature panel."""
     tables = {row[0] for row in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
     market = DAILY_MARKET_SNAPSHOT.name
@@ -130,9 +131,10 @@ def _load_market_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         JOIN {market} m ON m.trade_date=s.trade_date AND m.ticker=s.asset_id
         {basic_join}
         {limit_join}
+        WHERE s.trade_date <= ?
         ORDER BY s.asset_id, s.trade_date
     """
-    data = con.execute(sql).fetchdf()
+    data = con.execute(sql, [end_date]).fetchdf()
     required = ["open", "high", "low", "close", "amount", "float_cap", "is_limit_up"]
     if data.empty:
         raise SystemBPoolProductionError("EMPTY_POOL_MARKET_PANEL")
@@ -142,7 +144,7 @@ def _load_market_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return data
 
 
-def _load_episode_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+def _load_episode_panel(con: duckdb.DuckDBPyConnection, end_date: date) -> pd.DataFrame:
     tables = {row[0] for row in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
     required = {SYSTEM_B_EPISODE_TABLE, SYSTEM_B_EPISODE_OBSERVATION_TABLE}
     missing = required - tables
@@ -153,8 +155,9 @@ def _load_episode_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
                o.episode_return
         FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE} o
         JOIN {SYSTEM_B_EPISODE_TABLE} e ON e.episode_id=o.episode_id
+        WHERE o.trade_date <= ?
         ORDER BY o.asset_id, o.trade_date
-    """).fetchdf()
+    """, [end_date]).fetchdf()
 
 
 def _normalise_membership(result: pd.DataFrame, run_id: str) -> pd.DataFrame:
@@ -186,15 +189,22 @@ def _validate_membership(data: pd.DataFrame) -> None:
         raise SystemBPoolProductionError("INVALID_EXIT_POOL_ROW")
 
 
-def build_stock_pools(
+POOL_TYPES = (HEIGHT, CAPACITY, RECOGNITION)
+
+
+def build_stock_pool(
     input_database: Path,
     output_database: Path,
     *,
+    pool_type: str,
     start_date: date,
     end_date: date,
     episode_database: Path | None = None,
 ) -> dict[str, object]:
-    """Rebuild all pools in chronological order using one shared feature pass."""
+    """Rebuild one pool for a date range and atomically publish its rows."""
+    if pool_type not in POOL_TYPES:
+        raise SystemBPoolProductionError("UNSUPPORTED_POOL_TYPE", pool_type)
+    started_at = perf_counter()
     input_path, source = open_input_database(input_database)
     output_path = _absolute(output_database, "POOL_OUTPUT_DATABASE")
     if input_path == output_path:
@@ -206,11 +216,11 @@ def build_stock_pools(
     if separate_episode:
         episode_path, episode_source = open_episode_database(episode_database)
     try:
-        panel = _load_market_panel(source)
+        panel = _load_market_panel(source, end_date)
         episode_tables = {row[0] for row in episode_source.execute("SELECT table_name FROM information_schema.tables").fetchall()}
         if {SYSTEM_B_EPISODE_TABLE, SYSTEM_B_EPISODE_OBSERVATION_TABLE} - episode_tables:
             raise SystemBPoolProductionError("MISSING_POOL_EPISODE_TABLE")
-        episode_panel = _load_episode_panel(episode_source)
+        episode_panel = _load_episode_panel(episode_source, end_date)
         panel = panel.merge(episode_panel, on=[TRADE_DATE, ASSET_ID], how="left", validate="one_to_one")
     finally:
         if separate_episode:
@@ -220,17 +230,18 @@ def build_stock_pools(
     context = panel.loc[panel[TRADE_DATE] <= end_date].copy()
     if context.empty or context[TRADE_DATE].max() < end_date:
         raise SystemBPoolProductionError("POOL_INPUT_DATE_RANGE_INSUFFICIENT")
-    results = calculate_stock_pools(context)
+    input_seconds = perf_counter() - started_at
+    calculation_started_at = perf_counter()
+    result = calculate_stock_pool(context, pool_type)
     run_id = f"system_b_pool_{uuid.uuid4().hex}"
-    membership = pd.concat(
-        [_normalise_membership(result.membership, run_id) for result in results.values()],
-        ignore_index=True,
-    )
+    membership = _normalise_membership(result.membership, run_id)
     membership = membership.loc[
         membership[TRADE_DATE].between(start_date, end_date)
     ].reset_index(drop=True)
     _validate_membership(membership)
+    calculation_seconds = perf_counter() - calculation_started_at
 
+    write_started_at = perf_counter()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     staging = output_path.with_name(f".{output_path.name}.{run_id}.staging")
     if staging.exists():
@@ -244,35 +255,40 @@ def build_stock_pools(
         ensure_schema(con)
         con.begin()
         con.execute(
-            f"DELETE FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE} WHERE trade_date BETWEEN ? AND ?",
-            [start_date, end_date],
+            f"DELETE FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE} WHERE pool_type=? AND trade_date BETWEEN ? AND ?",
+            [pool_type, start_date, end_date],
         )
         con.execute(
-            f"DELETE FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE trade_date BETWEEN ? AND ?",
-            [start_date, end_date],
+            f"DELETE FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE pool_type=? AND trade_date BETWEEN ? AND ?",
+            [pool_type, start_date, end_date],
         )
         if not membership.empty:
             con.register("pool_membership_frame", membership)
             cols = ",".join(SYSTEM_B_POOL_MEMBERSHIP.column_names())
             con.execute(f"INSERT INTO {SYSTEM_B_POOL_MEMBERSHIP_TABLE} ({cols}) SELECT {cols} FROM pool_membership_frame")
-        metrics = {"pool_types": {pool: int((membership["pool_type"] == pool).sum()) for pool in (HEIGHT, CAPACITY, RECOGNITION)}}
+        metrics = {"pool_type": pool_type, "membership_rows": int(len(membership))}
         run_dates = sorted(set(context.loc[context[TRADE_DATE].between(start_date, end_date), TRADE_DATE]))
+        asset_counts = context.groupby(TRADE_DATE, sort=False)[ASSET_ID].nunique()
+        membership_counts = membership.groupby(TRADE_DATE, sort=False).size()
+        completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         run = pd.DataFrame([{
             TRADE_DATE: run_date,
+            "pool_type": pool_type,
             "status": "COMPLETED",
             "completed_run_id": run_id,
             "input_snapshot_id": json.dumps({"market": str(input_path), "episode": str(episode_path)}, sort_keys=True),
-            "asset_count": int(context.loc[context[TRADE_DATE] == run_date, ASSET_ID].nunique()),
-            "membership_row_count": int((membership[TRADE_DATE] == run_date).sum()),
+            "asset_count": int(asset_counts.get(run_date, 0)),
+            "membership_row_count": int(membership_counts.get(run_date, 0)),
             "metrics": json.dumps(metrics, sort_keys=True),
-            CREATED_AT: datetime.now(timezone.utc).replace(tzinfo=None),
-            "pool_completed_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            CREATED_AT: completed_at,
+            "pool_completed_at": completed_at,
         } for run_date in run_dates])
         con.register("pool_run_frame", run)
-        con.execute(f"INSERT INTO {SYSTEM_B_POOL_RUN_TABLE} SELECT * FROM pool_run_frame")
+        run_columns = ",".join(SYSTEM_B_POOL_RUN.column_names())
+        con.execute(f"INSERT INTO {SYSTEM_B_POOL_RUN_TABLE} ({run_columns}) SELECT {run_columns} FROM pool_run_frame")
         check = con.execute(
-            f"SELECT count(*) FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE status='COMPLETED' AND trade_date BETWEEN ? AND ?",
-            [start_date, end_date],
+            f"SELECT count(*) FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE pool_type=? AND status='COMPLETED' AND trade_date BETWEEN ? AND ?",
+            [pool_type, start_date, end_date],
         ).fetchone()[0]
         if check != len(run_dates):
             raise SystemBPoolProductionError("POOL_COMPLETION_CHECK_FAILED")
@@ -297,8 +313,10 @@ def build_stock_pools(
         if staging.exists():
             staging.unlink()
         raise
+    write_seconds = perf_counter() - write_started_at
     return {
         "status": "COMPLETED",
+        "pool_type": pool_type,
         "input_database": str(input_path),
         "output_database": str(output_path),
         "start_date": start_date.isoformat(),
@@ -306,12 +324,55 @@ def build_stock_pools(
         "run_id": run_id,
         "membership_rows": int(len(membership)),
         "asset_count": int(context[ASSET_ID].nunique()),
+        "timings": {
+            "input_seconds": input_seconds,
+            "calculation_seconds": calculation_seconds,
+            "write_seconds": write_seconds,
+            "total_seconds": perf_counter() - started_at,
+        },
+    }
+
+
+def build_stock_pools(
+    input_database: Path,
+    output_database: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    episode_database: Path | None = None,
+) -> dict[str, object]:
+    """Run the three independent production jobs in deterministic order."""
+    results = [
+        build_stock_pool(
+            input_database,
+            output_database,
+            pool_type=pool_type,
+            start_date=start_date,
+            end_date=end_date,
+            episode_database=episode_database,
+        )
+        for pool_type in POOL_TYPES
+    ]
+    return {
+        "status": "COMPLETED",
+        "input_database": results[0]["input_database"],
+        "output_database": results[0]["output_database"],
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "membership_rows": sum(int(result["membership_rows"]) for result in results),
+        "asset_count": max(int(result["asset_count"]) for result in results),
+        "pools": {str(result["pool_type"]): result for result in results},
     }
 
 
 def _read_completed(con: duckdb.DuckDBPyConnection) -> date:
     row = con.execute(
-        f"SELECT trade_date FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE status='COMPLETED' ORDER BY trade_date DESC LIMIT 1"
+        f"""SELECT trade_date
+        FROM {SYSTEM_B_POOL_RUN_TABLE}
+        WHERE status='COMPLETED' AND pool_type IN ('HEIGHT','CAPACITY','RECOGNITION')
+        GROUP BY trade_date
+        HAVING count(DISTINCT pool_type)=3
+        ORDER BY trade_date DESC LIMIT 1"""
     ).fetchone()
     if not row:
         raise SystemBPoolProductionError("NO_COMPLETED_POOL_RUN")

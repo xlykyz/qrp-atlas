@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS system_b_pool_membership_daily (
 );
 
 CREATE TABLE IF NOT EXISTS system_b_pool_run (
-  trade_date DATE PRIMARY KEY,
+  trade_date DATE NOT NULL,
+  pool_type VARCHAR NOT NULL,
   status VARCHAR NOT NULL,
   completed_run_id VARCHAR NOT NULL,
   input_snapshot_id VARCHAR NOT NULL,
@@ -25,5 +26,6 @@ CREATE TABLE IF NOT EXISTS system_b_pool_run (
   membership_row_count INTEGER NOT NULL,
   metrics VARCHAR NOT NULL,
   created_at TIMESTAMP NOT NULL,
-  pool_completed_at TIMESTAMP
+  pool_completed_at TIMESTAMP,
+  PRIMARY KEY (trade_date, pool_type)
 );

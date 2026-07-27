@@ -9,6 +9,7 @@ import pytest
 
 from qrp_atlas.pipeline.system_b_pools import (
     SystemBPoolProductionError,
+    build_stock_pool,
     build_stock_pools,
     get_daily_pool_snapshot,
     get_latest_completed_pool_snapshot,
@@ -97,10 +98,10 @@ def test_incremental_build_preserves_history_and_replaces_target_date(
         ORDER BY trade_date, asset_id, pool_type
     """).fetchall()
     historical_runs = before.execute("""
-        SELECT trade_date, status, asset_count, membership_row_count
+        SELECT trade_date, pool_type, status, asset_count, membership_row_count
         FROM system_b_pool_run
         WHERE trade_date < DATE '2026-01-08'
-        ORDER BY trade_date
+        ORDER BY trade_date, pool_type
     """).fetchall()
     before.close()
 
@@ -118,12 +119,12 @@ def test_incremental_build_preserves_history_and_replaces_target_date(
         ORDER BY trade_date, asset_id, pool_type
     """).fetchall() == historical_members
     assert after.execute("""
-        SELECT trade_date, status, asset_count, membership_row_count
+        SELECT trade_date, pool_type, status, asset_count, membership_row_count
         FROM system_b_pool_run
         WHERE trade_date < DATE '2026-01-08'
-        ORDER BY trade_date
+        ORDER BY trade_date, pool_type
     """).fetchall() == historical_runs
-    assert after.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 6
+    assert after.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 18
     target_business = after.execute("""
         SELECT * EXCLUDE (completed_run_id, created_at)
         FROM system_b_pool_membership_daily
@@ -139,7 +140,7 @@ def test_incremental_build_preserves_history_and_replaces_target_date(
         end_date=date(2026, 1, 8),
     )
     repeated = duckdb.connect(str(output), read_only=True)
-    assert repeated.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 6
+    assert repeated.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 18
     assert repeated.execute("""
         SELECT * EXCLUDE (completed_run_id, created_at)
         FROM system_b_pool_membership_daily
@@ -147,6 +148,37 @@ def test_incremental_build_preserves_history_and_replaces_target_date(
         ORDER BY asset_id, pool_type
     """).fetchall() == target_business
     repeated.close()
+
+
+def test_single_pool_build_writes_only_requested_pool_and_is_idempotent(tmp_path: Path):
+    source = _input_database(tmp_path / "input.duckdb")
+    output = tmp_path / "pools.duckdb"
+    first = build_stock_pool(
+        source.resolve(),
+        output.resolve(),
+        pool_type="HEIGHT",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 8),
+    )
+    second = build_stock_pool(
+        source.resolve(),
+        output.resolve(),
+        pool_type="HEIGHT",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 8),
+    )
+    assert first["pool_type"] == second["pool_type"] == "HEIGHT"
+    assert first["membership_rows"] == second["membership_rows"]
+    con = duckdb.connect(str(output), read_only=True)
+    assert con.execute(
+        "SELECT count(DISTINCT pool_type) FROM system_b_pool_membership_daily"
+    ).fetchone()[0] == 1
+    assert con.execute(
+        "SELECT count(*) FROM system_b_pool_run WHERE pool_type='HEIGHT'"
+    ).fetchone()[0] == 6
+    con.close()
+    with pytest.raises(SystemBPoolProductionError, match="NO_COMPLETED_POOL_RUN"):
+        get_latest_completed_pool_snapshot(output)
 
 
 def test_missing_input_has_no_output_side_effect(tmp_path: Path):

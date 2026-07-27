@@ -11,15 +11,15 @@
 
 ## 时间和指标
 
-所有窗口按输入的实际交易观察序列计算，前复权价格、正式涨停标记、状态机和行情轮次由上游提供。公共特征只计算一次，排名按指标降序和 `asset_id` 升序确定性排序。辨识度只消费当日已有行情轮次观察，不读取轮次最终结束日决定历史快照。
+所有窗口按输入的实际交易观察序列计算，前复权价格、正式涨停标记、状态机和行情轮次由上游提供。每个单池任务只构建一次确定性特征面板，排名按指标降序和 `asset_id` 升序确定性排序。辨识度只消费当日已有行情轮次观察，不读取轮次最终结束日决定历史快照。
 
 ## 生成和存储
 
-正式入口为 `qrp-atlas-system-b-pools`，调用时必须提供已存在的绝对输入数据库和输出数据库。行情/状态输入库需要包含 `system_b_state_observation` 和 `daily_market_snapshot`，轮次表可以在同库，也可以通过 `--episode-database` 显式提供只读的 `system_b_episode` / `system_b_episode_observation` 库；可选复用 `daily_basic` 和 `zt_pool`。
+正式入口为 `qrp-atlas-system-b-pools`，每次必须通过 `--pool-type HEIGHT|CAPACITY|RECOGNITION` 只生成一个池，并提供已存在的绝对输入数据库和独立输出数据库。行情/状态输入库需要包含 `system_b_state_observation` 和 `daily_market_snapshot`，轮次表可以在同库，也可以通过 `--episode-database` 显式提供只读的 `system_b_episode` / `system_b_episode_observation` 库；可选复用 `daily_basic` 和 `zt_pool`。
 
-权威表为 `system_b_pool_membership_daily`，粒度是 `trade_date × asset_id × pool_type`。只记录当日 `IN_POOL` 成员和当日刚退出的 `EXITED` 成员；最近一个三个池子均完成的交易日由 `system_b_pool_run` 表确定，不能用最大行情日期替代。
+权威表为 `system_b_pool_membership_daily`，粒度是 `trade_date × asset_id × pool_type`。只记录当日 `IN_POOL` 成员和当日刚退出的 `EXITED` 成员。`system_b_pool_run` 的粒度为 `trade_date × pool_type`；只有同一交易日三个池子均存在 `COMPLETED` 记录时，该日才是完整快照，不能用最大行情日期替代。
 
-历史回补和单日更新共用 `build_stock_pools` 入口，先计算完整历史上下文，再按目标区间原子替换输出。失败时 staging 文件删除，旧成功输出不暴露半成品。
+历史回补和单日更新共用 `build_stock_pool` 单池入口，按年份和 `HEIGHT → CAPACITY → RECOGNITION` 的确定性顺序推进。每次只替换目标池、目标日期区间，其他池和历史年份保持不变。失败时 staging 文件删除，旧成功输出不暴露半成品。
 
 ## 未配置规则
 

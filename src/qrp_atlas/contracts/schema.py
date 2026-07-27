@@ -725,6 +725,7 @@ SYSTEM_B_POOL_RUN = TableSchema(
     name=SYSTEM_B_POOL_RUN_TABLE,
     columns=(
         ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(POOL_TYPE, "VARCHAR", nullable=False),
         ColumnSpec("status", "VARCHAR", nullable=False),
         ColumnSpec(COMPLETED_RUN_ID, "VARCHAR", nullable=False),
         ColumnSpec("input_snapshot_id", "VARCHAR", nullable=False),
@@ -734,7 +735,7 @@ SYSTEM_B_POOL_RUN = TableSchema(
         ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
         ColumnSpec(POOL_COMPLETED_AT, "TIMESTAMP"),
     ),
-    primary_key=(TRADE_DATE,),
+    primary_key=(TRADE_DATE, POOL_TYPE),
 )
 
 
