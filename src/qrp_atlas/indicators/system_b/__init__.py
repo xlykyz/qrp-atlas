@@ -28,6 +28,10 @@ from qrp_atlas.indicators.system_b.episode import (
     SystemBEpisodeResult,
     calculate_system_b_episodes,
 )
+from qrp_atlas.indicators.system_b.pools import (
+    PoolCalculationResult, build_common_features, calculate_stock_pools,
+    evaluate_capacity, evaluate_height, evaluate_recognition,
+)
 
 __all__ = [
     "SYSTEM_B_EXIT_TRIGGERED",
@@ -48,4 +52,6 @@ __all__ = [
     "SystemBEpisodeError",
     "SystemBEpisodeResult",
     "calculate_system_b_episodes",
+    "PoolCalculationResult", "build_common_features", "evaluate_height",
+    "evaluate_capacity", "evaluate_recognition", "calculate_stock_pools",
 ]
