@@ -7,7 +7,7 @@
 | 业务对象 | 工程层 | 主要输出 |
 | --- | --- | --- |
 | 前复权、交易日、停牌、新股实际交易日 | contracts / pipeline | 标准行情与可交易性事实 |
-| NEW_LISTING_WARMUP | indicators | 个股客观状态 |
+| NEW_LISTING_WARMUP | indicators | `lifecycle_state` 生命周期事实 |
 | BASE / CANDIDATE / ACTIVE | indicators | `asset_state_observation` |
 | 行情轮次 | indicators | `episode` 与统计事实 |
 | 涨停、高度、容量、辨识度池 | indicators | 股票池成员和出入事实 |
@@ -29,25 +29,24 @@
 ### 输入
 
 - 前复权日线；
-- 个股实际交易日；
+- 个股实际交易日及序号确定性；
 - 上市日期；
 - 停复牌事实。
 
 ### indicators 输出
 
+基础状态是历史市场事实的纯派生结果，不读取前一状态作为判定条件：
+
 ```text
-trade_date
-asset_id
-state
-previous_state
-state_transition
-above_ma5_streak
-below_ma5_streak
-warmup_trading_days
-calculation_version
-input_snapshot_id
-observed_at
+最近实际交易日 close < MA5 → BASE
+当日在线上且紧邻前一实际交易日在线下 → CANDIDATE
+连续两个实际交易日在线上 → ACTIVE
+事实不足或无法唯一匹配 → trend_state = NULL + diagnostics
 ```
+
+MA5 只使用同一可证明连续片段中的 5 个确认实际交易日。明确停牌和正式零成交量不进入窗口但不切断片段；`UNRESOLVED_MISSING` 切断片段，缺口后重新累计 5 个确认实际交易日才恢复 MA5。
+
+`NEW_LISTING_WARMUP` 只写入 `lifecycle_state`。前 10 个可证明实际交易日 `trend_state=NULL`；第 11 日直接使用既有市场事实计算，不默认从 BASE 启动。若缺口使精确交易日序号不可证明，则序号和生命周期按可确定性输出 NULL，不以确认行数冒充精确序号。`previous_trend_state` 和 `state_changed` 仅用于计算完成后的审计比较。
 
 行情轮次至少输出：
 

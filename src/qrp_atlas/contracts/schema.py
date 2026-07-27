@@ -145,6 +145,41 @@ from .fields import (
     SUMMARY,
     CHANGE_REASON,
 )
+from .system_b import (
+    ACTUAL_PAIR_CONTIGUOUS,
+    CONFIRMED_LISTING_TRADING_DAY_COUNT,
+    CALCULATION_VERSION,
+    COMPLETED_AT,
+    DIAGNOSTICS,
+    INPUT_SNAPSHOT_ID,
+    IS_ABOVE_OR_EQUAL_MA5,
+    IS_TRADING_DAY,
+    LATEST_ACTUAL_CLOSE,
+    LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    LATEST_ACTUAL_MA5,
+    LATEST_ACTUAL_MA5_WINDOW_COMPLETE,
+    LATEST_ACTUAL_TRADE_DATE,
+    LIFECYCLE_STATE,
+    LISTING_TRADING_DAY_NUMBER,
+    LISTING_TRADING_DAY_NUMBER_IS_EXACT,
+    MA5,
+    MA5_WINDOW_COMPLETE,
+    MARKET_FACT_STATUS,
+    PARAMETER_SET_ID,
+    PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5,
+    PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE,
+    PREVIOUS_ACTUAL_TRADE_DATE,
+    PREVIOUS_TREND_STATE,
+    PRICE_ADJUSTMENT,
+    PRODUCTION_RUN_ID,
+    RULE_VERSION_SET_ID,
+    SOURCE_RULE_IDS,
+    STATE_CHANGED,
+    STATE_BASIS_SEQUENCE_INTACT,
+    SYSTEM_B_PRODUCTION_RUN_TABLE,
+    SYSTEM_B_STATE_OBSERVATION_TABLE,
+    TREND_STATE,
+)
 
 
 @dataclass(frozen=True)
@@ -540,6 +575,77 @@ SUSPEND_D = TableSchema(
     primary_key=(TRADE_DATE, TICKER, SUSPEND_TYPE),
 )
 
+SYSTEM_B_STATE_OBSERVATION = TableSchema(
+    name=SYSTEM_B_STATE_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(LIFECYCLE_STATE, "VARCHAR"),
+        ColumnSpec(TREND_STATE, "VARCHAR"),
+        ColumnSpec(PREVIOUS_TREND_STATE, "VARCHAR"),
+        ColumnSpec(STATE_CHANGED, "BOOLEAN"),
+        ColumnSpec(MARKET_FACT_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(IS_TRADING_DAY, "BOOLEAN", nullable=False),
+        ColumnSpec(LISTING_TRADING_DAY_NUMBER, "INTEGER"),
+        ColumnSpec(CONFIRMED_LISTING_TRADING_DAY_COUNT, "INTEGER", nullable=False),
+        ColumnSpec(LISTING_TRADING_DAY_NUMBER_IS_EXACT, "BOOLEAN", nullable=False),
+        ColumnSpec(CLOSE, "DOUBLE"),
+        ColumnSpec(MA5, "DOUBLE"),
+        ColumnSpec(MA5_WINDOW_COMPLETE, "BOOLEAN", nullable=False),
+        ColumnSpec(IS_ABOVE_OR_EQUAL_MA5, "BOOLEAN"),
+        ColumnSpec(LATEST_ACTUAL_TRADE_DATE, "DATE"),
+        ColumnSpec(LATEST_ACTUAL_CLOSE, "DOUBLE"),
+        ColumnSpec(LATEST_ACTUAL_MA5, "DOUBLE"),
+        ColumnSpec(LATEST_ACTUAL_MA5_WINDOW_COMPLETE, "BOOLEAN", nullable=False),
+        ColumnSpec(LATEST_ACTUAL_IS_ABOVE_OR_EQUAL_MA5, "BOOLEAN"),
+        ColumnSpec(PREVIOUS_ACTUAL_TRADE_DATE, "DATE"),
+        ColumnSpec(PREVIOUS_ACTUAL_IS_ABOVE_OR_EQUAL_MA5, "BOOLEAN"),
+        ColumnSpec(PREVIOUS_ACTUAL_MA5_WINDOW_COMPLETE, "BOOLEAN", nullable=False),
+        ColumnSpec(STATE_BASIS_SEQUENCE_INTACT, "BOOLEAN", nullable=False),
+        ColumnSpec(ACTUAL_PAIR_CONTIGUOUS, "BOOLEAN", nullable=False),
+        ColumnSpec(PRICE_ADJUSTMENT, "VARCHAR", nullable=False),
+        ColumnSpec(RULE_VERSION_SET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(PARAMETER_SET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_RULE_IDS, "VARCHAR", nullable=False),
+        ColumnSpec(DIAGNOSTICS, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(
+        ASSET_ID,
+        TRADE_DATE,
+        RULE_VERSION_SET_ID,
+        PARAMETER_SET_ID,
+    ),
+)
+
+SYSTEM_B_PRODUCTION_RUN = TableSchema(
+    name=SYSTEM_B_PRODUCTION_RUN_TABLE,
+    columns=(
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec("run_type", "VARCHAR", nullable=False),
+        ColumnSpec("status", "VARCHAR", nullable=False),
+        ColumnSpec("target_start_date", "DATE"),
+        ColumnSpec("target_end_date", "DATE"),
+        ColumnSpec(RULE_VERSION_SET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(PARAMETER_SET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec("asset_count", "INTEGER", nullable=False),
+        ColumnSpec("input_row_count", "BIGINT", nullable=False),
+        ColumnSpec("output_row_count", "BIGINT", nullable=False),
+        ColumnSpec("error_count", "BIGINT", nullable=False),
+        ColumnSpec("metrics", "VARCHAR", nullable=False),
+        ColumnSpec("error_code", "VARCHAR"),
+        ColumnSpec("error_detail", "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(COMPLETED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(PRODUCTION_RUN_ID,),
+)
+
 
 
 
@@ -732,7 +838,7 @@ EARNINGS_FORECAST_EVENT = TableSchema(
     primary_key=(REVISION_ID,),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL, DAILY_BASIC, SUSPEND_D, IRM_INTERACTION_QA, INCOME_STATEMENT, BALANCE_SHEET, CASHFLOW_STATEMENT, FINANCIAL_INDICATOR, INDUSTRY_MEMBERSHIP_HISTORY, INDEX_COMPONENT_HISTORY, EARNINGS_FORECAST_EVENT)
+ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_DAILY, ZT_POOL, DT_POOL, DAILY_BASIC, SUSPEND_D, SYSTEM_B_STATE_OBSERVATION, SYSTEM_B_PRODUCTION_RUN, IRM_INTERACTION_QA, INCOME_STATEMENT, BALANCE_SHEET, CASHFLOW_STATEMENT, FINANCIAL_INDICATOR, INDUSTRY_MEMBERSHIP_HISTORY, INDEX_COMPONENT_HISTORY, EARNINGS_FORECAST_EVENT)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 

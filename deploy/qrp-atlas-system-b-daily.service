@@ -1,0 +1,17 @@
+[Unit]
+Description=QRP Atlas System B daily state monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qrp-atlas
+Group=qrp-atlas
+WorkingDirectory=/opt/qrp-atlas
+EnvironmentFile=/etc/qrp-atlas/qrp-atlas.env
+ExecStartPre=/opt/qrp-atlas/.venv/bin/qrp-atlas-config --env-file /etc/qrp-atlas/qrp-atlas.env doctor
+ExecStart=/bin/sh -lc '/opt/qrp-atlas/.venv/bin/qrp-atlas-system-b readiness --trade-date "$(date +%%F)" && /opt/qrp-atlas/.venv/bin/qrp-atlas-system-b run-daily --trade-date "$(date +%%F)"'
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
