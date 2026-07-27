@@ -22,7 +22,8 @@ from qrp_atlas.contracts import (
     CAPACITY_FLOAT_CAP_MIN_CNY,
     HEIGHT_LIMIT_MIN_COUNT,
     HEIGHT_LIMIT_WINDOW_DAYS,
-    HEIGHT_TIMEOUT_BREAK_DAYS,
+    HEIGHT_LIFECYCLE_EXTENSION_DAYS,
+    HEIGHT_MAX_BREAK_DAYS,
     HEIGHT_NATURAL_MIN,
     HIGH,
     IS_LIMIT_UP,
@@ -203,6 +204,34 @@ def _membership_row(
     }
 
 
+def _height_structure_snapshot(
+    group: pd.DataFrame,
+    start_position: int,
+    end_position: int,
+) -> dict[str, int | None]:
+    flags = group.iloc[start_position:end_position + 1][IS_LIMIT_UP].astype(bool).tolist()
+    limit_count = int(sum(flags))
+    maximum_completed_break: int | None = None
+    rebound_count = 0
+    current_break_days = 0
+    observed_first_limit = False
+    for is_limit_up in flags:
+        if is_limit_up:
+            if observed_first_limit and current_break_days > 0:
+                rebound_count += 1
+                maximum_completed_break = max(maximum_completed_break or 0, current_break_days)
+            observed_first_limit = True
+            current_break_days = 0
+        elif observed_first_limit:
+            current_break_days += 1
+    return {
+        "n": limit_count,
+        "m": maximum_completed_break,
+        "i": rebound_count,
+        "break_days": current_break_days,
+    }
+
+
 def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
     """Evaluate natural boards and seven-session rebound structures."""
     data = frame.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
@@ -226,23 +255,26 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
                     if bool(group.iloc[index][IS_LIMIT_UP])
                 ]
                 if current_streak >= HEIGHT_NATURAL_MIN or len(limit_positions) >= HEIGHT_LIMIT_MIN_COUNT:
-                    start_position = position - current_streak + 1 if current_streak >= 2 else limit_positions[0]
+                    start_position = (
+                        position - current_streak + 1
+                        if current_streak >= HEIGHT_NATURAL_MIN
+                        else limit_positions[0]
+                    )
+                    structure = _height_structure_snapshot(group, start_position, position)
                     cycle_no += 1
                     active = {
                         "cycle_no": cycle_no,
                         "entry_date": row[TRADE_DATE],
                         "entry_reason": "NATURAL_CONSECUTIVE_LIMIT_UP" if current_streak >= 2 else "SEVEN_SESSION_THREE_LIMIT_UP",
                         "start": group.iloc[start_position][TRADE_DATE],
-                        "n": int(group.iloc[start_position:position + 1][IS_LIMIT_UP].sum()),
-                        "m": None,
-                        "i": 0,
-                        "break_days": 0,
+                        **structure,
                         "metrics": {},
                     }
             elif is_limit_up:
                 if active["break_days"] > 0:
-                    active["i"] += 1
-                    active["m"] = max(active["m"] or 0, active["break_days"])
+                    if active["break_days"] <= HEIGHT_MAX_BREAK_DAYS:
+                        active["i"] += 1
+                        active["m"] = max(active["m"] or 0, active["break_days"])
                 active["n"] += 1
                 active["break_days"] = 0
             else:
@@ -260,8 +292,12 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
                 "height_admitted_date": active["entry_date"],
             }
             exit_reason = None
-            if active["break_days"] >= HEIGHT_TIMEOUT_BREAK_DAYS:
-                exit_reason = "BREAK_DAY_5"
+            active_to_base = row.get("previous_trend_state") == "ACTIVE" and row[TREND_STATE] == "BASE"
+            lifecycle_break_limit = active["n"] + HEIGHT_LIFECYCLE_EXTENSION_DAYS
+            if active_to_base:
+                exit_reason = "ACTIVE_TO_BASE"
+            elif active["break_days"] >= lifecycle_break_limit:
+                exit_reason = "BREAK_N_PLUS_5"
             if exit_reason is not None:
                 output.append(_membership_row(row[TRADE_DATE], asset_id, HEIGHT, EXITED, active, exit_reason, row[EPISODE_ID]))
                 active = None
@@ -308,10 +344,7 @@ def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
     return PoolCalculationResult(pd.DataFrame(output), data)
 
 
-def evaluate_recognition(
-    frame: pd.DataFrame,
-    admission_keys: set[tuple[Any, Any]] | None = None,
-) -> PoolCalculationResult:
+def evaluate_recognition(frame: pd.DataFrame) -> PoolCalculationResult:
     """Evaluate recognition with sticky retention while the current episode runs."""
     data = frame.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
     output: list[dict[str, Any]] = []
@@ -332,8 +365,7 @@ def evaluate_recognition(
             # not consult the final episode master end date here: doing so
             # would leak a later fact into an earlier daily snapshot.
             episode_continues = episode_is_observable
-            admitted_from_pool = admission_keys is None or (day, asset_id) in admission_keys
-            if active is None and condition and admitted_from_pool:
+            if active is None and condition:
                 cycle_no += 1
                 active = {
                     "cycle_no": cycle_no,
@@ -354,16 +386,5 @@ def calculate_stock_pools(frame: pd.DataFrame) -> dict[str, PoolCalculationResul
     features = build_common_features(frame)
     height = evaluate_height(features)
     capacity = evaluate_capacity(features)
-    admitted_keys = set(
-        zip(
-            height.membership.loc[height.membership["membership_state"] == IN_POOL, TRADE_DATE],
-            height.membership.loc[height.membership["membership_state"] == IN_POOL, ASSET_ID],
-        )
-    ) | set(
-        zip(
-            capacity.membership.loc[capacity.membership["membership_state"] == IN_POOL, TRADE_DATE],
-            capacity.membership.loc[capacity.membership["membership_state"] == IN_POOL, ASSET_ID],
-        )
-    )
-    recognition = evaluate_recognition(features, admission_keys=admitted_keys)
+    recognition = evaluate_recognition(features)
     return {HEIGHT: height, CAPACITY: capacity, RECOGNITION: recognition}

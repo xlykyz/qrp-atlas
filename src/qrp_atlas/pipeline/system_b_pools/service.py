@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 from pathlib import Path
+import shutil
 import uuid
 
 import duckdb
@@ -31,6 +32,9 @@ from qrp_atlas.contracts import (
 )
 from qrp_atlas.indicators.system_b import calculate_stock_pools
 from qrp_atlas.indicators.system_b.pools import EXITED, HEIGHT, CAPACITY, RECOGNITION, IN_POOL
+
+
+SHRINK_VOLUME_RULE_CONFIGURED = False
 
 
 class SystemBPoolProductionError(RuntimeError):
@@ -89,6 +93,11 @@ def open_episode_database(path: Path) -> tuple[Path, duckdb.DuckDBPyConnection]:
 def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(SYSTEM_B_POOL_MEMBERSHIP.duckdb_create_sql())
     con.execute(SYSTEM_B_POOL_RUN.duckdb_create_sql())
+
+
+def _require_production_rules() -> None:
+    if not SHRINK_VOLUME_RULE_CONFIGURED:
+        raise SystemBPoolProductionError("SHRINK_VOLUME_RULE_NOT_CONFIGURED")
 
 
 def _load_market_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
@@ -205,6 +214,7 @@ def build_stock_pools(
     if separate_episode:
         episode_path, episode_source = open_episode_database(episode_database)
     try:
+        _require_production_rules()
         panel = _load_market_panel(source)
         episode_tables = {row[0] for row in episode_source.execute("SELECT table_name FROM information_schema.tables").fetchall()}
         if {SYSTEM_B_EPISODE_TABLE, SYSTEM_B_EPISODE_OBSERVATION_TABLE} - episode_tables:
@@ -234,10 +244,22 @@ def build_stock_pools(
     staging = output_path.with_name(f".{output_path.name}.{run_id}.staging")
     if staging.exists():
         staging.unlink()
+    if output_path.exists():
+        if not output_path.is_file():
+            raise SystemBPoolProductionError("POOL_OUTPUT_DATABASE_NOT_FILE", str(output_path))
+        shutil.copy2(output_path, staging)
     con = duckdb.connect(str(staging))
     try:
         ensure_schema(con)
         con.begin()
+        con.execute(
+            f"DELETE FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE} WHERE trade_date BETWEEN ? AND ?",
+            [start_date, end_date],
+        )
+        con.execute(
+            f"DELETE FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE trade_date BETWEEN ? AND ?",
+            [start_date, end_date],
+        )
         if not membership.empty:
             con.register("pool_membership_frame", membership)
             cols = ",".join(SYSTEM_B_POOL_MEMBERSHIP.column_names())
@@ -257,9 +279,21 @@ def build_stock_pools(
         } for run_date in run_dates])
         con.register("pool_run_frame", run)
         con.execute(f"INSERT INTO {SYSTEM_B_POOL_RUN_TABLE} SELECT * FROM pool_run_frame")
-        check = con.execute(f"SELECT count(*) FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE status='COMPLETED'").fetchone()[0]
+        check = con.execute(
+            f"SELECT count(*) FROM {SYSTEM_B_POOL_RUN_TABLE} WHERE status='COMPLETED' AND trade_date BETWEEN ? AND ?",
+            [start_date, end_date],
+        ).fetchone()[0]
         if check != len(run_dates):
             raise SystemBPoolProductionError("POOL_COMPLETION_CHECK_FAILED")
+        duplicate_count = con.execute(f"""
+            SELECT count(*) FROM (
+                SELECT trade_date, asset_id, pool_type, count(*) AS row_count
+                FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE}
+                GROUP BY 1,2,3 HAVING count(*) > 1
+            )
+        """).fetchone()[0]
+        if duplicate_count:
+            raise SystemBPoolProductionError("DUPLICATE_POOL_MEMBERSHIP_KEY")
         con.commit()
         con.close()
         staging.replace(output_path)
@@ -328,7 +362,7 @@ def get_stock_pool_memberships(output_database: Path, asset_id: str, trade_date:
     con = duckdb.connect(str(path), read_only=True)
     try:
         return con.execute(
-            f"SELECT * FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE} WHERE asset_id=? AND trade_date=? ORDER BY pool_type",
+            f"SELECT * FROM {SYSTEM_B_POOL_MEMBERSHIP_TABLE} WHERE asset_id=? AND trade_date=? AND membership_state='IN_POOL' ORDER BY pool_type",
             [asset_id, trade_date],
         ).fetchdf()
     finally:

@@ -7,13 +7,21 @@ import duckdb
 import pandas as pd
 import pytest
 
+import qrp_atlas.pipeline.system_b_pools.service as pool_service
 from qrp_atlas.pipeline.system_b_pools import (
     SystemBPoolProductionError,
     build_stock_pools,
     get_daily_pool_snapshot,
     get_latest_completed_pool_snapshot,
+    get_stock_pool_history,
     get_stock_pool_memberships,
 )
+from qrp_atlas.pipeline.system_b_pools.service import ensure_schema
+
+
+@pytest.fixture
+def configured_rules(monkeypatch):
+    monkeypatch.setattr(pool_service, "SHRINK_VOLUME_RULE_CONFIGURED", True)
 
 
 def _input_database(path: Path) -> Path:
@@ -61,7 +69,7 @@ def _input_database(path: Path) -> Path:
     return path
 
 
-def test_build_and_queries_are_idempotent(tmp_path: Path):
+def test_build_and_queries_are_idempotent(tmp_path: Path, configured_rules):
     source = _input_database(tmp_path / "input.duckdb")
     output = tmp_path / "pools.duckdb"
     first = build_stock_pools(source.resolve(), output.resolve(), start_date=date(2026, 1, 1), end_date=date(2026, 1, 8))
@@ -74,6 +82,78 @@ def test_build_and_queries_are_idempotent(tmp_path: Path):
     assert not get_daily_pool_snapshot(output, date(2026, 1, 2))["CAPACITY"].empty
     memberships = get_stock_pool_memberships(output, "A", date(2026, 1, 5))
     assert set(memberships["pool_type"]) == {"CAPACITY", "RECOGNITION", "HEIGHT"}
+
+
+def test_incremental_build_preserves_history_and_replaces_target_date(
+    tmp_path: Path,
+    configured_rules,
+):
+    source = _input_database(tmp_path / "input.duckdb")
+    output = tmp_path / "pools.duckdb"
+    build_stock_pools(
+        source.resolve(),
+        output.resolve(),
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 7),
+    )
+    before = duckdb.connect(str(output), read_only=True)
+    historical_members = before.execute("""
+        SELECT * EXCLUDE (completed_run_id, created_at)
+        FROM system_b_pool_membership_daily
+        WHERE trade_date < DATE '2026-01-08'
+        ORDER BY trade_date, asset_id, pool_type
+    """).fetchall()
+    historical_runs = before.execute("""
+        SELECT trade_date, status, asset_count, membership_row_count
+        FROM system_b_pool_run
+        WHERE trade_date < DATE '2026-01-08'
+        ORDER BY trade_date
+    """).fetchall()
+    before.close()
+
+    build_stock_pools(
+        source.resolve(),
+        output.resolve(),
+        start_date=date(2026, 1, 8),
+        end_date=date(2026, 1, 8),
+    )
+    after = duckdb.connect(str(output), read_only=True)
+    assert after.execute("""
+        SELECT * EXCLUDE (completed_run_id, created_at)
+        FROM system_b_pool_membership_daily
+        WHERE trade_date < DATE '2026-01-08'
+        ORDER BY trade_date, asset_id, pool_type
+    """).fetchall() == historical_members
+    assert after.execute("""
+        SELECT trade_date, status, asset_count, membership_row_count
+        FROM system_b_pool_run
+        WHERE trade_date < DATE '2026-01-08'
+        ORDER BY trade_date
+    """).fetchall() == historical_runs
+    assert after.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 6
+    target_business = after.execute("""
+        SELECT * EXCLUDE (completed_run_id, created_at)
+        FROM system_b_pool_membership_daily
+        WHERE trade_date=DATE '2026-01-08'
+        ORDER BY asset_id, pool_type
+    """).fetchall()
+    after.close()
+
+    build_stock_pools(
+        source.resolve(),
+        output.resolve(),
+        start_date=date(2026, 1, 8),
+        end_date=date(2026, 1, 8),
+    )
+    repeated = duckdb.connect(str(output), read_only=True)
+    assert repeated.execute("SELECT count(*) FROM system_b_pool_run").fetchone()[0] == 6
+    assert repeated.execute("""
+        SELECT * EXCLUDE (completed_run_id, created_at)
+        FROM system_b_pool_membership_daily
+        WHERE trade_date=DATE '2026-01-08'
+        ORDER BY asset_id, pool_type
+    """).fetchall() == target_business
+    repeated.close()
 
 
 def test_missing_input_has_no_output_side_effect(tmp_path: Path):
@@ -95,3 +175,35 @@ def test_relative_input_is_rejected(tmp_path: Path):
             start_date=date(2026, 1, 1),
             end_date=date(2026, 1, 8),
         )
+
+
+def test_production_fails_closed_when_shrink_rule_is_not_configured(tmp_path: Path):
+    source = _input_database(tmp_path / "input.duckdb")
+    output = tmp_path / "pools.duckdb"
+    with pytest.raises(SystemBPoolProductionError, match="SHRINK_VOLUME_RULE_NOT_CONFIGURED"):
+        build_stock_pools(
+            source.resolve(),
+            output.resolve(),
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 1, 8),
+        )
+    assert not output.exists()
+
+
+def test_stock_memberships_excludes_exit_records_but_history_keeps_them(tmp_path: Path):
+    output = tmp_path / "pools.duckdb"
+    con = duckdb.connect(str(output))
+    ensure_schema(con)
+    con.execute("""
+        INSERT INTO system_b_pool_membership_daily VALUES (
+            DATE '2026-01-08', 'A', 'HEIGHT', 'EXITED', 1,
+            DATE '2026-01-05', DATE '2026-01-08', '{}', 'ACTIVE_TO_BASE',
+            NULL, '{}', 'run-1', 'system_b_pools@1.0.0__user_20260727',
+            TIMESTAMP '2026-01-08 16:00:00'
+        )
+    """)
+    con.close()
+    memberships = get_stock_pool_memberships(output.resolve(), "A", date(2026, 1, 8))
+    history = get_stock_pool_history(output.resolve(), "A", "HEIGHT")
+    assert memberships.empty
+    assert history["membership_state"].tolist() == ["EXITED"]
