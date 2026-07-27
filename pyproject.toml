@@ -30,6 +30,7 @@ qrp-atlas-config = "qrp_atlas.config.cli:main"
 qrp-atlas-api = "qrp_atlas.api.cli:main"
 qrp-atlas-auth = "qrp_atlas.auth.cli:main"
 qrp-atlas-system-b = "qrp_atlas.pipeline.system_b.cli:main"
+qrp-atlas-system-b-episode = "qrp_atlas.pipeline.system_b_episode.cli:main"
 
 [project.optional-dependencies]
 test = [
