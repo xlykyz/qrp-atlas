@@ -23,6 +23,11 @@ from qrp_atlas.indicators.system_b.state_machine_v2 import (
     SystemBStateMachineError,
     calculate_system_b_2_0_states,
 )
+from qrp_atlas.indicators.system_b.episode import (
+    SystemBEpisodeError,
+    SystemBEpisodeResult,
+    calculate_system_b_episodes,
+)
 
 __all__ = [
     "SYSTEM_B_EXIT_TRIGGERED",
@@ -40,4 +45,7 @@ __all__ = [
     "DIAGNOSTIC_WARMUP",
     "SystemBStateMachineError",
     "calculate_system_b_2_0_states",
+    "SystemBEpisodeError",
+    "SystemBEpisodeResult",
+    "calculate_system_b_episodes",
 ]
