@@ -34,9 +34,6 @@ from qrp_atlas.indicators.system_b import calculate_stock_pools
 from qrp_atlas.indicators.system_b.pools import EXITED, HEIGHT, CAPACITY, RECOGNITION, IN_POOL
 
 
-SHRINK_VOLUME_RULE_CONFIGURED = False
-
-
 class SystemBPoolProductionError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
@@ -93,11 +90,6 @@ def open_episode_database(path: Path) -> tuple[Path, duckdb.DuckDBPyConnection]:
 def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(SYSTEM_B_POOL_MEMBERSHIP.duckdb_create_sql())
     con.execute(SYSTEM_B_POOL_RUN.duckdb_create_sql())
-
-
-def _require_production_rules() -> None:
-    if not SHRINK_VOLUME_RULE_CONFIGURED:
-        raise SystemBPoolProductionError("SHRINK_VOLUME_RULE_NOT_CONFIGURED")
 
 
 def _load_market_panel(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
@@ -214,7 +206,6 @@ def build_stock_pools(
     if separate_episode:
         episode_path, episode_source = open_episode_database(episode_database)
     try:
-        _require_production_rules()
         panel = _load_market_panel(source)
         episode_tables = {row[0] for row in episode_source.execute("SELECT table_name FROM information_schema.tables").fetchall()}
         if {SYSTEM_B_EPISODE_TABLE, SYSTEM_B_EPISODE_OBSERVATION_TABLE} - episode_tables:

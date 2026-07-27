@@ -22,7 +22,6 @@ from qrp_atlas.contracts import (
     CAPACITY_FLOAT_CAP_MIN_CNY,
     HEIGHT_LIMIT_MIN_COUNT,
     HEIGHT_LIMIT_WINDOW_DAYS,
-    HEIGHT_LIFECYCLE_EXTENSION_DAYS,
     HEIGHT_MAX_BREAK_DAYS,
     HEIGHT_NATURAL_MIN,
     HIGH,
@@ -293,11 +292,10 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
             }
             exit_reason = None
             active_to_base = row.get("previous_trend_state") == "ACTIVE" and row[TREND_STATE] == "BASE"
-            lifecycle_break_limit = active["n"] + HEIGHT_LIFECYCLE_EXTENSION_DAYS
             if active_to_base:
                 exit_reason = "ACTIVE_TO_BASE"
-            elif active["break_days"] >= lifecycle_break_limit:
-                exit_reason = "BREAK_N_PLUS_5"
+            elif active["break_days"] > HEIGHT_MAX_BREAK_DAYS:
+                exit_reason = "BREAK_DAY_5"
             if exit_reason is not None:
                 output.append(_membership_row(row[TRADE_DATE], asset_id, HEIGHT, EXITED, active, exit_reason, row[EPISODE_ID]))
                 active = None
@@ -307,7 +305,7 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
 
 
 def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
-    """Evaluate ACTIVE capacity membership. Shrink-volume exclusion is fail-closed."""
+    """Evaluate ACTIVE capacity membership and immediate capacity loss."""
     data = frame.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
     output: list[dict[str, Any]] = []
     for asset_id, group in data.groupby(ASSET_ID, sort=False):
@@ -317,9 +315,11 @@ def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
             day = getattr(row, TRADE_DATE)
             reasons = {
                 "daily_amount_top100": bool(getattr(row, DAILY_AMOUNT_OK)),
+                "daily_amount_rank": None if pd.isna(getattr(row, DAILY_AMOUNT_RANK)) else int(getattr(row, DAILY_AMOUNT_RANK)),
                 "avg5_amount_top100": bool(getattr(row, AVG5_AMOUNT_OK)),
+                "avg5_amount_rank": None if pd.isna(getattr(row, AVG5_AMOUNT_RANK)) else int(getattr(row, AVG5_AMOUNT_RANK)),
                 "float_cap_ge_300b": bool(getattr(row, FLOAT_CAPACITY_OK)),
-                "shrink_volume": "NOT_CONFIGURED",
+                "float_cap": None if pd.isna(getattr(row, FLOAT_CAP)) else float(getattr(row, FLOAT_CAP)),
             }
             condition = bool(getattr(row, CAPACITY_OK))
             if condition:
@@ -331,14 +331,17 @@ def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
                         "entry_reason": _json(reasons),
                         "metrics": reasons,
                     }
+                else:
+                    active["metrics"] = reasons
                 output.append(_membership_row(day, asset_id, CAPACITY, IN_POOL, active, None, getattr(row, EPISODE_ID)))
             elif active is not None:
+                active["metrics"] = reasons
                 if bool(getattr(row, "is_one_word_limit_up")):
                     reason = "ONE_WORD_LIMIT_UP"
                 elif getattr(row, TREND_STATE) != "ACTIVE":
                     reason = "NOT_ACTIVE"
                 else:
-                    reason = "CAPACITY_CONDITION_LOST"
+                    reason = "SHRINK_VOLUME"
                 output.append(_membership_row(day, asset_id, CAPACITY, EXITED, active, reason, getattr(row, EPISODE_ID)))
                 active = None
     return PoolCalculationResult(pd.DataFrame(output), data)
