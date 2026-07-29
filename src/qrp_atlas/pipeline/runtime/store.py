@@ -155,6 +155,11 @@ class PipelineRuntimeStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS pipeline_result (
+                    run_id TEXT PRIMARY KEY REFERENCES pipeline_run(run_id),
+                    result_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
                 """
             )
         finally:
@@ -189,6 +194,37 @@ class PipelineRuntimeStore:
         try:
             row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
             return self._run_from_row(row) if row is not None else None
+        finally:
+            connection.close()
+
+    def record_result(self, run_id: str, payload: Mapping[str, object], *, now: datetime | None = None) -> None:
+        """Persist a formal PipelineResult payload with the existing run evidence."""
+
+        timestamp = now or utc_now()
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self._transaction() as connection:
+            exists = connection.execute("SELECT 1 FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            if exists is None:
+                raise KeyError(f"unknown pipeline run {run_id}")
+            connection.execute(
+                """
+                INSERT INTO pipeline_result(run_id, result_json, recorded_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET result_json = excluded.result_json, recorded_at = excluded.recorded_at
+                """,
+                [run_id, serialized, _timestamp(timestamp)],
+            )
+
+    def get_result(self, run_id: str) -> Mapping[str, object] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute("SELECT result_json FROM pipeline_result WHERE run_id = ?", [run_id]).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["result_json"])
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"stored pipeline result for {run_id} is not an object")
+            return payload
         finally:
             connection.close()
 

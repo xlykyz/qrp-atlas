@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import signal
 import subprocess
 import threading
@@ -31,6 +32,10 @@ class PipelineRuntimePaths:
     @property
     def logs_dir(self) -> Path:
         return self.runtime_dir / "logs"
+
+    @property
+    def results_dir(self) -> Path:
+        return self.runtime_dir / "results"
 
     @classmethod
     def from_settings(cls, settings) -> "PipelineRuntimePaths":
@@ -86,6 +91,8 @@ class PipelineRunner:
         heartbeat_failure_lock = threading.Lock()
         peak_rss_kb = [0]
         process: subprocess.Popen[bytes] | None = None
+        result_payload: Mapping[str, object] | None = None
+        result_path: Path | None = None
 
         def report_heartbeat_failure(reason: str) -> None:
             with heartbeat_failure_lock:
@@ -119,6 +126,18 @@ class PipelineRunner:
         error_summary: str | None = None
         try:
             environment = self._environment(definition)
+            environment.update(
+                {
+                    "QRP_PIPELINE_RUN_ID": claimed.run_id,
+                    "QRP_PIPELINE_ID": claimed.pipeline_id,
+                    "QRP_PIPELINE_SCHEDULED_FOR": claimed.scheduled_at.isoformat(),
+                    "QRP_PIPELINE_ATTEMPT": str(claimed.attempt),
+                }
+            )
+            if definition.requires_structured_result:
+                self.runtime_paths.results_dir.mkdir(parents=True, exist_ok=True)
+                result_path = self.runtime_paths.results_dir / f"{claimed.run_id}.json"
+                environment["QRP_PIPELINE_RESULT_PATH"] = str(result_path)
             working_directory = str(definition.working_directory) if definition.working_directory else None
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 popen_kwargs: dict[str, object] = {
@@ -171,6 +190,25 @@ class PipelineRunner:
             else:
                 status = PipelineStatus.FAILED
                 error_summary = f"process exited with code {exit_code}"
+            if definition.requires_structured_result:
+                result_payload, result_error = self._load_structured_result(
+                    result_path,
+                    run_id=claimed.run_id,
+                    pipeline_id=claimed.pipeline_id,
+                )
+                if result_error is not None:
+                    status = PipelineStatus.FAILED
+                    error_summary = result_error
+                elif result_payload is not None:
+                    result_status = result_payload["status"]
+                    if status is PipelineStatus.SUCCESS and result_status not in {"SUCCESS", "NOOP"}:
+                        status = PipelineStatus.FAILED
+                        error_summary = f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime=SUCCESS result={result_status}"
+                    elif status is not PipelineStatus.SUCCESS and result_status != "FAILED":
+                        error_summary = (
+                            error_summary
+                            or f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime={status.value} result={result_status}"
+                        )
         except OSError as exc:
             error_summary = f"failed to start process: {type(exc).__name__}: {exc}"
         finally:
@@ -181,6 +219,14 @@ class PipelineRunner:
                 peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
         after_usage = self._children_usage()
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        if result_payload is not None:
+            try:
+                self.store.record_result(claimed.run_id, result_payload)
+            except Exception as exc:
+                status = PipelineStatus.FAILED
+                error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"
+        if definition.requires_structured_result:
+            self._remove_transient_result(result_path)
         return self.store.finish_run(
             claimed.run_id,
             status=status,
@@ -204,6 +250,41 @@ class PipelineRunner:
             }
         environment.update(definition.environment)
         return environment
+
+    @staticmethod
+    def _load_structured_result(
+        result_path: Path | None,
+        *,
+        run_id: str,
+        pipeline_id: str,
+    ) -> tuple[Mapping[str, object] | None, str | None]:
+        if result_path is None or not result_path.is_file():
+            return None, "STRUCTURED_RESULT_MISSING"
+        try:
+            if result_path.stat().st_size > 5_000_000:
+                return None, "STRUCTURED_RESULT_TOO_LARGE"
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return None, f"STRUCTURED_RESULT_INVALID: {type(exc).__name__}: {exc}"
+        if not isinstance(payload, dict):
+            return None, "STRUCTURED_RESULT_INVALID: result must be an object"
+        if payload.get("run_id") != run_id or payload.get("pipeline_id") != pipeline_id:
+            return None, "STRUCTURED_RESULT_IDENTITY_MISMATCH"
+        if payload.get("status") not in {"SUCCESS", "FAILED", "NOOP"}:
+            return None, "STRUCTURED_RESULT_INVALID_STATUS"
+        return payload, None
+
+    @staticmethod
+    def _remove_transient_result(result_path: Path | None) -> None:
+        """A result JSON is IPC only; durable history belongs in runtime SQLite."""
+
+        if result_path is None:
+            return
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            # Result persistence/status is authoritative even if best-effort file cleanup fails.
+            pass
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:

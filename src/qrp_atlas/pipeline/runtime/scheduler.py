@@ -150,6 +150,11 @@ class PipelineScheduler:
             if status is PipelineStatus.PENDING:
                 self.store.unblock_run(run.run_id)
 
+    def eligibility(self, definition: PipelineDefinition, scheduled_at: datetime) -> tuple[PipelineStatus, str | None]:
+        """Expose the runtime's existing dependency and overlap gate for manual runs."""
+
+        return self._eligibility(definition, scheduled_at)
+
     def _eligibility(
         self,
         definition: PipelineDefinition,

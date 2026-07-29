@@ -86,6 +86,9 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     environment = _mapping(payload.get("environment", {}), "environment")
     if any(not isinstance(key, str) or not isinstance(value, str) for key, value in environment.items()):
         raise DefinitionValidationError("environment must map strings to strings")
+    requires_structured_result = payload.get("requires_structured_result", False)
+    if not isinstance(requires_structured_result, bool):
+        raise DefinitionValidationError("requires_structured_result must be a boolean")
     return PipelineDefinition(
         pipeline_id=pipeline_id,
         name=name,
@@ -104,6 +107,7 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
         definition_version=_required_string(payload.get("definition_version", "1"), "definition_version"),
         inherit_environment=inherit_environment,
         environment=environment,
+        requires_structured_result=requires_structured_result,
     )
 
 

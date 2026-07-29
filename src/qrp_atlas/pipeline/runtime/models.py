@@ -74,6 +74,7 @@ class PipelineDefinition:
     definition_version: str = "1"
     inherit_environment: bool = False
     environment: Mapping[str, str] = field(default_factory=dict)
+    requires_structured_result: bool = False
 
 
 @dataclass(frozen=True, slots=True)
