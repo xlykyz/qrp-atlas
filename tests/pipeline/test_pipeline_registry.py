@@ -127,3 +127,34 @@ def test_same_duckdb_write_target_uses_one_consistent_lock_name() -> None:
                     writers[database].update(locks)
                     assert expected_lock in locks, pipeline["pipeline_id"]
     assert writers == {database: {lock} for database, lock in DATABASE_LOCKS.items()}
+
+
+def test_system_b_readiness_requires_adjustment_factors_and_all_real_input_tables() -> None:
+    pipelines = {pipeline["pipeline_id"]: pipeline for pipeline in _registry()["pipelines"]}
+    adjustment_factors = pipelines["adj_factor_daily"]
+    readiness = pipelines["system_b_state_readiness"]
+
+    assert adjustment_factors["execution"]["outputs"] == ["quant.db.adj_factor_changes"]
+    assert "system_b_state_readiness" in adjustment_factors["orchestration"]["downstream"]
+    assert {
+        dependency["pipeline_id"]
+        for dependency in readiness["orchestration"]["dependencies"]
+        if dependency["kind"] == "PIPELINE"
+    } == {"market_daily_update", "adj_factor_daily"}
+    assert readiness["execution"]["inputs"] == [
+        "quant.db.stock_info",
+        "quant.db.trading_calendar",
+        "quant.db.daily_market_snapshot",
+        "quant.db.adj_factor_changes",
+        "quant.db.suspend_d",
+    ]
+    assert readiness["orchestration"]["freshness_checks"] == [
+        {
+            "input": "quant.db.suspend_d",
+            "status": "UNRESOLVED",
+            "requirement": (
+                "No formal daily suspend_d schedule exists; before enabling System B, "
+                "add an update pipeline or a reliable freshness check."
+            ),
+        }
+    ]

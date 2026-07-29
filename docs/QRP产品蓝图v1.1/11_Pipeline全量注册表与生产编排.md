@@ -42,7 +42,7 @@
 | Pipeline ID | 状态 / 类型 | 调度与当前权威 | 入口与核心输入输出 | 数据依赖 / 写锁 |
 | --- | --- | --- | --- | --- |
 | `market_daily_update` | LEGACY / DETERMINISTIC | 16:15 工作日 / Hermes `b8c670f02f9b` | `daily_update.run`; Tushare -> Q `daily_market_snapshot` | Tushare / `quant_db_writer` |
-| `adj_factor_daily` | LEGACY / DETERMINISTIC | 同上（同一 shell 后续阶段） | `pull_adj_factor_daily.py`; Q snapshot + Tushare -> Q `adj_factor` | market daily / `quant_db_writer` |
+| `adj_factor_daily` | LEGACY / DETERMINISTIC | 同上（同一 shell 后续阶段） | `pull_adj_factor_daily.py`; Q calendar/history + Tushare -> Q `adj_factor_changes` | market daily / `quant_db_writer` |
 | `cninfo_main_update` | LEGACY / DETERMINISTIC | 08:00 / `83895a6a24a7` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
 | `cninfo_incremental_noon` | LEGACY / DETERMINISTIC | 12:00、21:00 / `e56ff366b299` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
 | `cninfo_incremental_afternoon` | LEGACY / DETERMINISTIC | 15:15 / `053db3ea5a9f` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
@@ -56,7 +56,7 @@
 | `zt_dt_pool_daily` | LEGACY / DETERMINISTIC | 15:30 工作日 / `3c40deda0c79` | `fetch_zt_dt_pool.py`; Tushare -> Q pools | Tushare / `quant_db_writer` |
 | `daily_basic_update` | LEGACY / DETERMINISTIC | 17:15 工作日 / `4afb74bd0769` | `daily_basic.run`; Q snapshot + Tushare -> Q `daily_basic` | market daily / `quant_db_writer` |
 | `irm_qa_incremental` | LEGACY / DETERMINISTIC | 每 5 分钟 08:00-21:59 / `3fdbd779c4da` | `irm_qa.run`; P5W -> Q Q&A | P5W / `quant_db_writer` |
-| `system_b_state_readiness` | READY / HEALTH_CHECK | 18:30 工作日示例 / none | `system-b readiness`; Q read-only | market daily / none |
+| `system_b_state_readiness` | READY / HEALTH_CHECK | 18:30 工作日示例 / none | `system-b readiness`; Q `stock_info`、`trading_calendar`、`daily_market_snapshot`、`adj_factor_changes`、`suspend_d` read-only | market daily + adj factor / none |
 | `system_b_state_daily` | READY / DETERMINISTIC | 18:30 工作日示例 / none | `system-b run-daily`; Q state tables | readiness / `quant_db_writer` |
 | `system_b_state_initialize` | READY / MANUAL | 人工 / none | `system-b initialize`; Q state tables | none / `quant_db_writer` |
 | `system_b_episode_rebuild` | READY / DETERMINISTIC | ? / none | `system-b-episode`; Q -> E episode tables | state daily / `system_b_episode_writer` |
@@ -83,6 +83,7 @@ flowchart LR
   market[market_daily_update] --> adj[adj_factor_daily]
   market --> basic[daily_basic_update]
   market --> ready[system_b_state_readiness]
+  adj --> ready
   ready --> state[system_b_state_daily]
   state --> episode[system_b_episode_rebuild]
   episode --> height[system_b_pool_height]
@@ -129,6 +130,8 @@ Shadow 中 `/opt/qrp-atlas` 是现有 deploy 示例的目标安装路径，不�
 
 System B 没有 Hermes 映射。其首次接入按 `readiness/state -> episode -> HEIGHT/CAPACITY/RECOGNITION -> completeness` 顺序，每步独立验收并可停留在 disabled 状态。手动回补和其他数据入口不设定期 schedule，直到业务范围、参数和性能实测完成。
 
+System B readiness 的五张真实输入表为 `stock_info`、`trading_calendar`、`daily_market_snapshot`、`adj_factor_changes` 和 `suspend_d`（`src/qrp_atlas/pipeline/system_b/repository.py:60-66`）。其中 `suspend_d` 当前只有未调度的 `suspend_d_ingest` 入口，没有正式日常更新链；它被登记为未闭合的新鲜度前置。正式启用 System B 前，必须二选一：接入可靠的 suspend_d 更新 Pipeline，或实现并验收能拒绝陈旧数据的 freshness check。
+
 ## 8. 排除清单
 
 完整 29 项见 JSON 的 `exclusions`。按原因可归为：API/Auth 长驻服务和 config doctor（非周期任务）；`backfill_*`、`fetch_history_*`、`load_history_*`、`resume_backfill`（历史恢复）；`migrate_*`、`init_*`（一次性建库/迁移）；`canonicalize_*`、`fix_*`（数据修复）；`dump_*`、`verify_*`、`test_gateway*`（诊断或开发）；旧的 ad-hoc 日行情/adj 脚本（已由已注册能力覆盖）；带日期的一次性 PIT systemd 示例；以及非 QRP 的主机工具。排除不是遗漏，且不会把临时维护脚本自动提升为生产调度。
@@ -141,6 +144,7 @@ System B 没有 Hermes 映射。其首次接入按 `readiness/state -> episode -
 - 研究 Pipeline 的精确表级输入输出、失败传播和最终退出语义；
 - Agent 报告中哪些内容应拆为确定性检查，哪些只保留解释用途；
 - `zt_dt_pool_daily`、`daily_basic_update`、`irm_qa_incremental` 的精确重复执行/失败恢复语义。
+- `suspend_d` 的日常更新与新鲜度证明；System B 在该前置关闭前不得启用。
 
 这些事项不允许用 schedule 错峰或猜测的性能数字替代。
 
