@@ -20,6 +20,7 @@ CANONICAL_DIR = _EFFECTIVE.paths.canonical_dir
 DB_DIR = _EFFECTIVE.paths.db_dir
 DB_PATH = _EFFECTIVE.paths.duckdb_path
 STATE_DIR = _EFFECTIVE.paths.state_dir
+PIPELINE_RUNTIME_DIR = _EFFECTIVE.paths.pipeline_runtime_dir
 DAILY_SNAPSHOT_RAW_DIR = RAW_DIR / "daily_snapshot"
 DAILY_MARKET_SNAPSHOT_CANONICAL_DIR = CANONICAL_DIR / "daily_market_snapshot"
 RESEARCH_PDFS_DIR = _EFFECTIVE.paths.research_pdfs_dir

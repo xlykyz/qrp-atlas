@@ -1,0 +1,16 @@
+[Unit]
+Description=QRP Atlas Pipeline runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qrp-atlas
+Group=qrp-atlas
+WorkingDirectory=/opt/qrp-atlas
+EnvironmentFile=/etc/qrp-atlas/qrp-atlas-pipeline.env
+ExecStart=/opt/qrp-atlas/.venv/bin/qrp-atlas-pipeline --env-file /etc/qrp-atlas/qrp-atlas.env run-pending --definitions /etc/qrp-atlas/pipeline-definitions.json
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
