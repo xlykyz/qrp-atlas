@@ -227,7 +227,7 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-pipeline validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前 `CONTRACT_MODULES` 为空，`validate-contracts` 合法返回 `0`；既有 Pipeline 尚未完成完整合同改造，不能被默认 CLI 发现或进入 QRP 正式调度。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ## 7. 公共测试规则
 
