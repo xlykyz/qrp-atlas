@@ -1,0 +1,10 @@
+[Unit]
+Description=Scan QRP Atlas Pipeline definitions every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+Unit=qrp-atlas-pipeline-scheduler.service
+
+[Install]
+WantedBy=timers.target

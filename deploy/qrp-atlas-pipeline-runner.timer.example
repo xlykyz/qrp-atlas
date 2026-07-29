@@ -1,0 +1,10 @@
+[Unit]
+Description=Run one pending QRP Atlas Pipeline task every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:15
+Persistent=true
+Unit=qrp-atlas-pipeline-runner.service
+
+[Install]
+WantedBy=timers.target

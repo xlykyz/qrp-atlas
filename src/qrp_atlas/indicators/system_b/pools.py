@@ -107,13 +107,15 @@ def _actual_observations(frame: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def build_common_features(frame: pd.DataFrame) -> pd.DataFrame:
+def build_common_features(frame: pd.DataFrame, pool_type: str | None = None) -> pd.DataFrame:
     """Build one deterministic feature panel for all three evaluators.
 
     The caller supplies official adjusted prices, limit flags, state facts and
     episode observations. Rolling windows therefore operate on the supplied
     actual observation sequence rather than calendar days.
     """
+    if pool_type not in (None, HEIGHT, CAPACITY, RECOGNITION):
+        raise ValueError(f"unsupported pool_type: {pool_type}")
     missing = [column for column in _REQUIRED if column not in frame.columns]
     if missing:
         raise ValueError(f"missing required pool fields: {missing}")
@@ -143,37 +145,39 @@ def build_common_features(frame: pd.DataFrame) -> pd.DataFrame:
             data[IS_LIMIT_UP] & data[CLOSE].eq(data[HIGH]) & data[HIGH].eq(data[LOW])
         )
     grouped = data.groupby(ASSET_ID, sort=False)
-    data[RETURN5] = grouped[CLOSE].transform(
-        lambda values: values.div(values.shift(RECOGNITION_SHORT_WINDOW_DAYS - 1)).sub(1.0)
-    )
-    data[RETURN10] = grouped[CLOSE].transform(
-        lambda values: values.div(values.shift(RECOGNITION_LONG_WINDOW_DAYS - 1)).sub(1.0)
-    )
-    data["avg5_amount"] = grouped[AMOUNT].transform(
-        lambda values: values.rolling(
-            CAPACITY_AVG_AMOUNT_WINDOW_DAYS,
-            min_periods=CAPACITY_AVG_AMOUNT_WINDOW_DAYS,
-        ).mean()
-    )
-    data[DAILY_AMOUNT_RANK] = _rank_by_date(data, AMOUNT)
-    data[AVG5_AMOUNT_RANK] = _rank_by_date(data, "avg5_amount")
-    data[RETURN5_RANK] = _rank_by_date(data, RETURN5)
-    data[RETURN10_RANK] = _rank_by_date(data, RETURN10)
-    data[EPISODE_RANK] = _rank_by_date(data, EPISODE_RETURN)
-    data[DAILY_AMOUNT_OK] = data[DAILY_AMOUNT_RANK].le(CAPACITY_DAILY_AMOUNT_RANK_MAX).fillna(False)
-    data[AVG5_AMOUNT_OK] = data[AVG5_AMOUNT_RANK].le(CAPACITY_AVG_AMOUNT_RANK_MAX).fillna(False)
-    data[FLOAT_CAPACITY_OK] = data[FLOAT_CAP].ge(CAPACITY_FLOAT_CAP_MIN_CNY).fillna(False)
-    data[RECOGNITION_EPISODE_OK] = (
-        data[EPISODE_RETURN].ge(RECOGNITION_EPISODE_RETURN_MIN)
-        & data[EPISODE_RANK].le(RECOGNITION_RANK_MAX)
-    ).fillna(False)
-    data[RECOGNITION_5D_OK] = data[RETURN5_RANK].le(RECOGNITION_RANK_MAX).fillna(False)
-    data[RECOGNITION_10D_OK] = data[RETURN10_RANK].le(RECOGNITION_RANK_MAX).fillna(False)
-    data[CAPACITY_OK] = (
-        data[TREND_STATE].eq("ACTIVE")
-        & ~data["is_one_word_limit_up"]
-        & (data[DAILY_AMOUNT_OK] | data[AVG5_AMOUNT_OK] | data[FLOAT_CAPACITY_OK])
-    )
+    if pool_type in (None, CAPACITY):
+        data["avg5_amount"] = grouped[AMOUNT].transform(
+            lambda values: values.rolling(
+                CAPACITY_AVG_AMOUNT_WINDOW_DAYS,
+                min_periods=CAPACITY_AVG_AMOUNT_WINDOW_DAYS,
+            ).mean()
+        )
+        data[DAILY_AMOUNT_RANK] = _rank_by_date(data, AMOUNT)
+        data[AVG5_AMOUNT_RANK] = _rank_by_date(data, "avg5_amount")
+        data[DAILY_AMOUNT_OK] = data[DAILY_AMOUNT_RANK].le(CAPACITY_DAILY_AMOUNT_RANK_MAX).fillna(False)
+        data[AVG5_AMOUNT_OK] = data[AVG5_AMOUNT_RANK].le(CAPACITY_AVG_AMOUNT_RANK_MAX).fillna(False)
+        data[FLOAT_CAPACITY_OK] = data[FLOAT_CAP].ge(CAPACITY_FLOAT_CAP_MIN_CNY).fillna(False)
+        data[CAPACITY_OK] = (
+            data[TREND_STATE].eq("ACTIVE")
+            & ~data["is_one_word_limit_up"]
+            & (data[DAILY_AMOUNT_OK] | data[AVG5_AMOUNT_OK] | data[FLOAT_CAPACITY_OK])
+        )
+    if pool_type in (None, RECOGNITION):
+        data[RETURN5] = grouped[CLOSE].transform(
+            lambda values: values.div(values.shift(RECOGNITION_SHORT_WINDOW_DAYS - 1)).sub(1.0)
+        )
+        data[RETURN10] = grouped[CLOSE].transform(
+            lambda values: values.div(values.shift(RECOGNITION_LONG_WINDOW_DAYS - 1)).sub(1.0)
+        )
+        data[RETURN5_RANK] = _rank_by_date(data, RETURN5)
+        data[RETURN10_RANK] = _rank_by_date(data, RETURN10)
+        data[EPISODE_RANK] = _rank_by_date(data, EPISODE_RETURN)
+        data[RECOGNITION_EPISODE_OK] = (
+            data[EPISODE_RETURN].ge(RECOGNITION_EPISODE_RETURN_MIN)
+            & data[EPISODE_RANK].le(RECOGNITION_RANK_MAX)
+        ).fillna(False)
+        data[RECOGNITION_5D_OK] = data[RETURN5_RANK].le(RECOGNITION_RANK_MAX).fillna(False)
+        data[RECOGNITION_10D_OK] = data[RETURN10_RANK].le(RECOGNITION_RANK_MAX).fillna(False)
     return data
 
 
@@ -237,35 +241,37 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
     output: list[dict[str, Any]] = []
     for asset_id, group in data.groupby(ASSET_ID, sort=False):
         group = group.reset_index(drop=True)
+        trade_dates = group[TRADE_DATE].to_numpy()
+        limit_flags = group[IS_LIMIT_UP].to_numpy(dtype=bool)
+        trend_states = group[TREND_STATE].to_numpy(dtype=object)
+        previous_trend_states = group["previous_trend_state"].to_numpy(dtype=object)
+        episode_ids = group[EPISODE_ID].to_numpy(dtype=object)
         active: dict[str, Any] | None = None
         cycle_no = 0
-        for position, row in group.iterrows():
-            is_limit_up = bool(row[IS_LIMIT_UP])
+        current_streak = 0
+        recent_limit_positions: list[int] = []
+        for position, is_limit_up in enumerate(limit_flags):
+            current_streak = current_streak + 1 if is_limit_up else 0
+            window_start = position - (HEIGHT_LIMIT_WINDOW_DAYS - 1)
+            while recent_limit_positions and recent_limit_positions[0] < window_start:
+                recent_limit_positions.pop(0)
+            if is_limit_up:
+                recent_limit_positions.append(position)
+
             if active is None:
-                current_streak = 0
-                for prior_position in range(position, -1, -1):
-                    if bool(group.iloc[prior_position][IS_LIMIT_UP]):
-                        current_streak += 1
-                    else:
-                        break
-                window_start = max(0, position - (HEIGHT_LIMIT_WINDOW_DAYS - 1))
-                limit_positions = [
-                    index for index in range(window_start, position + 1)
-                    if bool(group.iloc[index][IS_LIMIT_UP])
-                ]
-                if current_streak >= HEIGHT_NATURAL_MIN or len(limit_positions) >= HEIGHT_LIMIT_MIN_COUNT:
+                if current_streak >= HEIGHT_NATURAL_MIN or len(recent_limit_positions) >= HEIGHT_LIMIT_MIN_COUNT:
                     start_position = (
                         position - current_streak + 1
                         if current_streak >= HEIGHT_NATURAL_MIN
-                        else limit_positions[0]
+                        else recent_limit_positions[0]
                     )
                     structure = _height_structure_snapshot(group, start_position, position)
                     cycle_no += 1
                     active = {
                         "cycle_no": cycle_no,
-                        "entry_date": row[TRADE_DATE],
+                        "entry_date": trade_dates[position],
                         "entry_reason": "NATURAL_CONSECUTIVE_LIMIT_UP" if current_streak >= 2 else "SEVEN_SESSION_THREE_LIMIT_UP",
-                        "start": group.iloc[start_position][TRADE_DATE],
+                        "start": trade_dates[start_position],
                         **structure,
                         "metrics": {},
                     }
@@ -291,16 +297,20 @@ def evaluate_height(frame: pd.DataFrame) -> PoolCalculationResult:
                 "height_admitted_date": active["entry_date"],
             }
             exit_reason = None
-            active_to_base = row.get("previous_trend_state") == "ACTIVE" and row[TREND_STATE] == "BASE"
+            active_to_base = previous_trend_states[position] == "ACTIVE" and trend_states[position] == "BASE"
             if active_to_base:
                 exit_reason = "ACTIVE_TO_BASE"
             elif active["break_days"] > HEIGHT_MAX_BREAK_DAYS:
                 exit_reason = "BREAK_DAY_5"
             if exit_reason is not None:
-                output.append(_membership_row(row[TRADE_DATE], asset_id, HEIGHT, EXITED, active, exit_reason, row[EPISODE_ID]))
+                output.append(_membership_row(
+                    trade_dates[position], asset_id, HEIGHT, EXITED, active, exit_reason, episode_ids[position]
+                ))
                 active = None
             else:
-                output.append(_membership_row(row[TRADE_DATE], asset_id, HEIGHT, IN_POOL, active, None, row[EPISODE_ID]))
+                output.append(_membership_row(
+                    trade_dates[position], asset_id, HEIGHT, IN_POOL, active, None, episode_ids[position]
+                ))
     return PoolCalculationResult(pd.DataFrame(output), data)
 
 
@@ -309,21 +319,34 @@ def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
     data = frame.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
     output: list[dict[str, Any]] = []
     for asset_id, group in data.groupby(ASSET_ID, sort=False):
+        trade_dates = group[TRADE_DATE].to_numpy()
+        conditions = group[CAPACITY_OK].to_numpy(dtype=bool)
+        previous_conditions = np.concatenate(([False], conditions[:-1]))
+        emitted_positions = np.flatnonzero(conditions | previous_conditions)
+        daily_amount_ok = group[DAILY_AMOUNT_OK].to_numpy(dtype=bool)
+        daily_amount_ranks = group[DAILY_AMOUNT_RANK].to_numpy(dtype=object)
+        avg5_amount_ok = group[AVG5_AMOUNT_OK].to_numpy(dtype=bool)
+        avg5_amount_ranks = group[AVG5_AMOUNT_RANK].to_numpy(dtype=object)
+        float_capacity_ok = group[FLOAT_CAPACITY_OK].to_numpy(dtype=bool)
+        float_caps = group[FLOAT_CAP].to_numpy(dtype=float)
+        one_word_flags = group["is_one_word_limit_up"].to_numpy(dtype=bool)
+        trend_states = group[TREND_STATE].to_numpy(dtype=object)
+        episode_ids = group[EPISODE_ID].to_numpy(dtype=object)
         active: dict[str, Any] | None = None
         cycle_no = 0
-        for row in group.itertuples(index=False):
-            day = getattr(row, TRADE_DATE)
+        for position in emitted_positions:
+            day = trade_dates[position]
             reasons = {
-                "daily_amount_top100": bool(getattr(row, DAILY_AMOUNT_OK)),
-                "daily_amount_rank": None if pd.isna(getattr(row, DAILY_AMOUNT_RANK)) else int(getattr(row, DAILY_AMOUNT_RANK)),
-                "avg5_amount_top100": bool(getattr(row, AVG5_AMOUNT_OK)),
-                "avg5_amount_rank": None if pd.isna(getattr(row, AVG5_AMOUNT_RANK)) else int(getattr(row, AVG5_AMOUNT_RANK)),
-                "float_cap_ge_300b": bool(getattr(row, FLOAT_CAPACITY_OK)),
-                "float_cap": None if pd.isna(getattr(row, FLOAT_CAP)) else float(getattr(row, FLOAT_CAP)),
+                "daily_amount_top100": bool(daily_amount_ok[position]),
+                "daily_amount_rank": None if pd.isna(daily_amount_ranks[position]) else int(daily_amount_ranks[position]),
+                "avg5_amount_top100": bool(avg5_amount_ok[position]),
+                "avg5_amount_rank": None if pd.isna(avg5_amount_ranks[position]) else int(avg5_amount_ranks[position]),
+                "float_cap_ge_300b": bool(float_capacity_ok[position]),
+                "float_cap": None if pd.isna(float_caps[position]) else float(float_caps[position]),
             }
-            condition = bool(getattr(row, CAPACITY_OK))
+            condition = bool(conditions[position])
             if condition:
-                if active is None:
+                if not previous_conditions[position]:
                     cycle_no += 1
                     active = {
                         "cycle_no": cycle_no,
@@ -333,16 +356,16 @@ def evaluate_capacity(frame: pd.DataFrame) -> PoolCalculationResult:
                     }
                 else:
                     active["metrics"] = reasons
-                output.append(_membership_row(day, asset_id, CAPACITY, IN_POOL, active, None, getattr(row, EPISODE_ID)))
+                output.append(_membership_row(day, asset_id, CAPACITY, IN_POOL, active, None, episode_ids[position]))
             elif active is not None:
                 active["metrics"] = reasons
-                if bool(getattr(row, "is_one_word_limit_up")):
+                if one_word_flags[position]:
                     reason = "ONE_WORD_LIMIT_UP"
-                elif getattr(row, TREND_STATE) != "ACTIVE":
+                elif trend_states[position] != "ACTIVE":
                     reason = "NOT_ACTIVE"
                 else:
                     reason = "SHRINK_VOLUME"
-                output.append(_membership_row(day, asset_id, CAPACITY, EXITED, active, reason, getattr(row, EPISODE_ID)))
+                output.append(_membership_row(day, asset_id, CAPACITY, EXITED, active, reason, episode_ids[position]))
                 active = None
     return PoolCalculationResult(pd.DataFrame(output), data)
 
@@ -352,35 +375,47 @@ def evaluate_recognition(frame: pd.DataFrame) -> PoolCalculationResult:
     data = frame.sort_values([ASSET_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
     output: list[dict[str, Any]] = []
     for asset_id, group in data.groupby(ASSET_ID, sort=False):
-        active: dict[str, Any] | None = None
+        trade_dates = group[TRADE_DATE].to_numpy()
+        episode_ids = group[EPISODE_ID].to_numpy(dtype=object)
+        episode_ok = group[RECOGNITION_EPISODE_OK].to_numpy(dtype=bool)
+        return5_ok = group[RECOGNITION_5D_OK].to_numpy(dtype=bool)
+        return10_ok = group[RECOGNITION_10D_OK].to_numpy(dtype=bool)
+        conditions = episode_ok | return5_ok | return10_ok
+        retains = conditions | pd.notna(episode_ids)
         cycle_no = 0
-        for row in group.itertuples(index=False):
-            day = getattr(row, TRADE_DATE)
+        position = 0
+        while position < len(group):
+            starts = np.flatnonzero(conditions[position:])
+            if not len(starts):
+                break
+            start_position = position + int(starts[0])
             reasons = {
-                "episode_return_top30": bool(getattr(row, RECOGNITION_EPISODE_OK)),
-                "return5_top30": bool(getattr(row, RECOGNITION_5D_OK)),
-                "return10_top30": bool(getattr(row, RECOGNITION_10D_OK)),
+                "episode_return_top30": bool(episode_ok[start_position]),
+                "return5_top30": bool(return5_ok[start_position]),
+                "return10_top30": bool(return10_ok[start_position]),
             }
-            condition = any(reasons.values())
-            episode_id = getattr(row, EPISODE_ID)
-            episode_is_observable = pd.notna(episode_id)
-            # Episode observations are the point-in-time source of truth.  Do
-            # not consult the final episode master end date here: doing so
-            # would leak a later fact into an earlier daily snapshot.
-            episode_continues = episode_is_observable
-            if active is None and condition:
-                cycle_no += 1
-                active = {
-                    "cycle_no": cycle_no,
-                    "entry_date": day,
-                    "entry_reason": _json(reasons),
-                    "metrics": reasons,
-                }
-            if active is not None and (condition or episode_continues):
-                output.append(_membership_row(day, asset_id, RECOGNITION, IN_POOL, active, None, episode_id))
-            elif active is not None:
-                output.append(_membership_row(day, asset_id, RECOGNITION, EXITED, active, "NO_CONDITION_AND_NO_ACTIVE_EPISODE", episode_id))
-                active = None
+            cycle_no += 1
+            active = {
+                "cycle_no": cycle_no,
+                "entry_date": trade_dates[start_position],
+                "entry_reason": _json(reasons),
+                "metrics": reasons,
+            }
+            stops = np.flatnonzero(~retains[start_position:])
+            stop_position = len(group) if not len(stops) else start_position + int(stops[0])
+            for member_position in range(start_position, stop_position):
+                output.append(_membership_row(
+                    trade_dates[member_position], asset_id, RECOGNITION, IN_POOL,
+                    active, None, episode_ids[member_position],
+                ))
+            if stop_position < len(group):
+                output.append(_membership_row(
+                    trade_dates[stop_position], asset_id, RECOGNITION, EXITED,
+                    active, "NO_CONDITION_AND_NO_ACTIVE_EPISODE", episode_ids[stop_position],
+                ))
+                position = stop_position + 1
+            else:
+                break
     return PoolCalculationResult(pd.DataFrame(output), data)
 
 
@@ -391,3 +426,17 @@ def calculate_stock_pools(frame: pd.DataFrame) -> dict[str, PoolCalculationResul
     capacity = evaluate_capacity(features)
     recognition = evaluate_recognition(features)
     return {HEIGHT: height, CAPACITY: capacity, RECOGNITION: recognition}
+
+
+def calculate_stock_pool(frame: pd.DataFrame, pool_type: str) -> PoolCalculationResult:
+    """Run one pool evaluator through the canonical shared feature pass."""
+    evaluators = {
+        HEIGHT: evaluate_height,
+        CAPACITY: evaluate_capacity,
+        RECOGNITION: evaluate_recognition,
+    }
+    try:
+        evaluator = evaluators[pool_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported pool_type: {pool_type}") from exc
+    return evaluator(build_common_features(frame, pool_type=pool_type))
