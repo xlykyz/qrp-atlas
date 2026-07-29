@@ -1,0 +1,237 @@
+{
+  "registry_schema_version": 1,
+  "generated_for": "QRP Atlas v1.1 production-orchestration planning",
+  "external_dependencies": [
+    {"dependency_id": "external_tushare", "name": "Tushare market-data API"},
+    {"dependency_id": "external_eastmoney", "name": "Eastmoney market-data API"},
+    {"dependency_id": "external_cninfo", "name": "CNINFO disclosure API"},
+    {"dependency_id": "external_p5w", "name": "P5W investor-relations API"},
+    {"dependency_id": "external_host_metrics", "name": "host and service health metrics"},
+    {"dependency_id": "external_hermes_agent", "name": "Hermes Agent and LLM capability"}
+  ],
+  "pipelines": [
+    {
+      "pipeline_id": "market_daily_update", "name": "Daily market snapshot", "description": "Fetches and replaces one daily market snapshot.", "module": "daily_update", "evidence": ["src/qrp_atlas/pipeline/daily_update/run.py :: main"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "15 16 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["b8c670f02f9b"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.daily_update.run"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["quant.db.daily_market_snapshot", "quant.db.stock_basic", "external_tushare"], "outputs": ["quant.db.daily_market_snapshot", "data/raw daily files", "data/canonical daily files"], "completion_marker": "COMMIT of delete-and-insert transaction", "idempotency": "same trade date is replaced in one transaction"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": ["adj_factor_daily", "daily_basic_update", "system_b_state_readiness"], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "adj_factor_daily", "name": "Daily adjustment factors", "description": "Fetches adjustment factors after daily market data.", "module": "scripts", "evidence": ["scripts/pull_adj_factor_daily.py :: main", "~/.hermes/scripts/pipeline_daily_run.sh :: second stage"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "15 16 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["b8c670f02f9b"]},
+      "execution": {"argv": ["python", "scripts/pull_adj_factor_daily.py"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["quant.db.daily_market_snapshot", "external_tushare"], "outputs": ["quant.db.adj_factor"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "market_daily_update"}, {"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "cninfo_main_update", "name": "CNINFO main update", "description": "Collects the primary CNINFO research-visit increment.", "module": "cninfo", "evidence": ["src/qrp_atlas/pipeline/cninfo/run.py :: main", "~/.hermes/scripts/cninfo_cron_main.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 8 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["83895a6a24a7"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.cninfo.run", "--date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_cninfo"], "outputs": ["quant.db.cninfo_research_visits"], "completion_marker": "successful CLI exit", "idempotency": "INSERT OR IGNORE"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_cninfo"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "cninfo_incremental_noon", "name": "CNINFO noon incremental update", "description": "Collects CNINFO increments at noon.", "module": "cninfo", "evidence": ["src/qrp_atlas/pipeline/cninfo/run.py :: main", "~/.hermes/scripts/cninfo_cron_incr.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 12,21 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["e56ff366b299"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.cninfo.run", "--date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_cninfo"], "outputs": ["quant.db.cninfo_research_visits"], "completion_marker": "successful CLI exit", "idempotency": "INSERT OR IGNORE"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_cninfo"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "cninfo_incremental_afternoon", "name": "CNINFO afternoon incremental update", "description": "Collects CNINFO increments in the afternoon.", "module": "cninfo", "evidence": ["src/qrp_atlas/pipeline/cninfo/run.py :: main", "~/.hermes/scripts/cninfo_cron_incr.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "15 15 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["053db3ea5a9f"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.cninfo.run", "--date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_cninfo"], "outputs": ["quant.db.cninfo_research_visits"], "completion_marker": "successful CLI exit", "idempotency": "INSERT OR IGNORE"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_cninfo"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "research_stock_morning", "name": "Stock research morning report", "description": "Deterministic stock-research script with dynamic date arguments.", "module": "research_report", "evidence": ["src/qrp_atlas/pipeline/research_report/run.py :: main", "~/.hermes/scripts/research_stock_daily.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 7 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["2b3c60fc1bcc"]},
+      "execution": {"argv": null, "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "external_hermes_agent"], "outputs": ["quant.db research tables", "report files"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "research_stock_evening", "name": "Stock research evening report", "description": "Deterministic stock-research script with dynamic date arguments.", "module": "research_report", "evidence": ["src/qrp_atlas/pipeline/research_report/run.py :: main", "~/.hermes/scripts/research_stock_daily.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 19 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["cd3ce52ff14a"]},
+      "execution": {"argv": null, "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "external_hermes_agent"], "outputs": ["quant.db research tables", "report files"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "research_industry_morning", "name": "Industry research morning report", "description": "Deterministic industry-research script with dynamic date arguments.", "module": "research_industry", "evidence": ["src/qrp_atlas/pipeline/research_industry/run.py :: main", "~/.hermes/scripts/research_industry_daily.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 7 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["3591486225dc"]},
+      "execution": {"argv": null, "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "external_hermes_agent"], "outputs": ["quant.db research tables", "report files"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "research_industry_evening", "name": "Industry research evening report", "description": "Deterministic industry-research script with dynamic date arguments.", "module": "research_industry", "evidence": ["src/qrp_atlas/pipeline/research_industry/run.py :: main", "~/.hermes/scripts/research_industry_daily.sh"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 19 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["16a55246bddc"]},
+      "execution": {"argv": null, "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "external_hermes_agent"], "outputs": ["quant.db research tables", "report files"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "pipeline_daily_summary_agent", "name": "Daily pipeline summary", "description": "Hermes Agent summarizes daily pipeline results.", "module": "Hermes", "evidence": ["~/.hermes/cron/jobs.json :: job 56d22829661c"], "task_type": "AGENT_ORCHESTRATED", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 21 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline report adapter", "hermes_job_ids": ["56d22829661c"]},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["Hermes execution history", "external_hermes_agent"], "outputs": ["Agent report delivery"], "completion_marker": "UNRESOLVED", "idempotency": "report is non-authoritative"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_health_weekly_agent", "name": "Weekly system health check", "description": "Hermes Agent health-check report.", "module": "Hermes", "evidence": ["~/.hermes/cron/jobs.json :: job eadada323c3c"], "task_type": "AGENT_ORCHESTRATED", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 6 * * 1", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline deterministic health check plus optional explanation", "hermes_job_ids": ["eadada323c3c"]},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["external_host_metrics", "external_hermes_agent"], "outputs": ["Agent report delivery"], "completion_marker": "UNRESOLVED", "idempotency": "report is non-authoritative"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_host_metrics"}, {"kind": "EXTERNAL", "dependency_id": "external_hermes_agent"}], "downstream": [], "overlap_policy": "UNRESOLVED", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "index_daily_update", "name": "Daily index update", "description": "Fetches daily index data.", "module": "scripts", "evidence": ["scripts/fetch_index_daily.py :: main", "~/.hermes/cron/jobs.json :: job 0450c10ccb5f"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "0 20 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["0450c10ccb5f"]},
+      "execution": {"argv": ["python", "scripts/fetch_index_daily.py"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["external_tushare"], "outputs": ["quant.db.index_daily"], "completion_marker": "transactional upsert", "idempotency": "UPSERT"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "zt_dt_pool_daily", "name": "Daily limit-up and limit-down pools", "description": "Fetches daily ZT/DT pools.", "module": "scripts", "evidence": ["scripts/fetch_zt_dt_pool.py :: main", "~/.hermes/cron/jobs.json :: job 3c40deda0c79"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "30 15 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["3c40deda0c79"]},
+      "execution": {"argv": ["python", "scripts/fetch_zt_dt_pool.py"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["external_tushare"], "outputs": ["quant.db.zt_pool", "quant.db.dt_pool"], "completion_marker": "successful CLI exit", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "daily_basic_update", "name": "Daily basic update", "description": "Derives daily-basic data for the latest market-snapshot trade date.", "module": "daily_basic", "evidence": ["src/qrp_atlas/pipeline/daily_basic/run.py :: main", "~/.hermes/cron/jobs.json :: job 4afb74bd0769"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "15 17 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["4afb74bd0769"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.daily_basic.run"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["quant.db.daily_market_snapshot", "external_tushare"], "outputs": ["quant.db.daily_basic"], "completion_marker": "successful CLI exit", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "market_daily_update"}, {"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "irm_qa_incremental", "name": "IRM Q&A incremental ingestion", "description": "Ingests investor-relations Q&A every five minutes.", "module": "irm_qa", "evidence": ["src/qrp_atlas/pipeline/irm_qa/run.py :: main", "~/.hermes/cron/jobs.json :: job 3fdbd779c4da"], "task_type": "DETERMINISTIC_CLI", "status": "LEGACY_SCHEDULED",
+      "schedule": {"cron": "*/5 8-21 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "Hermes", "target_authority": "QRP Pipeline", "hermes_job_ids": ["3fdbd779c4da"]},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.irm_qa.run"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_p5w"], "outputs": ["quant.db.irm_interaction_qa"], "completion_marker": "successful CLI exit", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_p5w"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_state_readiness", "name": "System B state readiness", "description": "Checks System B input readiness for a trade date.", "module": "system_b", "evidence": ["src/qrp_atlas/pipeline/system_b/cli.py :: readiness", "deploy/qrp-atlas-system-b-daily.service"], "task_type": "HEALTH_CHECK", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "30 18 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b", "readiness", "--trade-date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["quant.db daily System B inputs"], "outputs": [], "completion_marker": "zero exit code", "idempotency": "read-only"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "market_daily_update"}], "downstream": ["system_b_state_daily"], "overlap_policy": "FORBID", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_state_daily", "name": "System B daily state machine", "description": "Builds System B state for one trade date.", "module": "system_b", "evidence": ["src/qrp_atlas/pipeline/system_b/cli.py :: run-daily", "src/qrp_atlas/pipeline/system_b/service.py :: run_daily"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "30 18 * * 1-5", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b", "run-daily", "--trade-date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["quant.db daily System B inputs"], "outputs": ["quant.db System B state tables"], "completion_marker": "successful service transaction", "idempotency": "same-date rerun semantics verified by System B tests"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_state_readiness"}], "downstream": ["system_b_episode_rebuild"], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_state_initialize", "name": "System B state initialization", "description": "Initializes System B state before an explicit backfill or recovery.", "module": "system_b", "evidence": ["src/qrp_atlas/pipeline/system_b/cli.py :: initialize"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b", "initialize"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["quant.db System B tables"], "outputs": ["quant.db System B state tables"], "completion_marker": "successful CLI exit", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_episode_rebuild", "name": "System B episode rebuild", "description": "Rebuilds episode state into its dedicated database.", "module": "system_b_episode", "evidence": ["src/qrp_atlas/pipeline/system_b_episode/cli.py :: main", "src/qrp_atlas/pipeline/system_b_episode/service.py :: rebuild_episodes"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b-episode", "--output-database", "UNRESOLVED configured path", "--end-date", "UNRESOLVED runtime date argument"], "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db System B state tables"], "outputs": ["system_b_episode.duckdb system_b_episode* tables"], "completion_marker": "COMMIT after replacement rebuild", "idempotency": "rule-version rows are deleted then rebuilt transactionally"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_state_daily"}], "downstream": ["system_b_pool_height", "system_b_pool_capacity", "system_b_pool_recognition"], "overlap_policy": "FORBID", "resource_locks": ["system_b_episode_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_pool_height", "name": "System B HEIGHT pool", "description": "Builds HEIGHT membership for an explicit date range.", "module": "system_b_pools", "evidence": ["src/qrp_atlas/pipeline/system_b_pools/cli.py :: main", "src/qrp_atlas/pipeline/system_b_pools/service.py :: build_stock_pool"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b-pools", "--pool-type", "HEIGHT", "--input-database", "UNRESOLVED configured path", "--output-database", "UNRESOLVED configured path", "--start-date", "UNRESOLVED", "--end-date", "UNRESOLVED"], "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "system_b_episode.duckdb"], "outputs": ["system_b_pools.duckdb system_b_pool_member", "system_b_pools.duckdb system_b_pool_run"], "completion_marker": "pool run status COMPLETED", "idempotency": "target pool/date range replaced atomically through staging output"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_episode_rebuild"}], "downstream": ["system_b_pool_completeness_daily"], "overlap_policy": "FORBID", "resource_locks": ["system_b_pools_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_pool_capacity", "name": "System B CAPACITY pool", "description": "Builds CAPACITY membership for an explicit date range.", "module": "system_b_pools", "evidence": ["src/qrp_atlas/pipeline/system_b_pools/cli.py :: main", "src/qrp_atlas/pipeline/system_b_pools/service.py :: build_stock_pool"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b-pools", "--pool-type", "CAPACITY", "--input-database", "UNRESOLVED configured path", "--output-database", "UNRESOLVED configured path", "--start-date", "UNRESOLVED", "--end-date", "UNRESOLVED"], "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "system_b_episode.duckdb"], "outputs": ["system_b_pools.duckdb system_b_pool_member", "system_b_pools.duckdb system_b_pool_run"], "completion_marker": "pool run status COMPLETED", "idempotency": "target pool/date range replaced atomically through staging output"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_episode_rebuild"}], "downstream": ["system_b_pool_completeness_daily"], "overlap_policy": "FORBID", "resource_locks": ["system_b_pools_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_pool_recognition", "name": "System B RECOGNITION pool", "description": "Builds RECOGNITION membership for an explicit date range.", "module": "system_b_pools", "evidence": ["src/qrp_atlas/pipeline/system_b_pools/cli.py :: main", "src/qrp_atlas/pipeline/system_b_pools/service.py :: build_stock_pool"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["qrp-atlas-system-b-pools", "--pool-type", "RECOGNITION", "--input-database", "UNRESOLVED configured path", "--output-database", "UNRESOLVED configured path", "--start-date", "UNRESOLVED", "--end-date", "UNRESOLVED"], "working_directory": "UNRESOLVED", "environment_variable_names": [], "inputs": ["quant.db", "system_b_episode.duckdb"], "outputs": ["system_b_pools.duckdb system_b_pool_member", "system_b_pools.duckdb system_b_pool_run"], "completion_marker": "pool run status COMPLETED", "idempotency": "target pool/date range replaced atomically through staging output"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_episode_rebuild"}], "downstream": ["system_b_pool_completeness_daily"], "overlap_policy": "FORBID", "resource_locks": ["system_b_pools_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "pit_backfill", "name": "PIT data backfill", "description": "Explicit historical point-in-time recovery operation.", "module": "pit_backfill", "evidence": ["src/qrp_atlas/pipeline/pit_backfill/cli.py :: main", "deploy/qrp-pit-backfill-20260714.service"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.pit_backfill", "UNRESOLVED explicit operation arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_tushare", "historical files"], "outputs": ["quant.db PIT tables"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "suspend_d_ingest", "name": "Suspension daily data ingestion", "description": "Ingests suspension data for an explicit period.", "module": "suspend_d", "evidence": ["src/qrp_atlas/pipeline/suspend_d/cli.py :: main"], "task_type": "DETERMINISTIC_CLI", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.suspend_d.run", "UNRESOLVED explicit period arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["external_tushare"], "outputs": ["quant.db.suspend_d"], "completion_marker": "COMMIT of delete-and-insert transaction", "idempotency": "same date range replaced"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "industry_membership_ingest", "name": "Industry membership ingestion", "description": "Loads industry membership history for explicit scope.", "module": "industry_membership", "evidence": ["src/qrp_atlas/pipeline/industry_membership/cli.py :: main"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.industry_membership.run", "UNRESOLVED explicit scope arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_tushare"], "outputs": ["quant.db.industry_membership_history"], "completion_marker": "successful CLI exit", "idempotency": "append-only history"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "index_component_ingest", "name": "Index component ingestion", "description": "Loads index component history for explicit scope.", "module": "index_component", "evidence": ["src/qrp_atlas/pipeline/index_component/cli.py :: main"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.index_component.run", "UNRESOLVED explicit scope arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE"], "inputs": ["external_tushare"], "outputs": ["quant.db.index_component_history"], "completion_marker": "successful CLI exit", "idempotency": "append-only history"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "fundamentals_ingest", "name": "Fundamentals ingestion", "description": "Loads fundamentals for explicit periods or securities.", "module": "fundamentals", "evidence": ["src/qrp_atlas/pipeline/fundamentals/cli.py :: main"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.fundamentals.run", "UNRESOLVED explicit period or ticker arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["external_tushare"], "outputs": ["quant.db financial statement tables"], "completion_marker": "successful CLI exit", "idempotency": "append-only history"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "earnings_forecast_ingest", "name": "Earnings forecast ingestion", "description": "Loads earnings forecast revisions for explicit scope.", "module": "earnings_forecast", "evidence": ["src/qrp_atlas/pipeline/earnings_forecast/cli.py :: main"], "task_type": "MANUAL_OPERATION", "status": "READY_UNSCHEDULED",
+      "schedule": {"cron": null, "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "operator", "target_authority": "QRP Pipeline manual trigger", "hermes_job_ids": []},
+      "execution": {"argv": ["python", "-m", "qrp_atlas.pipeline.earnings_forecast.run", "UNRESOLVED explicit period or ticker arguments"], "working_directory": "UNRESOLVED", "environment_variable_names": ["QRP_ENV_FILE", "TUSHARE_TOKEN"], "inputs": ["external_tushare"], "outputs": ["quant.db.earnings_forecast_revision", "quant.db ingestion run records"], "completion_marker": "successful CLI exit", "idempotency": "append-only revisions with run records"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_tushare"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": ["quant_db_writer"], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_b_pool_completeness_daily", "name": "System B daily pool completeness check", "description": "Checks that all three pool types are COMPLETED for a trade date.", "module": "system_b_pools", "evidence": ["src/qrp_atlas/pipeline/system_b_pools/service.py :: completed-pool query"], "task_type": "PLANNED", "status": "PLANNED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["system_b_pools.duckdb.system_b_pool_run"], "outputs": ["health status or report"], "completion_marker": "three pool types have COMPLETED status", "idempotency": "read-only"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_pool_height"}, {"kind": "PIPELINE", "pipeline_id": "system_b_pool_capacity"}, {"kind": "PIPELINE", "pipeline_id": "system_b_pool_recognition"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "pipeline_daily_summary_deterministic", "name": "Deterministic daily pipeline summary", "description": "Replacement candidate that summarizes QRP runtime records without making LLM success a pipeline condition.", "module": "pipeline runtime", "evidence": ["docs/QRP产品蓝图v1.1/10_Pipeline基础运行框架.md :: runtime status CLI"], "task_type": "PLANNED", "status": "PLANNED",
+      "schedule": {"cron": "0 21 * * *", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["QRP pipeline runtime SQLite"], "outputs": ["deterministic report artifact"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [], "downstream": [], "overlap_policy": "FORBID", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "system_health_weekly_deterministic", "name": "Deterministic weekly system health check", "description": "Replacement candidate for measurable checks; optional LLM explanation remains out of success criteria.", "module": "health", "evidence": ["docs/QRP产品蓝图v1.1/09_Pipeline现状事实与迁移边界.md :: Hermes health task"], "task_type": "PLANNED", "status": "PLANNED",
+      "schedule": {"cron": "0 6 * * 1", "timezone": "Asia/Shanghai", "trading_days_only": false, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["QRP pipeline runtime SQLite", "external_host_metrics"], "outputs": ["deterministic health report"], "completion_marker": "UNRESOLVED", "idempotency": "read-only"},
+      "orchestration": {"dependencies": [{"kind": "EXTERNAL", "dependency_id": "external_host_metrics"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    },
+    {
+      "pipeline_id": "qrp_production_daily_run", "name": "QRP production daily orchestration", "description": "Future explicit daily integration boundary after per-stage acceptance.", "module": "pipeline runtime", "evidence": ["docs/QRP产品蓝图v1.1/10_Pipeline基础运行框架.md :: scheduler and runner roles"], "task_type": "PLANNED", "status": "PLANNED",
+      "schedule": {"cron": "UNRESOLVED", "timezone": "Asia/Shanghai", "trading_days_only": true, "current_authority": "none", "target_authority": "QRP Pipeline", "hermes_job_ids": []},
+      "execution": {"argv": null, "working_directory": null, "environment_variable_names": [], "inputs": ["accepted QRP pipeline definitions"], "outputs": ["orchestration status"], "completion_marker": "UNRESOLVED", "idempotency": "UNRESOLVED"},
+      "orchestration": {"dependencies": [{"kind": "PIPELINE", "pipeline_id": "system_b_pool_completeness_daily"}], "downstream": [], "overlap_policy": "FORBID", "resource_locks": [], "timeout_seconds": null, "max_retries": 0, "freshness_checks": [], "performance_budget": null}
+    }
+  ],
+  "exclusions": [
+    {"candidate": "api and auth service entry points", "evidence": ["src/qrp_atlas/api", "src/qrp_atlas/auth"], "reason": "long-lived request services, not periodic pipelines"},
+    {"candidate": "config doctor", "evidence": ["pyproject.toml :: qrp-atlas-config"], "reason": "operator diagnostic command"},
+    {"candidate": "backfill_daily_basic.py", "evidence": ["scripts/backfill_daily_basic.py"], "reason": "historical recovery script; daily basic production capability is separately registered"},
+    {"candidate": "backfill_daily_basic_bulk.py", "evidence": ["scripts/backfill_daily_basic_bulk.py"], "reason": "one-off historical recovery"},
+    {"candidate": "backfill_historical.py", "evidence": ["scripts/backfill_historical.py"], "reason": "one-off historical recovery"},
+    {"candidate": "backfill_tushare.py", "evidence": ["scripts/backfill_tushare.py"], "reason": "one-off historical recovery"},
+    {"candidate": "canonicalize_daily_snapshot.py", "evidence": ["scripts/canonicalize_daily_snapshot.py"], "reason": "data repair script"},
+    {"candidate": "canonicalize_history_daily.py", "evidence": ["scripts/canonicalize_history_daily.py"], "reason": "data repair script"},
+    {"candidate": "data_fetch.py", "evidence": ["scripts/data_fetch.py"], "reason": "ad-hoc acquisition utility"},
+    {"candidate": "dump_missing_dates.py", "evidence": ["scripts/dump_missing_dates.py"], "reason": "diagnostic query utility"},
+    {"candidate": "fetch_daily_snapshot.py", "evidence": ["scripts/fetch_daily_snapshot.py"], "reason": "ad-hoc duplicate of registered daily market update"},
+    {"candidate": "fetch_history_2013_to_now.py", "evidence": ["scripts/fetch_history_2013_to_now.py"], "reason": "historical backfill"},
+    {"candidate": "fetch_history_2013_to_now_em_to_csv.py", "evidence": ["scripts/fetch_history_2013_to_now_em_to_csv.py"], "reason": "historical backfill"},
+    {"candidate": "fetch_history_daily.py", "evidence": ["scripts/fetch_history_daily.py"], "reason": "historical backfill"},
+    {"candidate": "fetch_latest_day.py", "evidence": ["scripts/fetch_latest_day.py"], "reason": "ad-hoc duplicate of registered daily market update"},
+    {"candidate": "fix_limit_flags.py", "evidence": ["scripts/fix_limit_flags.py"], "reason": "data repair script"},
+    {"candidate": "fix_trade_date_format.py", "evidence": ["scripts/fix_trade_date_format.py"], "reason": "data repair script"},
+    {"candidate": "init_data_dict.py", "evidence": ["scripts/init_data_dict.py"], "reason": "one-time initialization"},
+    {"candidate": "init_db.py", "evidence": ["scripts/init_db.py"], "reason": "one-time initialization"},
+    {"candidate": "load_history_from_stock_csv.py", "evidence": ["scripts/load_history_from_stock_csv.py"], "reason": "historical load"},
+    {"candidate": "migrate_earnings_forecast_event.py", "evidence": ["scripts/migrate_earnings_forecast_event.py"], "reason": "database migration"},
+    {"candidate": "migrate_pit_tables.py", "evidence": ["scripts/migrate_pit_tables.py"], "reason": "database migration"},
+    {"candidate": "pull_adj_factor.py", "evidence": ["scripts/pull_adj_factor.py"], "reason": "older ad-hoc variant; scheduled daily variant is separately registered"},
+    {"candidate": "resume_backfill.py", "evidence": ["scripts/resume_backfill.py"], "reason": "historical recovery"},
+    {"candidate": "verify_backfill.py", "evidence": ["scripts/verify_backfill.py"], "reason": "validation utility, not a production periodic task"},
+    {"candidate": "test_gateway.py", "evidence": ["scripts/test_gateway.py"], "reason": "development connectivity test"},
+    {"candidate": "test_gateway2.py", "evidence": ["scripts/test_gateway2.py"], "reason": "development connectivity test"},
+    {"candidate": "dated PIT backfill systemd examples", "evidence": ["deploy/qrp-pit-backfill-20260714*.service"], "reason": "dated one-off deployment material; generic manual PIT operation is registered"},
+    {"candidate": "non-QRP host utility scripts", "evidence": ["~/.hermes/scripts/"], "reason": "outside QRP operational domain and excluded without inspecting credential-bearing content"}
+  ]
+}
