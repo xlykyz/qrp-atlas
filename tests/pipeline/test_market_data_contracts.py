@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, date, datetime
+import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import duckdb
 import pandas as pd
@@ -77,6 +79,16 @@ def initialise_database(item: AppSettings, *, include_target: bool = True) -> No
         connection.executemany(
             "INSERT INTO trading_calendar (trade_date, is_open, year, month, quarter) VALUES (?, ?, ?, ?, ?)",
             [(value, is_open, value.year, value.month, (value.month - 1) // 3 + 1) for value, is_open in rows],
+        )
+        connection.executemany(
+            """
+            INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active)
+            VALUES (?, ?, ?, ?, ?, TRUE)
+            """,
+            [
+                ("000001.SZ", "Ping An", "SZ", "MAIN", PREVIOUS),
+                ("600000.SH", "Shanghai Pudong", "SH", "MAIN", PREVIOUS),
+            ],
         )
     finally:
         connection.close()
@@ -160,11 +172,59 @@ def seed_market_target(item: AppSettings) -> None:
 
 
 def run(contract, item: AppSettings, *, dependencies=()):
-    return ContractTestHarness(contract, item, dependency_contracts=dependencies).run(trade_date=TARGET)
+    available = tuple(dependencies)
+    if "market_daily_update" in contract.dependencies and MARKET_DAILY_UPDATE not in available:
+        available = (*available, MARKET_DAILY_UPDATE)
+    return ContractTestHarness(contract, item, dependency_contracts=available).run(trade_date=TARGET)
 
 
 def diagnostics(result) -> set[str]:
     return {diagnostic.code for diagnostic in result.diagnostics}
+
+
+class _EastmoneyResponse:
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _eastmoney_payload(*, records: list[dict], total: int, response_date: date = TARGET) -> dict:
+    return {
+        "rc": 0,
+        "data": {
+            "date": response_date.strftime("%Y%m%d"),
+            "total": total,
+            "pool": records,
+        },
+    }
+
+
+def _eastmoney_record(value: int) -> dict:
+    return {"c": f"{value:06d}", "n": f"Sample {value}", "p": 10000, "zdp": 10.0}
+
+
+def _eastmoney_urlopen(responses: dict[tuple[str, int], dict | Exception]):
+    calls: list[tuple[str, int]] = []
+
+    def open_url(request, *, timeout: int):
+        assert timeout == 15
+        parsed = urlparse(request.full_url)
+        key = (parsed.path.rsplit("/", 1)[-1], int(parse_qs(parsed.query)["Pageindex"][0]))
+        calls.append(key)
+        outcome = responses[key]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _EastmoneyResponse(outcome)
+
+    return calls, open_url
 
 
 def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> None:
@@ -179,6 +239,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert ADJ_FACTOR_DAILY.dependencies == ("market_daily_update",)
+    assert DAILY_BASIC_UPDATE.dependencies == ("market_daily_update",)
 
 
 def test_target_policy_uses_calendar_close_time_weekends_and_explicit_dates(tmp_path: Path) -> None:
@@ -227,15 +288,54 @@ def test_market_daily_real_executor_writes_completion_and_metrics(tmp_path: Path
         connection.close()
 
 
+def test_market_daily_historical_replay_ignores_future_rows_and_only_enriches_from_prior_history(tmp_path: Path, monkeypatch) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    future = date(2026, 7, 30)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
+            [PREVIOUS, "000001.SZ", 9.0],
+        )
+        connection.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
+            [future, "000001.SZ", 99.0],
+        )
+    finally:
+        connection.close()
+    client = FakeTushare()
+    client.daily_frame.loc[client.daily_frame["ts_code"] == "000001.SZ", "pre_close"] = None
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    replay = run(MARKET_DAILY_UPDATE, item)
+
+    assert replay.status is ResultStatus.SUCCESS
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute(
+            "SELECT pre_close FROM daily_market_snapshot WHERE trade_date = ? AND ticker = ?",
+            [TARGET, "000001.SZ"],
+        ).fetchone()[0] == 9.0
+        assert connection.execute(
+            "SELECT close FROM daily_market_snapshot WHERE trade_date = ? AND ticker = ?",
+            [future, "000001.SZ"],
+        ).fetchone()[0] == 99.0
+    finally:
+        connection.close()
+
+
 def test_daily_basic_replaces_target_without_duplicate_or_historical_loss(tmp_path: Path, monkeypatch) -> None:
     item = settings(tmp_path)
     initialise_database(item)
+    seed_market_target(item)
     connection = duckdb.connect(str(item.paths.duckdb_path))
     try:
         connection.execute("INSERT INTO daily_basic (trade_date, ticker, close) VALUES (?, ?, ?)", [PREVIOUS, "000001.SZ", 9.0])
         connection.execute("INSERT INTO daily_basic (trade_date, ticker, close) VALUES (?, ?, ?)", [TARGET, "000001.SZ", 1.0])
     finally:
         connection.close()
+
     client = FakeTushare()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
 
@@ -249,6 +349,117 @@ def test_daily_basic_replaces_target_without_duplicate_or_historical_loss(tmp_pa
         assert connection.execute("SELECT close FROM daily_basic WHERE trade_date = ? AND ticker = '000001.SZ'", [PREVIOUS]).fetchone()[0] == 9.0
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "attribute", "seed_market", "error_code"),
+    (
+        (MARKET_DAILY_UPDATE, "daily_frame", False, "MARKET_DAILY_API_PARTIAL"),
+        (DAILY_BASIC_UPDATE, "daily_basic_frame", True, "DAILY_BASIC_API_PARTIAL"),
+    ),
+)
+def test_market_and_daily_basic_reject_a_single_missing_expected_ticker_before_writing(
+    tmp_path: Path,
+    monkeypatch,
+    pipeline,
+    attribute: str,
+    seed_market: bool,
+    error_code: str,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    if seed_market:
+        seed_market_target(item)
+    client = FakeTushare()
+    setattr(client, attribute, getattr(client, attribute).iloc[:1].copy())
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    write_calls: list[str] = []
+    if pipeline is MARKET_DAILY_UPDATE:
+        monkeypatch.setattr(subject, "_atomic_csv", lambda *_args, **_kwargs: write_calls.append("csv"))
+        monkeypatch.setattr(subject, "_insert_frame", lambda *_args, **_kwargs: write_calls.append("insert"))
+    else:
+        monkeypatch.setattr(subject, "_replace_target_date", lambda *_args, **_kwargs: write_calls.append("replace"))
+
+    result = run(pipeline, item)
+
+    assert result.status is ResultStatus.FAILED
+    assert error_code in diagnostics(result)
+    assert not write_calls
+
+
+def test_market_and_daily_basic_reject_obviously_truncated_responses_but_allow_suspended_and_inactive_stocks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute(
+            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
+            ["300001.SZ", "Suspended", "SZ", "MAIN", PREVIOUS],
+        )
+        connection.execute(
+            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, FALSE)",
+            ["300002.SZ", "Inactive", "SZ", "MAIN", PREVIOUS],
+        )
+        connection.execute(
+            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
+            ["300004.SZ", "Resumed", "SZ", "MAIN", PREVIOUS],
+        )
+        connection.execute(
+            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
+            [TARGET, "300001.SZ", "S"],
+        )
+        connection.execute(
+            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
+            [TARGET, "300004.SZ", "R"],
+        )
+    finally:
+        connection.close()
+    client = FakeTushare()
+    resumed_market = market_frame().iloc[[0]].copy()
+    resumed_market["ts_code"] = "300004.SZ"
+    resumed_market["close"] = 5.0
+    client.daily_frame = pd.concat((client.daily_frame, resumed_market), ignore_index=True)
+    resumed_basic = daily_basic_frame().iloc[[0]].copy()
+    resumed_basic["ts_code"] = "300004.SZ"
+    resumed_basic["close"] = 5.0
+    client.daily_basic_frame = pd.concat((client.daily_basic_frame, resumed_basic), ignore_index=True)
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    normal_market = run(MARKET_DAILY_UPDATE, item)
+    assert normal_market.status is ResultStatus.SUCCESS
+    assert normal_market.metrics.rows_written == 3
+    normal_basic = run(DAILY_BASIC_UPDATE, item)
+    assert normal_basic.status is ResultStatus.SUCCESS
+    assert normal_basic.metrics.rows_written == 3
+
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute(
+            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
+            ["300003.SZ", "Expected", "SZ", "MAIN", PREVIOUS],
+        )
+        connection.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
+            [TARGET, "300003.SZ", 5.0],
+        )
+    finally:
+        connection.close()
+
+    client.daily_frame = market_frame().iloc[:1].copy()
+    market_partial = run(MARKET_DAILY_UPDATE, item)
+    assert market_partial.status is ResultStatus.FAILED
+    assert "MARKET_DAILY_API_PARTIAL" in diagnostics(market_partial)
+
+    client.daily_basic_frame = daily_basic_frame().iloc[:1].copy()
+    basic_partial = run(DAILY_BASIC_UPDATE, item)
+    assert basic_partial.status is ResultStatus.FAILED
+    assert "DAILY_BASIC_API_PARTIAL" in diagnostics(basic_partial)
 
 
 def test_adj_factor_requires_complete_market_universe_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -272,6 +483,51 @@ def test_adj_factor_requires_complete_market_universe_and_is_idempotent(tmp_path
     partial = run(ADJ_FACTOR_DAILY, item, dependencies=(MARKET_DAILY_UPDATE,))
     assert partial.status is ResultStatus.FAILED
     assert "ADJ_FACTOR_API_PARTIAL" in diagnostics(partial)
+
+
+def test_adj_factor_replay_replaces_the_complete_target_change_set_and_preserves_other_dates(tmp_path: Path, monkeypatch) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    seed_market_target(item)
+    future = date(2026, 7, 30)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.executemany(
+            "INSERT INTO adj_factor_changes (trade_date, ticker, adj_factor) VALUES (?, ?, ?)",
+            [
+                (PREVIOUS, "000001.SZ", 1.0),
+                (PREVIOUS, "600000.SH", 2.0),
+                (future, "000001.SZ", 9.9),
+            ],
+        )
+    finally:
+        connection.close()
+    client = FakeTushare()
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    first = run(ADJ_FACTOR_DAILY, item, dependencies=(MARKET_DAILY_UPDATE,))
+    assert first.status is ResultStatus.SUCCESS
+    client.adj_factor_frame = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "600000.SH"],
+            "trade_date": [TARGET.strftime("%Y%m%d")] * 2,
+            "adj_factor": [1.0, 2.0],
+        }
+    )
+
+    corrected = run(ADJ_FACTOR_DAILY, item, dependencies=(MARKET_DAILY_UPDATE,))
+
+    assert corrected.status is ResultStatus.SUCCESS
+    assert corrected.metrics.rows_written == 0
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM adj_factor_changes WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT adj_factor FROM adj_factor_changes WHERE trade_date = ? AND ticker = ?",
+            [future, "000001.SZ"],
+        ).fetchone()[0] == 9.9
+    finally:
+        connection.close()
 
 
 def test_adj_factor_blocks_when_market_target_is_not_complete(tmp_path: Path, monkeypatch) -> None:
@@ -322,15 +578,15 @@ def test_zt_dt_pool_is_atomic_and_allows_explicit_empty_snapshots(tmp_path: Path
     def pool(endpoint: str, _target: date, *, sort: str):
         del sort
         if endpoint == "getTopicZTPool":
-            return [{"c": "000001", "n": "Sample", "p": 10000, "zdp": 10.0, "fbt": 93000}]
-        return [{"c": "600000", "n": "Other", "p": 8000, "zdp": -10.0, "lbt": 145900}]
+            return ([{"c": "000001", "n": "Sample", "p": 10000, "zdp": 10.0, "fbt": 93000}], 1)
+        return ([{"c": "600000", "n": "Other", "p": 8000, "zdp": -10.0, "lbt": 145900}], 1)
 
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", pool)
     first = run(ZT_DT_POOL_DAILY, item)
     assert first.status is ResultStatus.SUCCESS
     assert first.metrics.rows_written == 2
 
-    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", lambda *_args, **_kwargs: ([], 1))
     empty = run(ZT_DT_POOL_DAILY, item)
     assert empty.status is ResultStatus.SUCCESS
     assert [output.rows_written for output in empty.outputs] == [0, 0]
@@ -340,6 +596,98 @@ def test_zt_dt_pool_is_atomic_and_allows_explicit_empty_snapshots(tmp_path: Path
         assert connection.execute("SELECT COUNT(*) FROM dt_pool WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
     finally:
         connection.close()
+
+
+def test_eastmoney_pool_fetches_all_pages_when_the_reported_total_exceeds_200(monkeypatch) -> None:
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    records = [_eastmoney_record(value) for value in range(201)]
+    calls, open_url = _eastmoney_urlopen(
+        {
+            ("getTopicZTPool", 0): _eastmoney_payload(records=records[:200], total=201),
+            ("getTopicZTPool", 1): _eastmoney_payload(records=records[200:], total=201),
+        }
+    )
+    monkeypatch.setattr(subject.urllib.request, "urlopen", open_url)
+
+    actual, requests = subject._fetch_eastmoney_pool("getTopicZTPool", TARGET, sort="fbt:asc")
+
+    assert len(actual) == 201
+    assert requests == 2
+    assert calls == [("getTopicZTPool", 0), ("getTopicZTPool", 1)]
+
+
+@pytest.mark.parametrize(
+    "responses",
+    (
+        {
+            ("getTopicZTPool", 0): _eastmoney_payload(records=[_eastmoney_record(1)], total=1, response_date=PREVIOUS),
+        },
+        {
+            ("getTopicZTPool", 0): _eastmoney_payload(records=[_eastmoney_record(value) for value in range(200)], total=201),
+            ("getTopicZTPool", 1): _eastmoney_payload(records=[_eastmoney_record(200), _eastmoney_record(201)], total=201),
+        },
+        {
+            ("getTopicZTPool", 0): _eastmoney_payload(records=[_eastmoney_record(value) for value in range(200)], total=201),
+            ("getTopicZTPool", 1): RuntimeError("second page unavailable"),
+        },
+    ),
+    ids=("wrong-date", "inconsistent-total", "second-page-failure"),
+)
+def test_eastmoney_invalid_or_incomplete_pool_response_preserves_both_existing_snapshots(
+    tmp_path: Path,
+    monkeypatch,
+    responses,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute("INSERT INTO zt_pool (trade_date, ticker) VALUES (?, ?)", [TARGET, "000001"])
+        connection.execute("INSERT INTO dt_pool (trade_date, ticker) VALUES (?, ?)", [TARGET, "600000"])
+    finally:
+        connection.close()
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    _calls, open_url = _eastmoney_urlopen(responses)
+    monkeypatch.setattr(subject.urllib.request, "urlopen", open_url)
+
+    result = run(ZT_DT_POOL_DAILY, item)
+
+    assert result.status is ResultStatus.FAILED
+    assert "ZT_DT_POOL_API_PARTIAL" in diagnostics(result) or "ZT_DT_POOL_API_FAILED" in diagnostics(result)
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM zt_pool WHERE trade_date = ?", [TARGET]).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM dt_pool WHERE trade_date = ?", [TARGET]).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_eastmoney_explicit_zero_totals_are_the_only_valid_empty_snapshots(tmp_path: Path, monkeypatch) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute("INSERT INTO zt_pool (trade_date, ticker) VALUES (?, ?)", [TARGET, "000001"])
+        connection.execute("INSERT INTO dt_pool (trade_date, ticker) VALUES (?, ?)", [TARGET, "600000"])
+    finally:
+        connection.close()
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    _calls, open_url = _eastmoney_urlopen(
+        {
+            ("getTopicZTPool", 0): _eastmoney_payload(records=[], total=0),
+            ("getTopicDTPool", 0): _eastmoney_payload(records=[], total=0),
+        }
+    )
+    monkeypatch.setattr(subject.urllib.request, "urlopen", open_url)
+
+    result = run(ZT_DT_POOL_DAILY, item)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert [output.rows_written for output in result.outputs] == [0, 0]
+    assert [output.detail["empty_snapshot"] for output in result.outputs] == [True, True]
 
 
 def test_zt_dt_pool_rejects_one_api_failure_without_replacing_either_table(tmp_path: Path, monkeypatch) -> None:
@@ -355,7 +703,7 @@ def test_zt_dt_pool_rejects_one_api_failure_without_replacing_either_table(tmp_p
     def pool(endpoint: str, _target: date, *, sort: str):
         del sort
         if endpoint == "getTopicZTPool":
-            return []
+            return ([], 1)
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", pool)
@@ -416,12 +764,14 @@ def test_input_missing_stale_and_api_failures_return_stable_codes(tmp_path: Path
         DAILY_BASIC_UPDATE,
         stale,
         scheduled_for=datetime(2026, 7, 29, 8, 30, tzinfo=UTC),
+        dependency_contracts=(MARKET_DAILY_UPDATE,),
     ).run()
     assert stale_result.status is ResultStatus.FAILED
     assert "TRADING_CALENDAR_STALE" in diagnostics(stale_result)
 
     item = settings(tmp_path / "api")
     initialise_database(item)
+    seed_market_target(item)
     client = FakeTushare()
     client.daily_basic_frame = pd.DataFrame()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
@@ -429,10 +779,18 @@ def test_input_missing_stale_and_api_failures_return_stable_codes(tmp_path: Path
     assert api_result.status is ResultStatus.FAILED
     assert "DAILY_BASIC_API_EMPTY" in diagnostics(api_result)
 
-    invalid_override = ContractTestHarness(DAILY_BASIC_UPDATE, item).run(trade_date=date(2026, 8, 1))
+    invalid_override = ContractTestHarness(
+        DAILY_BASIC_UPDATE,
+        item,
+        dependency_contracts=(MARKET_DAILY_UPDATE,),
+    ).run(trade_date=date(2026, 8, 1))
     assert invalid_override.status is ResultStatus.FAILED
     assert "TARGET_DATE_OVERRIDE_INVALID" in diagnostics(invalid_override)
-    parameter_error = ContractTestHarness(DAILY_BASIC_UPDATE, item).run(
+    parameter_error = ContractTestHarness(
+        DAILY_BASIC_UPDATE,
+        item,
+        dependency_contracts=(MARKET_DAILY_UPDATE,),
+    ).run(
         trade_date=TARGET,
         parameter_overrides={"unexpected": "value"},
     )
@@ -443,6 +801,7 @@ def test_input_missing_stale_and_api_failures_return_stable_codes(tmp_path: Path
 def test_completion_failure_and_transaction_interruption_do_not_report_success(tmp_path: Path, monkeypatch) -> None:
     item = settings(tmp_path)
     initialise_database(item)
+    seed_market_target(item)
     client = FakeTushare()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
     connection = duckdb.connect(str(item.paths.duckdb_path))
@@ -593,13 +952,37 @@ def test_equivalent_daily_scale_benchmark_records_metrics_for_all_six_contracts(
             "suspend_type": ["S"] * len(client.daily_frame),
         }
     )
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute("DELETE FROM stock_info")
+        connection.register(
+            "benchmark_universe",
+            pd.DataFrame(
+                {
+                    "ticker": client.daily_frame["ts_code"],
+                    "name": ["Benchmark"] * len(client.daily_frame),
+                    "list_date": [PREVIOUS] * len(client.daily_frame),
+                }
+            ),
+        )
+        try:
+            connection.execute(
+                """
+                INSERT INTO stock_info (ticker, name, list_date, is_active)
+                SELECT ticker, name, list_date, TRUE FROM benchmark_universe
+                """
+            )
+        finally:
+            connection.unregister("benchmark_universe")
+    finally:
+        connection.close()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
     monkeypatch.setattr(
         "qrp_atlas.pipeline.market_data_contracts.ak.stock_zh_index_daily",
         lambda **_kwargs: index_frame(),
     )
     pool_records = [{"c": f"{value:06d}", "n": "Sample", "p": 10000, "zdp": 10.0} for value in range(200)]
-    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", lambda *_args, **_kwargs: pool_records)
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", lambda *_args, **_kwargs: (pool_records, 1))
 
     market = run(MARKET_DAILY_UPDATE, item)
     adj = run(ADJ_FACTOR_DAILY, item, dependencies=(MARKET_DAILY_UPDATE,))

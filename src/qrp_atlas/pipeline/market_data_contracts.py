@@ -29,9 +29,11 @@ from qrp_atlas.contracts import (
     DT_POOL,
     INDEX_DAILY,
     SUSPEND_D,
+    STOCK_INFO,
     TRADING_CALENDAR,
     ZT_POOL,
     align_to_schema,
+    normalize_ticker,
     quick_validate,
 )
 
@@ -251,13 +253,20 @@ def _market_history_structure(context: PipelineRunContext) -> CheckResult:
 
 
 def _market_history_freshness(context: PipelineRunContext) -> CheckResult:
-    """Historical rows are optional on first load but may never be from the future."""
+    """Only history before the replay target is eligible for enrichment."""
 
     target = _target_date(context)
     try:
         connection = _connect(context, read_only=True)
         try:
-            row = connection.execute("SELECT MAX(trade_date) FROM daily_market_snapshot").fetchone()
+            row = connection.execute(
+                "SELECT MAX(trade_date) FROM daily_market_snapshot WHERE trade_date < ?",
+                [target],
+            ).fetchone()
+            future_rows = connection.execute(
+                "SELECT COUNT(*) FROM daily_market_snapshot WHERE trade_date > ?",
+                [target],
+            ).fetchone()[0]
         finally:
             connection.close()
     except Exception as exc:
@@ -268,18 +277,11 @@ def _market_history_freshness(context: PipelineRunContext) -> CheckResult:
             exception=type(exc).__name__,
         )
     latest = row[0] if row else None
-    if latest is not None and latest > target:
-        return CheckResult.failure(
-            "market_history_freshness",
-            "MARKET_HISTORY_STALE",
-            "daily market history extends beyond the requested target date",
-            latest_trade_date=latest.isoformat(),
-            target_date=target.isoformat(),
-        )
     return CheckResult.success(
         "market_history_freshness",
-        latest_trade_date=latest.isoformat() if latest else None,
+        latest_eligible_trade_date=latest.isoformat() if latest else None,
         target_date=target.isoformat(),
+        future_rows_ignored=future_rows,
     )
 
 
@@ -318,6 +320,103 @@ def _market_target_freshness(context: PipelineRunContext) -> CheckResult:
             target_date=target.isoformat(),
         )
     return CheckResult.success("market_daily_target_freshness", target_date=target.isoformat(), rows=count)
+
+
+def _market_coverage_structure(context: PipelineRunContext) -> CheckResult:
+    stock_check = _require_table(
+        context,
+        STOCK_INFO.name,
+        ("ticker", "is_active", "list_date", "delist_date"),
+        "MARKET_COVERAGE_STRUCTURE_MISSING",
+    )
+    if not stock_check.passed:
+        return stock_check
+    return _require_table(
+        context,
+        SUSPEND_D.name,
+        ("trade_date", "ticker"),
+        "MARKET_COVERAGE_STRUCTURE_MISSING",
+    )
+
+
+def _market_coverage_freshness(context: PipelineRunContext) -> CheckResult:
+    return _calendar_has_open_date(
+        context,
+        error_code="MARKET_COVERAGE_STALE",
+        check_id="market_coverage_target_freshness",
+    )
+
+
+def _expected_market_tickers(context: PipelineRunContext, target: date) -> set[str]:
+    """Return the explicit target-day universe before requesting provider data.
+
+    Active listings are the expected market population.  A same-day non-resume
+    suspend_d row is an explicit, contract-backed exclusion; inactive,
+    not-yet-listed, and delisted securities are never expected in a daily
+    market response.
+    """
+
+    try:
+        connection = _connect(context, read_only=True)
+        try:
+            active = {
+                normalize_ticker(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT ticker
+                    FROM stock_info
+                    WHERE is_active = TRUE
+                      AND list_date IS NOT NULL
+                      AND list_date <= ?
+                      AND (delist_date IS NULL OR delist_date >= ?)
+                    """,
+                    [target, target],
+                ).fetchall()
+            }
+            suspended = {
+                normalize_ticker(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT ticker
+                    FROM suspend_d
+                    WHERE trade_date = ?
+                      AND upper(coalesce(suspend_type, '')) <> 'R'
+                      AND coalesce(suspend_type, '') NOT LIKE '%复牌%'
+                    """,
+                    [target],
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise ContractError("MARKET_DAILY_COVERAGE_UNAVAILABLE", type(exc).__name__) from exc
+    expected = active - suspended
+    if not expected:
+        raise ContractError(
+            "MARKET_DAILY_COVERAGE_UNAVAILABLE",
+            f"no active non-suspended stock_info tickers for {target.isoformat()}",
+        )
+    return expected
+
+
+def _expected_market_output_tickers(context: PipelineRunContext, target: date, *, error_code: str) -> set[str]:
+    try:
+        connection = _connect(context, read_only=True)
+        try:
+            expected = {
+                normalize_ticker(row[0])
+                for row in connection.execute(
+                    "SELECT ticker FROM daily_market_snapshot WHERE trade_date = ?",
+                    [target],
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+    except Exception as exc:
+        raise ContractError(error_code, type(exc).__name__) from exc
+    if not expected:
+        raise ContractError(error_code, f"no market_daily_update tickers for {target.isoformat()}")
+    return expected
 
 
 def _external_target_freshness(error_code: str, input_id: str):
@@ -580,6 +679,27 @@ def _ensure_target_rows(frame: pd.DataFrame, target: date, code: str) -> None:
         raise ContractError(code, f"response trade_date must be exactly {target.isoformat()}")
 
 
+def _ensure_expected_ticker_coverage(
+    frame: pd.DataFrame,
+    expected: set[str],
+    *,
+    ticker_column: str,
+    code: str,
+) -> None:
+    """Reject a target-day provider response that omits expected securities."""
+
+    received = {
+        normalize_ticker(value)
+        for value in frame[ticker_column].dropna().astype(str)
+    }
+    missing = sorted(expected - received)
+    if missing:
+        raise ContractError(
+            code,
+            f"missing {len(missing)} expected tickers; examples={','.join(missing[:10])}",
+        )
+
+
 def _metrics(
     *,
     rows_read: int,
@@ -606,20 +726,23 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
     target = _target_date(context)
     started = time.monotonic()
     try:
+        expected = _expected_market_tickers(context, target)
         client = get_tushare_pro(settings=context.settings)
         raw = client.daily(trade_date=target.strftime("%Y%m%d"))
         if raw is None or raw.empty:
             raise ContractError("MARKET_DAILY_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"), "MARKET_DAILY_API_PARTIAL")
         _ensure_target_rows(raw, target, "MARKET_DAILY_API_PARTIAL")
+        _ensure_expected_ticker_coverage(raw, expected, ticker_column="ts_code", code="MARKET_DAILY_API_PARTIAL")
+        cleaned = clean_daily_snapshot(raw, source="tushare_daily")
+        _ensure_target_rows(cleaned, target, "MARKET_DAILY_CLEAN_EMPTY")
+        _ensure_expected_ticker_coverage(cleaned, expected, ticker_column="ticker", code="MARKET_DAILY_API_PARTIAL")
     except ContractError:
         raise
     except Exception as exc:
         raise ContractError("MARKET_DAILY_API_FAILED", type(exc).__name__) from exc
     fetched_at = time.monotonic()
     try:
-        cleaned = clean_daily_snapshot(raw, source="tushare_daily")
-        _ensure_target_rows(cleaned, target, "MARKET_DAILY_CLEAN_EMPTY")
         raw_path = context.settings.paths.raw_dir / "daily_snapshot" / str(target.year) / f"{target.isoformat()}_Astock_tushare.csv"
         canonical_path = context.settings.paths.canonical_dir / "daily_market_snapshot" / f"{target.isoformat()}.csv"
         _atomic_csv(raw, raw_path)
@@ -661,7 +784,12 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
                 rows_written=rows,
                 location="settings.paths.duckdb_path",
                 completed=True,
-                detail={"target_date": target.isoformat(), "raw_snapshot": str(raw_path), "canonical_snapshot": str(canonical_path)},
+                detail={
+                    "target_date": target.isoformat(),
+                    "expected_tickers": len(expected),
+                    "raw_snapshot": str(raw_path),
+                    "canonical_snapshot": str(canonical_path),
+                },
             ),
         ),
     )
@@ -671,13 +799,16 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
     target = _target_date(context)
     started = time.monotonic()
     try:
+        expected = _expected_market_output_tickers(context, target, error_code="DAILY_BASIC_COVERAGE_UNAVAILABLE")
         raw = get_tushare_pro(settings=context.settings).daily_basic(trade_date=target.strftime("%Y%m%d"))
         if raw is None or raw.empty:
             raise ContractError("DAILY_BASIC_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "close"), "DAILY_BASIC_API_PARTIAL")
         _ensure_target_rows(raw, target, "DAILY_BASIC_API_PARTIAL")
+        _ensure_expected_ticker_coverage(raw, expected, ticker_column="ts_code", code="DAILY_BASIC_API_PARTIAL")
         cleaned = clean_daily_basic(raw)
         _ensure_target_rows(cleaned, target, "DAILY_BASIC_CLEAN_EMPTY")
+        _ensure_expected_ticker_coverage(cleaned, expected, ticker_column="ticker", code="DAILY_BASIC_API_PARTIAL")
     except ContractError:
         raise
     except Exception as exc:
@@ -702,7 +833,7 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
                 rows_written=rows,
                 location="settings.paths.duckdb_path",
                 completed=True,
-                detail={"target_date": target.isoformat()},
+                detail={"target_date": target.isoformat(), "expected_tickers": len(expected)},
             ),
         ),
     )
@@ -715,11 +846,13 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
         connection = _connect(context, read_only=True)
         try:
             expected = {
-                row[0]
+                normalize_ticker(row[0])
                 for row in connection.execute(
                     "SELECT ticker FROM daily_market_snapshot WHERE trade_date = ?", [target]
                 ).fetchall()
             }
+            if not expected:
+                raise ContractError("ADJ_FACTOR_API_PARTIAL", f"no market_daily_update tickers for {target.isoformat()}")
             previous = dict(
                 connection.execute(
                     """
@@ -742,7 +875,7 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
             raise ContractError("ADJ_FACTOR_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "adj_factor"), "ADJ_FACTOR_API_PARTIAL")
         _ensure_target_rows(raw, target, "ADJ_FACTOR_API_PARTIAL")
-        received = set(raw["ts_code"].astype(str))
+        received = {normalize_ticker(value) for value in raw["ts_code"].dropna().astype(str)}
         missing = sorted(expected - received)
         if missing:
             raise ContractError("ADJ_FACTOR_API_PARTIAL", f"missing {len(missing)} target tickers")
@@ -760,7 +893,7 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
         raise ContractError("ADJ_FACTOR_API_FAILED", type(exc).__name__) from exc
     fetched_at = time.monotonic()
     try:
-        rows, database_seconds = _upsert_frame(context, ADJ_FACTOR_CHANGES, changes)
+        rows, database_seconds = _replace_target_date(context, ADJ_FACTOR_CHANGES, changes, target)
     except Exception as exc:
         raise ContractError("ADJ_FACTOR_WRITE_FAILED", type(exc).__name__) from exc
     return BusinessExecution.success(
@@ -842,11 +975,22 @@ _EASTMONEY_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://quote.eastmoney.com/ztb/detail",
 }
+_EASTMONEY_PAGE_SIZE = 200
 
 
-def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> list[dict[str, Any]]:
+def _eastmoney_date(value: Any) -> str:
+    return str(value).replace("-", "")
+
+
+def _fetch_eastmoney_pool_page(
+    endpoint: str,
+    target: date,
+    *,
+    sort: str,
+    page_index: int,
+) -> tuple[list[dict[str, Any]], int]:
     parameters = (
-        f"ut={_EASTMONEY_UT}&dpt={_EASTMONEY_DPT}&Pageindex=0&pagesize=200"
+        f"ut={_EASTMONEY_UT}&dpt={_EASTMONEY_DPT}&Pageindex={page_index}&pagesize={_EASTMONEY_PAGE_SIZE}"
         f"&sort={sort}&date={target.strftime('%Y%m%d')}"
     )
     request = urllib.request.Request(f"{_EASTMONEY_BASE}/{endpoint}?{parameters}", headers=_EASTMONEY_HEADERS)
@@ -858,9 +1002,61 @@ def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> list[dic
     if payload.get("rc") != 0:
         raise ContractError("ZT_DT_POOL_API_FAILED", f"eastmoney rc={payload.get('rc')}")
     data = payload.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("pool", []), list):
+    if not isinstance(data, dict) or "pool" not in data or not isinstance(data["pool"], list):
         raise ContractError("ZT_DT_POOL_API_PARTIAL", "response does not contain a pool list")
-    return data.get("pool", [])
+    if _eastmoney_date(data.get("date")) != target.strftime("%Y%m%d"):
+        raise ContractError(
+            "ZT_DT_POOL_API_PARTIAL",
+            f"response date {data.get('date')!r} does not match {target.isoformat()}",
+        )
+    total = data.get("total")
+    if isinstance(total, bool):
+        raise ContractError("ZT_DT_POOL_API_PARTIAL", "response total must be a non-negative integer")
+    try:
+        total = int(total)
+    except (TypeError, ValueError) as exc:
+        raise ContractError("ZT_DT_POOL_API_PARTIAL", "response does not contain an integer total") from exc
+    if total < 0:
+        raise ContractError("ZT_DT_POOL_API_PARTIAL", "response total must be non-negative")
+    return data["pool"], total
+
+
+def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> tuple[list[dict[str, Any]], int]:
+    """Fetch every reported page and prove the response matches its total."""
+
+    records, total = _fetch_eastmoney_pool_page(endpoint, target, sort=sort, page_index=0)
+    requests = 1
+    if total == 0:
+        if records:
+            raise ContractError("ZT_DT_POOL_API_PARTIAL", "zero total response contains pool records")
+        return [], requests
+    if not records:
+        raise ContractError("ZT_DT_POOL_API_PARTIAL", "non-zero total response has an empty first page")
+
+    all_records = list(records)
+    page_index = 1
+    while len(all_records) < total:
+        page, page_total = _fetch_eastmoney_pool_page(endpoint, target, sort=sort, page_index=page_index)
+        requests += 1
+        if page_total != total:
+            raise ContractError(
+                "ZT_DT_POOL_API_PARTIAL",
+                f"page {page_index} total {page_total} does not match first-page total {total}",
+            )
+        if not page:
+            raise ContractError(
+                "ZT_DT_POOL_API_PARTIAL",
+                f"page {page_index} is empty before reported total {total}",
+            )
+        all_records.extend(page)
+        page_index += 1
+
+    if len(all_records) != total:
+        raise ContractError(
+            "ZT_DT_POOL_API_PARTIAL",
+            f"reported total {total} does not match {len(all_records)} returned records",
+        )
+    return all_records, requests
 
 
 def _pool_price(value: Any) -> float | None:
@@ -937,8 +1133,8 @@ def execute_zt_dt_pool_daily(context: PipelineRunContext) -> BusinessExecution:
     target = _target_date(context)
     started = time.monotonic()
     try:
-        zt_records = _fetch_eastmoney_pool("getTopicZTPool", target, sort="fbt:asc")
-        dt_records = _fetch_eastmoney_pool("getTopicDTPool", target, sort="fund:asc")
+        zt_records, zt_requests = _fetch_eastmoney_pool("getTopicZTPool", target, sort="fbt:asc")
+        dt_records, dt_requests = _fetch_eastmoney_pool("getTopicDTPool", target, sort="fund:asc")
         zt = _zt_frame(zt_records, target)
         dt = _dt_frame(dt_records, target)
         _validate_pool_rows(zt, "zt_pool")
@@ -961,8 +1157,8 @@ def execute_zt_dt_pool_daily(context: PipelineRunContext) -> BusinessExecution:
             assets_processed=len(assets),
             database_write_seconds=database_seconds,
             stages={"fetch": fetched_at - started, "database_write": database_seconds},
-            api_requests=2,
-            batches=2,
+            api_requests=zt_requests + dt_requests,
+            batches=zt_requests + dt_requests,
         ),
         outputs=(
             OutputResult(
@@ -1141,11 +1337,28 @@ MARKET_DAILY_UPDATE = register_pipeline(
                 structure_check=_market_history_structure,
                 freshness=FreshnessContract(
                     check_id="market_history_freshness",
-                    target_date_semantics="history cannot extend past the current target",
+                    target_date_semantics="only rows strictly before the target are eligible for enrichment; future rows are ignored",
                     maximum_lag_trading_days=1,
                     non_trading_day_policy=NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
                     error_code="MARKET_HISTORY_STALE",
                     checker=_market_history_freshness,
+                ),
+            ),
+            InputContract(
+                input_id="market_coverage_universe",
+                kind=InputKind.TABLE,
+                source="quant_db.stock_info active listings minus quant_db.suspend_d target-date non-resume suspensions",
+                required_fields=("ticker", "is_active", "list_date", "delist_date", "trade_date"),
+                target_date_semantics="active listings on target date, excluding explicit target-date non-resume suspension events, are the required Tushare daily coverage set",
+                missing_error_code="MARKET_COVERAGE_STRUCTURE_MISSING",
+                structure_check=_market_coverage_structure,
+                freshness=FreshnessContract(
+                    check_id="market_coverage_target_freshness",
+                    target_date_semantics="the coverage universe is evaluated for the resolved open target date before the provider request",
+                    maximum_lag_trading_days=0,
+                    non_trading_day_policy=NonTradingDayPolicy.REJECT,
+                    error_code="MARKET_COVERAGE_STALE",
+                    checker=_market_coverage_freshness,
                 ),
             ),
         ),
@@ -1171,10 +1384,10 @@ MARKET_DAILY_UPDATE = register_pipeline(
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="5,000-equity target-day response, one prior-day history scan, one target-date replacement",
+            normal_budget_seconds=60.0,
+            warning_threshold_seconds=30.0,
+            hard_timeout_seconds=120,
+            benchmark_scope="internal: 5,000-equity target-day processing; end-to-end: one configured Tushare request and one target-date replacement",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#market_daily_update",
         ),
     )
@@ -1193,6 +1406,24 @@ DAILY_BASIC_UPDATE = register_pipeline(
         parameters=(),
         inputs=(
             _calendar_input(),
+            InputContract(
+                input_id="market_daily_update_output",
+                kind=InputKind.UPSTREAM_PIPELINE,
+                source="market_daily_update / quant_db.daily_market_snapshot",
+                required_fields=("trade_date", "ticker", "close"),
+                target_date_semantics="daily_basic must cover every ticker in the same target-date formal market snapshot",
+                missing_error_code="MARKET_DAILY_INPUT_STRUCTURE_MISSING",
+                structure_check=_market_target_structure,
+                freshness=FreshnessContract(
+                    check_id="market_daily_target_freshness",
+                    target_date_semantics="same target trading date is required",
+                    maximum_lag_trading_days=0,
+                    non_trading_day_policy=NonTradingDayPolicy.REJECT,
+                    error_code="MARKET_DAILY_INPUT_STALE",
+                    checker=_market_target_freshness,
+                ),
+                upstream_pipeline_id="market_daily_update",
+            ),
             _external_input(
                 "tushare_daily_basic",
                 "tushare.pro.daily_basic(trade_date=YYYYMMDD)",
@@ -1208,7 +1439,7 @@ DAILY_BASIC_UPDATE = register_pipeline(
                 _non_empty_completion(DAILY_BASIC.name, "DAILY_BASIC_COMPLETION_MISSING"),
             ),
         ),
-        dependencies=(),
+        dependencies=("market_daily_update",),
         resource_locks=(QUANT_DB_WRITER,),
         idempotency=_idempotency(
             "daily_basic",
@@ -1222,10 +1453,10 @@ DAILY_BASIC_UPDATE = register_pipeline(
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="5,000-equity target-day daily_basic response and one target-date replacement",
+            normal_budget_seconds=60.0,
+            warning_threshold_seconds=30.0,
+            hard_timeout_seconds=120,
+            benchmark_scope="internal: 5,000-equity target-day processing; end-to-end: one configured Tushare request and one target-date replacement",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#daily_basic_update",
         ),
     )
@@ -1236,7 +1467,7 @@ ADJ_FACTOR_DAILY = register_pipeline(
     PipelineContract(
         pipeline_id="adj_factor_daily",
         name="A-share daily adjustment-factor changes",
-        description="Validates the market target universe and upserts only adjustment-factor change points for one date.",
+        description="Validates the market target universe and atomically replaces the complete calculated adjustment-factor change-point set for one date.",
         contract_version="1.1.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_adj_factor_daily,
@@ -1273,7 +1504,7 @@ ADJ_FACTOR_DAILY = register_pipeline(
             _output(
                 "adj_factor_changes",
                 ADJ_FACTOR_CHANGES,
-                WriteMode.UPSERT,
+                WriteMode.REPLACE_TARGET_DATE,
                 _allowed_empty_completion(ADJ_FACTOR_CHANGES.name, "ADJ_FACTOR_COMPLETION_MISSING"),
                 allow_empty=True,
             ),
@@ -1282,20 +1513,20 @@ ADJ_FACTOR_DAILY = register_pipeline(
         resource_locks=(QUANT_DB_WRITER,),
         idempotency=_idempotency(
             "adj_factor_changes",
-            mode="same target date upserts the same ticker/date change keys without duplicate change points",
-            recovery="rerun after failure; no target-date deletion is needed because unchanged factors have no output row",
+            mode="same target date deletes then replaces the complete calculated change-point set, including an empty set",
+            recovery="rerun after failure; the transaction removes obsolete target-date change points and never changes other dates",
         ),
         transaction=TransactionContract(
             mode=TransactionMode.DATABASE_TRANSACTION,
-            boundary="all target-date adj_factor_changes upserts",
-            failure_visibility="all target-date change-point upserts commit together or none are visible",
+            boundary="the complete calculated adj_factor_changes set for one target date",
+            failure_visibility="target-date deletion and replacement commit together or the prior target set remains visible",
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="5,000 target market tickers, one full target-date adjustment response, one set-based change comparison",
+            normal_budget_seconds=60.0,
+            warning_threshold_seconds=30.0,
+            hard_timeout_seconds=120,
+            benchmark_scope="internal: 5,000 target tickers and set-based change replacement; end-to-end: one configured Tushare request",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#adj_factor_daily",
         ),
     )
@@ -1337,10 +1568,10 @@ INDEX_DAILY_UPDATE = register_pipeline(
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="four complete provider histories filtered to one target date and one four-row upsert transaction",
+            normal_budget_seconds=120.0,
+            warning_threshold_seconds=60.0,
+            hard_timeout_seconds=240,
+            benchmark_scope="internal: four provider histories filtered to one date; end-to-end: four external index requests and one four-row upsert",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#index_daily_update",
         ),
     )
@@ -1402,10 +1633,10 @@ ZT_DT_POOL_DAILY = register_pipeline(
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="one target date, two Eastmoney responses, and an atomic replacement of up to 400 pool rows",
+            normal_budget_seconds=120.0,
+            warning_threshold_seconds=60.0,
+            hard_timeout_seconds=300,
+            benchmark_scope="internal: 400 pool rows and dual-table replacement; end-to-end: all pages for two Eastmoney pools with a 15-second request timeout",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#zt_dt_pool_daily",
         ),
     )
@@ -1454,10 +1685,10 @@ SUSPEND_D_INGEST = register_pipeline(
         ),
         execution=_execution(),
         performance=PerformanceBudget(
-            normal_budget_seconds=2.0,
-            warning_threshold_seconds=1.0,
-            hard_timeout_seconds=60,
-            benchmark_scope="one target-date suspend_d response and one replacement of up to 5,000 suspension event rows",
+            normal_budget_seconds=60.0,
+            warning_threshold_seconds=30.0,
+            hard_timeout_seconds=120,
+            benchmark_scope="internal: 5,000 suspension rows and replacement; end-to-end: one configured Tushare request",
             baseline_source="docs/QRP产品蓝图v1.1/13_基础数据Pipeline性能基线.md#suspend_d_ingest",
         ),
     )
