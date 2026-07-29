@@ -10,6 +10,7 @@ from uuid import uuid4
 from .contract_validation import validate_contracts
 from .contracts import PipelineContract, PipelineInvocation, PipelineResult
 from .execution import execute_pipeline_contract
+from .registry import PipelineRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,8 @@ class ContractTestHarness:
     contract: PipelineContract
     settings: object
     scheduled_for: datetime = datetime(2026, 1, 2, tzinfo=UTC)
+    dependency_contracts: tuple[PipelineContract, ...] = ()
+    registry: PipelineRegistry | None = None
 
     def run(
         self,
@@ -27,7 +30,10 @@ class ContractTestHarness:
         parameter_overrides: Mapping[str, object] | None = None,
         attempt: int = 1,
     ) -> PipelineResult:
-        validate_contracts((self.contract,))
+        contracts = self.registry.all() if self.registry is not None else (*self.dependency_contracts, self.contract)
+        if self.contract not in contracts:
+            raise ValueError("test harness registry must contain the contract under test")
+        validate_contracts(contracts)
         return execute_pipeline_contract(
             self.contract,
             PipelineInvocation(

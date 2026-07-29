@@ -19,7 +19,12 @@ if TYPE_CHECKING:
 
 
 class ContractError(ValueError):
-    """Raised when a contract executor cannot form a valid run result."""
+    """A stable contract error code with optional diagnostic detail."""
+
+    def __init__(self, code: str, detail: str | None = None) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(code)
 
 
 class PipelineKind(StrEnum):
@@ -87,11 +92,14 @@ class TargetWindow:
         single_date = self.target_date is not None
         date_range = self.start_date is not None or self.end_date is not None
         if single_date == date_range:
-            raise ContractError("target window must contain either target_date or start_date/end_date")
+            raise ContractError(
+                "INVALID_TARGET_WINDOW",
+                "target window must contain either target_date or start_date/end_date",
+            )
         if date_range and (self.start_date is None or self.end_date is None):
-            raise ContractError("target date range requires both start_date and end_date")
+            raise ContractError("INVALID_TARGET_WINDOW", "target date range requires both start_date and end_date")
         if self.start_date is not None and self.end_date is not None and self.start_date > self.end_date:
-            raise ContractError("target date range start_date must not be after end_date")
+            raise ContractError("INVALID_TARGET_WINDOW", "target date range start_date must not be after end_date")
 
     @classmethod
     def for_date(cls, target_date: date) -> "TargetWindow":
@@ -573,16 +581,16 @@ def parse_parameter_overrides(
 
     definitions = {item.name: item for item in contract.parameters}
     if len(definitions) != len(contract.parameters):
-        raise ContractError("DUPLICATE_PARAMETER_DEFINITION")
+        raise ContractError("DUPLICATE_PARAMETER_DEFINITION", "parameter names must be unique")
     unknown = set(raw_values) - set(definitions)
     if unknown:
-        raise ContractError("UNKNOWN_PARAMETER")
+        raise ContractError("UNKNOWN_PARAMETER", ", ".join(sorted(unknown)))
     parsed: dict[str, Any] = {}
     for definition in contract.parameters:
         if definition.name in raw_values:
             parsed[definition.name] = _parse_parameter_value(definition, raw_values[definition.name])
         elif definition.required:
-            raise ContractError("REQUIRED_PARAMETER_MISSING")
+            raise ContractError("REQUIRED_PARAMETER_MISSING", definition.name)
         else:
             parsed[definition.name] = _parse_parameter_value(definition, definition.default)
     return parsed
@@ -613,8 +621,8 @@ def _parse_parameter_value(definition: ParameterContract, value: Any) -> Any:
                 return date.fromisoformat(value)
             raise ValueError
     except (TypeError, ValueError) as exc:
-        raise ContractError("INVALID_PARAMETER") from exc
-    raise ContractError("UNKNOWN_PARAMETER_TYPE")
+        raise ContractError("INVALID_PARAMETER", definition.name) from exc
+    raise ContractError("UNKNOWN_PARAMETER_TYPE", definition.name)
 
 
 def _describe_parameter_value(value: Any) -> Any:

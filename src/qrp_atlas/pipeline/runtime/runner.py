@@ -92,6 +92,7 @@ class PipelineRunner:
         peak_rss_kb = [0]
         process: subprocess.Popen[bytes] | None = None
         result_payload: Mapping[str, object] | None = None
+        result_path: Path | None = None
 
         def report_heartbeat_failure(reason: str) -> None:
             with heartbeat_failure_lock:
@@ -133,7 +134,6 @@ class PipelineRunner:
                     "QRP_PIPELINE_ATTEMPT": str(claimed.attempt),
                 }
             )
-            result_path: Path | None = None
             if definition.requires_structured_result:
                 self.runtime_paths.results_dir.mkdir(parents=True, exist_ok=True)
                 result_path = self.runtime_paths.results_dir / f"{claimed.run_id}.json"
@@ -225,6 +225,8 @@ class PipelineRunner:
             except Exception as exc:
                 status = PipelineStatus.FAILED
                 error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"
+        if definition.requires_structured_result:
+            self._remove_transient_result(result_path)
         return self.store.finish_run(
             claimed.run_id,
             status=status,
@@ -271,6 +273,18 @@ class PipelineRunner:
         if payload.get("status") not in {"SUCCESS", "FAILED", "NOOP"}:
             return None, "STRUCTURED_RESULT_INVALID_STATUS"
         return payload, None
+
+    @staticmethod
+    def _remove_transient_result(result_path: Path | None) -> None:
+        """A result JSON is IPC only; durable history belongs in runtime SQLite."""
+
+        if result_path is None:
+            return
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            # Result persistence/status is authoritative even if best-effort file cleanup fails.
+            pass
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:

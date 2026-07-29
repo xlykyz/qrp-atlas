@@ -1,13 +1,10 @@
-"""Explicit catalog of formal Pipeline contract modules.
+"""Explicit catalog of production-admitted Pipeline contract modules.
 
-Existing pipelines intentionally do not appear here until they pass the complete
-formal contract and public acceptance suite.  The example proves the interface
-without being selected for deployment.
+It remains empty until a real Pipeline passes the complete formal contract and
+public acceptance suite.  Examples must never be added here.
 """
 
 from __future__ import annotations
 
 
-CONTRACT_MODULES: tuple[str, ...] = (
-    "qrp_atlas.pipeline.contract_template",
-)
+CONTRACT_MODULES: tuple[str, ...] = ()

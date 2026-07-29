@@ -179,7 +179,7 @@
 | `diagnostics` | 稳定错误码、等级、无凭据消息和结构化细节。 |
 | `noop_reason` | 仅允许 NOOP 时的明确原因。 |
 
-runtime 把该 JSON 结果写到其独立 SQLite 的 `pipeline_result` 表，并和 `pipeline_run` 的日志、状态、lease 历史关联。runtime 的进程层成功状态表示受控 executor 已返回成功或 NOOP；业务 NOOP 的真实语义保留在结构化结果中。
+runtime 把该 JSON 结果写到其独立 SQLite 的 `pipeline_result` 表，并和 `pipeline_run` 的日志、状态、lease 历史关联。`runtime/results/<run_id>.json` 仅是 executor 到 runner 的一次性 IPC 文件：runner 完成读取和持久化尝试后立即删除，无论结果有效、无效还是落库失败；SQLite 中的 `pipeline_result` 是唯一需要保留的结构化结果。runtime 的进程层成功状态表示受控 executor 已返回成功或 NOOP；业务 NOOP 的真实语义保留在结构化结果中。
 
 ## 4. 统一生命周期
 
@@ -227,7 +227,7 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-pipeline validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务。当前既有 Pipeline 均未被加入正式 catalog；这不是例外路径，而是因为它们尚未完成完整合同改造，不能进入 QRP 正式调度。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前 `CONTRACT_MODULES` 为空，`validate-contracts` 合法返回 `0`；既有 Pipeline 尚未完成完整合同改造，不能被默认 CLI 发现或进入 QRP 正式调度。
 
 ## 7. 公共测试规则
 
@@ -238,7 +238,7 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 3. 输入和 freshness：正常输入、表/文件/字段缺失、过期数据、上游失败、外部 API 不完整。
 4. 输出和 completion：正常、允许/禁止空结果、部分输出、重复键、completion 缺失、事务中断和 staging 失败。
 5. 幂等和恢复：同日重跑、失败后重跑、中断恢复、无重复写入、历史不丢失、无半成品可见。
-6. Runtime 集成：scheduler record、依赖阻塞、claim、overlap、资源锁、timeout、retry、heartbeat、lease 回收和结果 SQLite 落库。
+6. Runtime 集成：scheduler record、依赖阻塞、claim、overlap、资源锁、timeout、retry、heartbeat、lease 回收、结果缺失/损坏/身份不一致、状态不一致、持久化失败、旧 Definition 兼容和结果 SQLite 落库。
 7. 性能：标准规模基准、数据量指标、耗时记录、扫描范围、复杂度不退化和预算超限检测。
 
 可复用的基础工具在 `qrp_atlas.pipeline.testing.ContractTestHarness` 和 `assert_contract_result_matches_context`。模板专项测试在 `tests/pipeline/test_pipeline_contract.py`，并且不连接市场数据库或外部服务。

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
-import re
 
 from .contracts import (
     BusinessExecution,
@@ -87,7 +86,7 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
 
         business = contract.executor(context)
         if not isinstance(business, BusinessExecution):
-            raise ContractError("pipeline executor must return BusinessExecution")
+            raise ContractError("INVALID_EXECUTOR_RETURN", "executor must return BusinessExecution")
         _validate_business_execution(contract, business)
         diagnostics = business.diagnostics
         if business.status is ResultStatus.FAILED:
@@ -147,7 +146,6 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
             diagnostics=diagnostics + _performance_diagnostics(contract, started),
         )
     except ContractError as exc:
-        code = str(exc)
         return _failure_result(
             invocation,
             target_window,
@@ -158,9 +156,10 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
             completion_checks=completion_checks,
             business=business,
             diagnostic=PipelineDiagnostic(
-                code=code if re.fullmatch(r"[A-Z][A-Z0-9_]*", code) else "INVALID_CONTRACT_EXECUTION",
+                code=exc.code,
                 level=DiagnosticLevel.ERROR,
                 message="formal Pipeline contract rejected the execution",
+                detail={"contract_error_detail": exc.detail} if exc.detail else {},
             ),
             contract=contract,
         )
@@ -220,7 +219,7 @@ def _run_check(check: ContractCheck, context: PipelineRunContext, *, fallback_co
 
 def _validate_business_execution(contract: PipelineContract, business: BusinessExecution) -> None:
     if business.status is ResultStatus.NOOP and not business.noop_reason:
-        raise ContractError("NOOP result requires a reason")
+        raise ContractError("NOOP_REASON_REQUIRED", "NOOP result requires a reason")
     if business.status is ResultStatus.SUCCESS:
         output_ids = [item.output_id for item in business.outputs]
         if len(output_ids) != len(set(output_ids)):
@@ -229,13 +228,13 @@ def _validate_business_execution(contract: PipelineContract, business: BusinessE
         expected_ids = {item.output_id for item in contract.outputs}
         missing = expected_ids - set(by_id)
         if missing:
-            raise ContractError("MISSING_OUTPUT_RESULT")
+            raise ContractError("MISSING_OUTPUT_RESULT", ", ".join(sorted(missing)))
         unexpected = set(by_id) - expected_ids
         if unexpected:
-            raise ContractError("UNKNOWN_OUTPUT_RESULT")
+            raise ContractError("UNKNOWN_OUTPUT_RESULT", ", ".join(sorted(unexpected)))
         incomplete = [item.output_id for item in business.outputs if not item.completed]
         if incomplete:
-            raise ContractError("INCOMPLETE_OUTPUT_RESULT")
+            raise ContractError("INCOMPLETE_OUTPUT_RESULT", ", ".join(sorted(incomplete)))
         if any(item.rows_written < 0 for item in business.outputs):
             raise ContractError("INVALID_OUTPUT_METRICS")
         if business.metrics.rows_written != sum(item.rows_written for item in business.outputs):
@@ -249,7 +248,7 @@ def _validate_business_execution(contract: PipelineContract, business: BusinessE
             if not output.allow_empty and by_id[output.output_id].rows_written == 0
         ]
         if empty_disallowed:
-            raise ContractError(f"EMPTY_OUTPUT_NOT_ALLOWED: {', '.join(sorted(empty_disallowed))}")
+            raise ContractError("EMPTY_OUTPUT_NOT_ALLOWED", ", ".join(sorted(empty_disallowed)))
     numeric_values = (
         business.metrics.rows_read,
         business.metrics.rows_written,

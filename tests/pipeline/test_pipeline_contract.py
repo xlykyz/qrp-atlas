@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from qrp_atlas.config.settings import AppSettings
-from qrp_atlas.pipeline.contract_template import CONTRACT_TEMPLATE
+from qrp_atlas.pipeline.examples.contract_template import CONTRACT_TEMPLATE_EXAMPLE as CONTRACT_TEMPLATE
 from qrp_atlas.pipeline.contract_validation import ContractValidationError, validate_contracts
 from qrp_atlas.pipeline.contracts import (
     BusinessExecution,
@@ -114,6 +114,20 @@ def test_invalid_explicit_trade_date_returns_stable_failure(tmp_path: Path) -> N
     assert result.diagnostics[-1].code == "TARGET_DATE_OVERRIDE_INVALID"
 
 
+def test_empty_output_keeps_its_stable_error_code_and_detail(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(rows_written=0),
+            outputs=(OutputResult("fixture_output", 0, "tmp_path / contract-template", True),),
+        )
+
+    result = ContractTestHarness(replace(CONTRACT_TEMPLATE, executor=executor), settings(tmp_path)).run()
+
+    assert result.status is ResultStatus.FAILED
+    assert result.diagnostics[-1].code == "EMPTY_OUTPUT_NOT_ALLOWED"
+    assert result.diagnostics[-1].detail == {"contract_error_detail": "fixture_output"}
+
+
 def test_contract_owns_parameter_parsing_and_rejects_unknown_values(tmp_path: Path) -> None:
     observed: list[object] = []
 
@@ -153,6 +167,19 @@ def test_dependency_cycles_and_missing_dependencies_fail_closed() -> None:
     missing = replace(CONTRACT_TEMPLATE, pipeline_id="missing_dependency", dependencies=("not_registered",))
     with pytest.raises(ContractValidationError, match="missing dependencies"):
         validate_contracts((missing,))
+
+
+def test_harness_validates_dependency_contracts_with_the_contract_under_test(tmp_path: Path) -> None:
+    upstream = replace(CONTRACT_TEMPLATE, pipeline_id="upstream_pipeline")
+    downstream = replace(CONTRACT_TEMPLATE, pipeline_id="downstream_pipeline", dependencies=("upstream_pipeline",))
+
+    result = ContractTestHarness(
+        downstream,
+        settings(tmp_path),
+        dependency_contracts=(upstream,),
+    ).run()
+
+    assert result.status is ResultStatus.NOOP
 
 
 def test_top_level_dag_cannot_repeat_atomic_writes() -> None:
@@ -209,32 +236,17 @@ def test_deployment_selection_has_only_identity_enabled_and_schedule(tmp_path: P
         load_contract_selections(selections)
 
 
-def test_cli_run_uses_runtime_claim_and_persists_structured_result(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_default_registry_is_empty_and_cli_cannot_run_the_template(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
-    monkeypatch.setenv("QRP_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("QRP_DATA_DIR", str(tmp_path / "data"))
-
-    assert pipeline_cli(
-        [
-            "--runtime-dir",
-            str(runtime_dir),
-            "run",
-            "contract_template_example",
-            "--trade-date",
-            "2026-07-29",
-        ]
-    ) == 0
-    output = capsys.readouterr().out
-    assert '"status": "NOOP"' in output
-    runs = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3").list_runs()
-    assert len(runs) == 1
-    assert runs[0].status.value == "SUCCESS"
-    result = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3").get_result(runs[0].run_id)
-    assert result is not None
-    assert result["status"] == "NOOP"
-    assert result["target_window"]["target_date"] == "2026-07-29"
+    assert pipeline_cli(["validate-contracts"]) == 0
+    assert capsys.readouterr().out == "valid contracts: 0\n"
+    assert pipeline_cli(["list-contracts"]) == 0
+    assert capsys.readouterr().out == ""
+    assert pipeline_cli(["--runtime-dir", str(runtime_dir), "run", "contract_template_example"]) == 2
+    assert "unknown formal pipeline" in capsys.readouterr().err
+    assert not (runtime_dir / "pipeline_runtime.sqlite3").exists()
 
 
 def test_cli_contract_validation_is_config_free(capsys) -> None:
     assert pipeline_cli(["validate-contracts"]) == 0
-    assert capsys.readouterr().out == "valid contracts: 1\n"
+    assert capsys.readouterr().out == "valid contracts: 0\n"
