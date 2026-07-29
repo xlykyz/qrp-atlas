@@ -7,10 +7,12 @@ import sqlite3
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .models import (
+    OverlapPolicy,
     PipelineDefinition,
     PipelineRun,
     PipelineStatus,
@@ -20,6 +22,24 @@ from .models import (
 
 
 _STATUS_SQL = ", ".join(f"'{status.value}'" for status in PipelineStatus)
+
+
+class RunClaimFailure(RuntimeError):
+    """A fail-closed reason returned by the atomic runner claim operation."""
+
+    def __init__(self, code: str, detail: str | None = None) -> None:
+        self.code = code
+        self.detail = detail
+        message = code if detail is None else f"{code}: {detail}"
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class SchedulerCursor:
+    scheduler_id: str
+    last_scanned_at: datetime
+    created_at: datetime
+    updated_at: datetime
 
 
 def utc_now() -> datetime:
@@ -129,6 +149,12 @@ class PipelineRuntimeStore:
                 );
                 CREATE INDEX IF NOT EXISTS resource_lock_expiry_idx
                     ON resource_lock(lease_expires_at);
+                CREATE TABLE IF NOT EXISTS scheduler_cursor (
+                    scheduler_id TEXT PRIMARY KEY,
+                    last_scanned_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
         finally:
@@ -207,35 +233,137 @@ class PipelineRuntimeStore:
         if status not in {PipelineStatus.PENDING, PipelineStatus.BLOCKED, PipelineStatus.SKIPPED}:
             raise ValueError("scheduled runs must start as PENDING, BLOCKED, or SKIPPED")
         self.initialize()
-        scheduled_text = _timestamp(scheduled_at)
         now = utc_now()
-        run_id = str(uuid.uuid4())
         with self._transaction() as connection:
-            cursor = connection.execute(
-                """
-                INSERT OR IGNORE INTO pipeline_run (
-                    run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
-                    timed_out, trigger_type, error_summary, created_at
-                ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
-                """,
-                [
-                    run_id,
-                    definition.pipeline_id,
-                    definition.definition_version,
-                    scheduled_text,
-                    status.value,
-                    trigger_type,
-                    error_summary,
-                    _timestamp(now),
-                ],
+            return self._create_scheduled_run_in_transaction(
+                connection,
+                definition,
+                scheduled_at=scheduled_at,
+                trigger_type=trigger_type,
+                status=status,
+                error_summary=error_summary,
+                created_at=now,
             )
+
+    def _create_scheduled_run_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        definition: PipelineDefinition,
+        *,
+        scheduled_at: datetime,
+        trigger_type: str,
+        status: PipelineStatus,
+        error_summary: str | None,
+        created_at: datetime,
+    ) -> tuple[PipelineRun, bool]:
+        scheduled_text = _timestamp(scheduled_at)
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO pipeline_run (
+                run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
+                timed_out, trigger_type, error_summary, created_at
+            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+            """,
+            [
+                str(uuid.uuid4()),
+                definition.pipeline_id,
+                definition.definition_version,
+                scheduled_text,
+                status.value,
+                trigger_type,
+                error_summary,
+                _timestamp(created_at),
+            ],
+        )
+        row = connection.execute(
+            "SELECT * FROM pipeline_run WHERE pipeline_id = ? AND scheduled_at = ? AND attempt = 1",
+            [definition.pipeline_id, scheduled_text],
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("failed to create or retrieve scheduled run")
+        return self._run_from_row(row), cursor.rowcount == 1
+
+    def get_scheduler_cursor(self, scheduler_id: str) -> SchedulerCursor | None:
+        self.initialize()
+        connection = self._connect()
+        try:
             row = connection.execute(
-                "SELECT * FROM pipeline_run WHERE pipeline_id = ? AND scheduled_at = ? AND attempt = 1",
-                [definition.pipeline_id, scheduled_text],
+                "SELECT * FROM scheduler_cursor WHERE scheduler_id = ?", [scheduler_id]
             ).fetchone()
             if row is None:
-                raise RuntimeError("failed to create or retrieve scheduled run")
-            return self._run_from_row(row), cursor.rowcount == 1
+                return None
+            last_scanned_at = _parse_timestamp(row["last_scanned_at"])
+            created_at = _parse_timestamp(row["created_at"])
+            updated_at = _parse_timestamp(row["updated_at"])
+            if last_scanned_at is None or created_at is None or updated_at is None:
+                raise RuntimeError("scheduler cursor contains an invalid timestamp")
+            return SchedulerCursor(
+                scheduler_id=row["scheduler_id"],
+                last_scanned_at=last_scanned_at,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+        finally:
+            connection.close()
+
+    def commit_scheduler_scan(
+        self,
+        *,
+        scheduler_id: str,
+        expected_last_scanned_at: datetime | None,
+        scanned_through_at: datetime,
+        candidates: Iterable[tuple[PipelineDefinition, datetime, PipelineStatus, str | None]],
+        now: datetime | None = None,
+    ) -> list[PipelineRun] | None:
+        """Persist a complete scan interval and cursor advance in one transaction.
+
+        ``None`` means another scheduler committed a newer cursor after this
+        scanner calculated its interval.  Callers must reread the cursor and
+        replay from it; no partially scanned interval is committed here.
+        """
+
+        self.initialize()
+        timestamp = now or utc_now()
+        expected_text = _timestamp(expected_last_scanned_at)
+        scanned_text = _timestamp(scanned_through_at)
+        with self._transaction() as connection:
+            current = connection.execute(
+                "SELECT last_scanned_at FROM scheduler_cursor WHERE scheduler_id = ?", [scheduler_id]
+            ).fetchone()
+            current_text = current["last_scanned_at"] if current is not None else None
+            if current_text != expected_text:
+                return None
+            created: list[PipelineRun] = []
+            for definition, scheduled_at, status, error_summary in candidates:
+                run, inserted = self._create_scheduled_run_in_transaction(
+                    connection,
+                    definition,
+                    scheduled_at=scheduled_at,
+                    trigger_type="SCHEDULED",
+                    status=status,
+                    error_summary=error_summary,
+                    created_at=timestamp,
+                )
+                if inserted:
+                    created.append(run)
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO scheduler_cursor(scheduler_id, last_scanned_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [scheduler_id, scanned_text, _timestamp(timestamp), _timestamp(timestamp)],
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE scheduler_cursor
+                    SET last_scanned_at = ?, updated_at = ?
+                    WHERE scheduler_id = ? AND last_scanned_at = ?
+                    """,
+                    [scanned_text, _timestamp(timestamp), scheduler_id, expected_text],
+                )
+            return created
 
     def latest_run_before(self, pipeline_id: str, scheduled_at: datetime) -> PipelineRun | None:
         connection = self._connect()
@@ -278,23 +406,50 @@ class PipelineRuntimeStore:
         self,
         run_id: str,
         *,
+        pipeline_id: str,
+        definition_version: str,
+        overlap_policy: OverlapPolicy,
         resource_locks: Iterable[str],
         stdout_path: Path,
         stderr_path: Path,
         lease_seconds: int,
         now: datetime | None = None,
-    ) -> PipelineRun | None:
-        """Atomically claim a pending run and acquire all requested resource leases."""
+    ) -> PipelineRun:
+        """Atomically validate, claim, and lease one PENDING run.
+
+        Every rejection raises :class:`RunClaimFailure` while the surrounding
+        ``BEGIN IMMEDIATE`` transaction rolls back. Scheduler eligibility
+        checks are only advisory; this is the final concurrency gate.
+        """
 
         self.initialize()
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         timestamp = now or utc_now()
         expires = timestamp + timedelta(seconds=lease_seconds)
         lock_names = tuple(sorted(set(resource_locks)))
         with self._transaction() as connection:
-            connection.execute("DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
-            if row is None or PipelineStatus(row["status"]) is not PipelineStatus.PENDING:
-                return None
+            if row is None:
+                raise RunClaimFailure("RUN_NOT_FOUND", run_id)
+            if PipelineStatus(row["status"]) is not PipelineStatus.PENDING:
+                raise RunClaimFailure("RUN_NOT_PENDING", PipelineStatus(row["status"]).value)
+            if row["pipeline_id"] != pipeline_id:
+                raise RunClaimFailure("PIPELINE_ID_MISMATCH", row["pipeline_id"])
+            if row["definition_version"] != definition_version:
+                raise RunClaimFailure("DEFINITION_VERSION_MISMATCH", row["definition_version"])
+            if overlap_policy is OverlapPolicy.FORBID:
+                overlap = connection.execute(
+                    """
+                    SELECT run_id FROM pipeline_run
+                    WHERE pipeline_id = ? AND status = ? AND run_id != ?
+                    LIMIT 1
+                    """,
+                    [pipeline_id, PipelineStatus.RUNNING.value, run_id],
+                ).fetchone()
+                if overlap is not None:
+                    raise RunClaimFailure("OVERLAP_FORBIDDEN", overlap["run_id"])
+            connection.execute("DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             if lock_names:
                 placeholders = ", ".join("?" for _ in lock_names)
                 conflict = connection.execute(
@@ -302,7 +457,7 @@ class PipelineRuntimeStore:
                     list(lock_names),
                 ).fetchone()
                 if conflict is not None:
-                    return None
+                    raise RunClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict["resource_name"])
             assert_status_transition(PipelineStatus.PENDING, PipelineStatus.RUNNING)
             connection.execute(
                 """
@@ -491,13 +646,13 @@ class PipelineRuntimeStore:
                 connection.execute(
                     """
                     UPDATE pipeline_run
-                    SET status = ?, finished_at = ?, error_summary = COALESCE(error_summary, ?)
+                    SET status = ?, finished_at = ?, error_summary = ?
                     WHERE run_id = ?
                     """,
                     [
                         PipelineStatus.FAILED.value,
                         _timestamp(timestamp),
-                        "stale heartbeat recovered by pipeline runtime",
+                        "stale heartbeat recovery",
                         row["run_id"],
                     ],
                 )

@@ -21,7 +21,7 @@ from qrp_atlas.pipeline.runtime.models import (
 )
 from qrp_atlas.pipeline.runtime.runner import PipelineRunner, PipelineRuntimePaths
 from qrp_atlas.pipeline.runtime.scheduler import PipelineScheduler
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore
+from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore, RunClaimFailure
 
 
 def instant(hour: int = 0, minute: int = 0) -> datetime:
@@ -138,7 +138,7 @@ def test_cli_uses_only_explicit_temporary_runtime(tmp_path: Path, capsys) -> Non
     assert pipeline_cli(prefix + ["status", "--pipeline-id", "cli-sample"]) == 0
     assert pipeline_cli(prefix + ["cleanup", "--stale-after-seconds", "60"]) == 0
     assert (runtime_dir / "pipeline_runtime.sqlite3").exists()
-    assert "99" not in capsys.readouterr().out
+    assert '"exit_code": 99' not in capsys.readouterr().out
 
 
 def test_scheduler_same_schedule_point_is_idempotent_and_thread_safe(tmp_path: Path, store: PipelineRuntimeStore) -> None:
@@ -172,6 +172,9 @@ def test_scheduler_dependencies_and_blocked_status(tmp_path: Path, store: Pipeli
     upstream_run = scheduler.scan(now=instant(0))[0]
     assert store.claim_run(
         upstream_run.run_id,
+        pipeline_id=upstream.pipeline_id,
+        definition_version=upstream.definition_version,
+        overlap_policy=upstream.overlap_policy,
         resource_locks=(),
         stdout_path=tmp_path / "u.out",
         stderr_path=tmp_path / "u.err",
@@ -197,6 +200,9 @@ def test_scheduler_dependencies_and_blocked_status(tmp_path: Path, store: Pipeli
     failed, _ = store.create_scheduled_run(upstream, scheduled_at=instant(1, 30))
     assert store.claim_run(
         failed.run_id,
+        pipeline_id=upstream.pipeline_id,
+        definition_version=upstream.definition_version,
+        overlap_policy=upstream.overlap_policy,
         resource_locks=(),
         stdout_path=tmp_path / "f.out",
         stderr_path=tmp_path / "f.err",
@@ -222,6 +228,9 @@ def test_scheduler_dependencies_and_blocked_status(tmp_path: Path, store: Pipeli
     recovered, _ = store.create_scheduled_run(upstream, scheduled_at=instant(1, 45))
     assert store.claim_run(
         recovered.run_id,
+        pipeline_id=upstream.pipeline_id,
+        definition_version=upstream.definition_version,
+        overlap_policy=upstream.overlap_policy,
         resource_locks=(),
         stdout_path=tmp_path / "r.out",
         stderr_path=tmp_path / "r.err",
@@ -258,25 +267,35 @@ def test_overlap_and_resource_leases(tmp_path: Path, store: PipelineRuntimeStore
     run_b, _ = store.create_scheduled_run(writer_b, scheduled_at=instant(4))
     assert store.claim_run(
         run_a.run_id,
+        pipeline_id=writer_a.pipeline_id,
+        definition_version=writer_a.definition_version,
+        overlap_policy=writer_a.overlap_policy,
         resource_locks=writer_a.resource_locks,
         stdout_path=tmp_path / "a.out",
         stderr_path=tmp_path / "a.err",
         lease_seconds=1,
         now=instant(3),
     )
-    assert store.claim_run(
-        run_b.run_id,
-        resource_locks=writer_b.resource_locks,
-        stdout_path=tmp_path / "b.out",
-        stderr_path=tmp_path / "b.err",
-        lease_seconds=1,
-        now=instant(3),
-    ) is None
+    with pytest.raises(RunClaimFailure, match="RESOURCE_LOCK_UNAVAILABLE"):
+        store.claim_run(
+            run_b.run_id,
+            pipeline_id=writer_b.pipeline_id,
+            definition_version=writer_b.definition_version,
+            overlap_policy=writer_b.overlap_policy,
+            resource_locks=writer_b.resource_locks,
+            stdout_path=tmp_path / "b.out",
+            stderr_path=tmp_path / "b.err",
+            lease_seconds=1,
+            now=instant(3),
+        )
     stale_runs, expired_locks = store.recover_stale(stale_after_seconds=3600, now=instant(3) + timedelta(seconds=2))
     assert stale_runs == 0
     assert expired_locks == 1
     assert store.claim_run(
         run_b.run_id,
+        pipeline_id=writer_b.pipeline_id,
+        definition_version=writer_b.definition_version,
+        overlap_policy=writer_b.overlap_policy,
         resource_locks=writer_b.resource_locks,
         stdout_path=tmp_path / "b.out",
         stderr_path=tmp_path / "b.err",
@@ -309,6 +328,9 @@ def test_cleanup_marks_zombie_running_run_failed(tmp_path: Path, store: Pipeline
     run, _ = store.create_scheduled_run(item, scheduled_at=instant())
     assert store.claim_run(
         run.run_id,
+        pipeline_id=item.pipeline_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
         resource_locks=item.resource_locks,
         stdout_path=tmp_path / "z.out",
         stderr_path=tmp_path / "z.err",

@@ -129,14 +129,40 @@ def load_definitions(path: str | Path = DEFAULT_DEFINITIONS_PATH) -> tuple[Pipel
     if len(ids) != len(definitions):
         raise DefinitionValidationError("pipeline_id values must be unique")
     for definition in definitions:
-        if definition.pipeline_id in definition.dependencies:
-            raise DefinitionValidationError(f"{definition.pipeline_id} cannot depend on itself")
         missing = set(definition.dependencies) - ids
         if missing:
             raise DefinitionValidationError(
                 f"{definition.pipeline_id} references missing dependencies: {', '.join(sorted(missing))}"
             )
+    _validate_acyclic_dependencies(definitions)
     return definitions
+
+
+def _validate_acyclic_dependencies(definitions: tuple[PipelineDefinition, ...]) -> None:
+    """Reject every directed dependency cycle with a readable cycle path."""
+
+    graph = {definition.pipeline_id: definition.dependencies for definition in definitions}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    path: list[str] = []
+
+    def visit(pipeline_id: str) -> None:
+        if pipeline_id in visiting:
+            cycle_start = path.index(pipeline_id)
+            cycle = path[cycle_start:] + [pipeline_id]
+            raise DefinitionValidationError(f"pipeline dependency cycle detected: {' -> '.join(cycle)}")
+        if pipeline_id in visited:
+            return
+        visiting.add(pipeline_id)
+        path.append(pipeline_id)
+        for dependency_id in graph[pipeline_id]:
+            visit(dependency_id)
+        path.pop()
+        visiting.remove(pipeline_id)
+        visited.add(pipeline_id)
+
+    for pipeline_id in graph:
+        visit(pipeline_id)
 
 
 def definitions_by_id(definitions: tuple[PipelineDefinition, ...]) -> dict[str, PipelineDefinition]:

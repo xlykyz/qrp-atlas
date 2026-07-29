@@ -48,35 +48,29 @@ class PipelineRunner:
         heartbeat_interval_seconds: float = 5.0,
         lease_seconds: int = 30,
     ) -> None:
-        if heartbeat_interval_seconds <= 0 or lease_seconds <= 0:
-            raise ValueError("heartbeat interval and lease duration must be positive")
+        if not lease_seconds > heartbeat_interval_seconds > 0:
+            raise ValueError("lease_seconds must be greater than heartbeat_interval_seconds, both positive")
         self.store = store
         self.runtime_paths = runtime_paths
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.lease_seconds = lease_seconds
 
-    def run(self, run_id: str, definition: PipelineDefinition) -> PipelineRun | None:
-        """Claim and execute one PENDING record, returning None when not claimable."""
+    def run(self, run_id: str, definition: PipelineDefinition) -> PipelineRun:
+        """Atomically claim and execute one PENDING record."""
 
-        existing = self.store.get_run(run_id)
-        if existing is None:
-            raise KeyError(f"unknown pipeline run {run_id}")
-        if definition.pipeline_id != existing.pipeline_id:
-            raise ValueError("definition does not match pipeline run")
-        if existing.definition_version != definition.definition_version:
-            raise ValueError("definition version does not match pipeline run")
         self.runtime_paths.logs_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = self.runtime_paths.logs_dir / f"{run_id}.stdout.log"
         stderr_path = self.runtime_paths.logs_dir / f"{run_id}.stderr.log"
         claimed = self.store.claim_run(
             run_id,
+            pipeline_id=definition.pipeline_id,
+            definition_version=definition.definition_version,
+            overlap_policy=definition.overlap_policy,
             resource_locks=definition.resource_locks,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             lease_seconds=self.lease_seconds,
         )
-        if claimed is None:
-            return None
         return self._execute_claimed(claimed, definition)
 
     def _execute_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
@@ -87,17 +81,38 @@ class PipelineRunner:
         started = time.monotonic()
         before_usage = self._children_usage()
         stop_heartbeat = threading.Event()
+        heartbeat_failed = threading.Event()
+        heartbeat_failure_reason: list[str] = []
+        heartbeat_failure_lock = threading.Lock()
         peak_rss_kb = [0]
         process: subprocess.Popen[bytes] | None = None
 
-        def heartbeat_loop() -> None:
-            while not stop_heartbeat.wait(self.heartbeat_interval_seconds):
-                self.store.heartbeat(claimed.run_id, lease_seconds=self.lease_seconds)
-                if process is not None:
-                    peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
+        def report_heartbeat_failure(reason: str) -> None:
+            with heartbeat_failure_lock:
+                if not heartbeat_failed.is_set():
+                    heartbeat_failure_reason.append(reason)
+                    heartbeat_failed.set()
 
-        heartbeater = threading.Thread(target=heartbeat_loop, name=f"pipeline-heartbeat-{claimed.run_id}", daemon=True)
-        heartbeater.start()
+        def heartbeat_loop() -> None:
+            try:
+                while not stop_heartbeat.wait(self.heartbeat_interval_seconds):
+                    try:
+                        healthy = self.store.heartbeat(claimed.run_id, lease_seconds=self.lease_seconds)
+                    except BaseException as exc:  # Never lose lease-health failures in a daemon thread.
+                        report_heartbeat_failure(f"heartbeat update raised {type(exc).__name__}: {exc}")
+                        return
+                    if not healthy:
+                        report_heartbeat_failure("heartbeat update returned False")
+                        return
+                    if process is not None:
+                        peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
+            except BaseException as exc:  # pragma: no cover - defensive protection for thread failures.
+                report_heartbeat_failure(f"heartbeat thread raised {type(exc).__name__}: {exc}")
+            finally:
+                if not stop_heartbeat.is_set() and not heartbeat_failed.is_set():
+                    report_heartbeat_failure("heartbeat thread exited unexpectedly")
+
+        heartbeater: threading.Thread | None = None
         status = PipelineStatus.FAILED
         exit_code: int | None = None
         timed_out = False
@@ -118,14 +133,38 @@ class PipelineRunner:
                     popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
                 process = subprocess.Popen(list(definition.command), **popen_kwargs)
                 peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
-                try:
-                    exit_code = process.wait(timeout=definition.timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    error_summary = f"pipeline exceeded timeout_seconds={definition.timeout_seconds}"
-                    self._terminate_process_group(process)
-                    exit_code = process.wait()
-            if timed_out:
+                heartbeater = threading.Thread(
+                    target=heartbeat_loop,
+                    name=f"pipeline-heartbeat-{claimed.run_id}",
+                    daemon=True,
+                )
+                heartbeater.start()
+                deadline = (
+                    time.monotonic() + definition.timeout_seconds
+                    if definition.timeout_seconds is not None
+                    else None
+                )
+                poll_interval = min(0.25, max(0.05, self.heartbeat_interval_seconds / 2))
+                while True:
+                    if heartbeat_failed.is_set():
+                        error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
+                        self._terminate_process_group(process)
+                        exit_code = process.wait()
+                        break
+                    exit_code = process.poll()
+                    if exit_code is not None:
+                        break
+                    remaining = None if deadline is None else deadline - time.monotonic()
+                    if remaining is not None and remaining <= 0:
+                        timed_out = True
+                        error_summary = f"pipeline exceeded timeout_seconds={definition.timeout_seconds}"
+                        self._terminate_process_group(process)
+                        exit_code = process.wait()
+                        break
+                    heartbeat_failed.wait(timeout=poll_interval if remaining is None else min(poll_interval, remaining))
+            if heartbeat_failed.is_set():
+                status = PipelineStatus.FAILED
+            elif timed_out:
                 status = PipelineStatus.TIMED_OUT
             elif exit_code == 0:
                 status = PipelineStatus.SUCCESS
@@ -136,7 +175,8 @@ class PipelineRunner:
             error_summary = f"failed to start process: {type(exc).__name__}: {exc}"
         finally:
             stop_heartbeat.set()
-            heartbeater.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+            if heartbeater is not None:
+                heartbeater.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
             if process is not None:
                 peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
         after_usage = self._children_usage()

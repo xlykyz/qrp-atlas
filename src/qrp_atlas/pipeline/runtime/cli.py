@@ -14,8 +14,15 @@ from qrp_atlas.config.settings import AppSettings, ConfigError
 from .definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
 from .models import PipelineStatus
 from .runner import PipelineRunner, PipelineRuntimePaths
-from .scheduler import PipelineScheduler
-from .store import PipelineRuntimeStore
+from .scheduler import (
+    DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    DEFAULT_LEASE_SECONDS,
+    DEFAULT_MAX_CATCH_UP_MINUTES,
+    DEFAULT_STALE_AFTER_SECONDS,
+    DEFAULT_SCHEDULER_ID,
+    PipelineScheduler,
+)
+from .store import PipelineRuntimeStore, RunClaimFailure
 
 
 def _parse_instant(value: str) -> datetime:
@@ -41,9 +48,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan = subparsers.add_parser("scan", help="create due PENDING/BLOCKED run records; never executes commands")
     scan.add_argument("--definitions", type=Path, default=DEFAULT_DEFINITIONS_PATH)
     scan.add_argument("--at", type=_parse_instant, help="ISO-8601 scan instant with timezone")
+    scan.add_argument("--scheduler-id", default=DEFAULT_SCHEDULER_ID)
+    scan.add_argument("--max-catch-up-minutes", type=int, default=DEFAULT_MAX_CATCH_UP_MINUTES)
+    scan.add_argument("--heartbeat-interval-seconds", type=float, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
+    scan.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
+    scan.add_argument("--stale-after-seconds", type=int, default=DEFAULT_STALE_AFTER_SECONDS)
     run = subparsers.add_parser("run-pending", help="execute one pending record from an explicit manifest")
     run.add_argument("--definitions", type=Path, required=True)
     run.add_argument("--run-id", help="specific pending run id; defaults to the oldest pending record")
+    run.add_argument("--heartbeat-interval-seconds", type=float, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
+    run.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
     runs = subparsers.add_parser("status", help="show isolated Pipeline runtime records")
     runs.add_argument("--pipeline-id")
     runs.add_argument("--status", choices=[status.value for status in PipelineStatus])
@@ -92,6 +106,13 @@ def _print_run(run) -> None:
     )
 
 
+def _print_error(reason: str, *, detail: str | None = None) -> None:
+    payload: dict[str, str] = {"status": "ERROR", "reason": reason}
+    if detail is not None:
+        payload["detail"] = detail
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -130,25 +151,71 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             return 0
         if args.command == "scan":
-            created = PipelineScheduler(store, definitions).scan(now=args.at)
-            for run in created:
+            result = PipelineScheduler(
+                store,
+                definitions,
+                scheduler_id=args.scheduler_id,
+                max_catch_up_minutes=args.max_catch_up_minutes,
+                heartbeat_interval_seconds=args.heartbeat_interval_seconds,
+                lease_seconds=args.lease_seconds,
+                stale_after_seconds=args.stale_after_seconds,
+            ).scan(now=args.at)
+            for run in result:
                 _print_run(run)
+            print(
+                json.dumps(
+                    {
+                        "status": "CATCH_UP_LIMITED" if result.catch_up_limited else "SCANNED",
+                        "scheduler_id": result.scheduler_id,
+                        "requested_start_at": (
+                            result.requested_start_at.isoformat() if result.requested_start_at else None
+                        ),
+                        "scan_start_at": result.scan_start_at.isoformat() if result.scan_start_at else None,
+                        "scanned_through_at": result.scanned_through_at.isoformat(),
+                        "created_runs": len(result),
+                        "stale_runs_recovered": result.stale_runs_recovered,
+                        "expired_locks_reclaimed": result.expired_locks_reclaimed,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
             return 0
         if args.command == "run-pending":
-            pending = store.list_runs(status=PipelineStatus.PENDING, limit=1_000)
-            target = next((run for run in pending if run.run_id == args.run_id), None) if args.run_id else None
-            if target is None and args.run_id is None:
+            store.initialize()
+            if args.run_id is not None:
+                target = store.get_run(args.run_id)
+                if target is None:
+                    _print_error("RUN_NOT_FOUND", detail=args.run_id)
+                    return 2
+                if target.status is not PipelineStatus.PENDING:
+                    _print_error("RUN_NOT_PENDING", detail=target.status.value)
+                    return 2
+            else:
+                pending = store.list_runs(status=PipelineStatus.PENDING, limit=1_000)
                 target = min(pending, key=lambda run: (run.scheduled_at, run.attempt), default=None)
-            if target is None:
-                print("no matching pending run", file=sys.stderr)
-                return 1
+                if target is None:
+                    print(json.dumps({"status": "IDLE", "reason": "NO_PENDING_RUN"}, sort_keys=True))
+                    return 0
             definition = definitions_by_id(definitions).get(target.pipeline_id)
             if definition is None:
-                print(f"definition missing for pipeline {target.pipeline_id}", file=sys.stderr)
+                _print_error("DEFINITION_MISSING", detail=target.pipeline_id)
                 return 2
-            result = PipelineRunner(store, paths).run(target.run_id, definition)
-            if result is None:
-                print("run was not claimable", file=sys.stderr)
+            if definition.definition_version != target.definition_version:
+                _print_error(
+                    "DEFINITION_VERSION_MISMATCH",
+                    detail=f"run={target.definition_version}, definition={definition.definition_version}",
+                )
+                return 2
+            try:
+                result = PipelineRunner(
+                    store,
+                    paths,
+                    heartbeat_interval_seconds=args.heartbeat_interval_seconds,
+                    lease_seconds=args.lease_seconds,
+                ).run(target.run_id, definition)
+            except RunClaimFailure as exc:
+                _print_error(exc.code, detail=exc.detail)
                 return 1
             _print_run(result)
             return 0 if result.status is PipelineStatus.SUCCESS else 1
