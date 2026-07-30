@@ -658,7 +658,7 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
     started = time.monotonic()
     try:
         context.execution_control.check()
-        client = get_tushare_pro(settings=context.settings)
+        client = get_tushare_pro(settings=context.settings, execution_control=context.execution_control)
         raw = client.daily(trade_date=target.strftime("%Y%m%d"))
         context.execution_control.check()
         if raw is None or raw.empty:
@@ -733,7 +733,9 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
     try:
         context.execution_control.check()
         expected = _expected_market_output_tickers(context, target, error_code="DAILY_BASIC_COVERAGE_UNAVAILABLE")
-        raw = get_tushare_pro(settings=context.settings).daily_basic(trade_date=target.strftime("%Y%m%d"))
+        raw = get_tushare_pro(
+            settings=context.settings, execution_control=context.execution_control
+        ).daily_basic(trade_date=target.strftime("%Y%m%d"))
         context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("DAILY_BASIC_API_EMPTY", target.isoformat())
@@ -805,7 +807,9 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
             )
         finally:
             connection.close()
-        raw = get_tushare_pro(settings=context.settings).adj_factor(trade_date=target.strftime("%Y%m%d"))
+        raw = get_tushare_pro(
+            settings=context.settings, execution_control=context.execution_control
+        ).adj_factor(trade_date=target.strftime("%Y%m%d"))
         context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("ADJ_FACTOR_API_EMPTY", target.isoformat())
