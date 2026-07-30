@@ -80,16 +80,6 @@ def initialise_database(item: AppSettings, *, include_target: bool = True) -> No
             "INSERT INTO trading_calendar (trade_date, is_open, year, month, quarter) VALUES (?, ?, ?, ?, ?)",
             [(value, is_open, value.year, value.month, (value.month - 1) // 3 + 1) for value, is_open in rows],
         )
-        connection.executemany(
-            """
-            INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active)
-            VALUES (?, ?, ?, ?, ?, TRUE)
-            """,
-            [
-                ("000001.SZ", "Ping An", "SZ", "MAIN", PREVIOUS),
-                ("600000.SH", "Shanghai Pudong", "SH", "MAIN", PREVIOUS),
-            ],
-        )
     finally:
         connection.close()
 
@@ -238,6 +228,8 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         "suspend_d_ingest",
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
+    assert MARKET_DAILY_UPDATE.dependencies == ()
+    assert all("stock_info" not in item.source and "suspend_d" not in item.source for item in MARKET_DAILY_UPDATE.inputs)
     assert ADJ_FACTOR_DAILY.dependencies == ("market_daily_update",)
     assert DAILY_BASIC_UPDATE.dependencies == ("market_daily_update",)
 
@@ -351,46 +343,30 @@ def test_daily_basic_replaces_target_without_duplicate_or_historical_loss(tmp_pa
         connection.close()
 
 
-@pytest.mark.parametrize(
-    ("pipeline", "attribute", "seed_market", "error_code"),
-    (
-        (MARKET_DAILY_UPDATE, "daily_frame", False, "MARKET_DAILY_API_PARTIAL"),
-        (DAILY_BASIC_UPDATE, "daily_basic_frame", True, "DAILY_BASIC_API_PARTIAL"),
-    ),
-)
-def test_market_and_daily_basic_reject_a_single_missing_expected_ticker_before_writing(
+def test_daily_basic_rejects_a_single_missing_market_ticker_before_writing(
     tmp_path: Path,
     monkeypatch,
-    pipeline,
-    attribute: str,
-    seed_market: bool,
-    error_code: str,
 ) -> None:
     item = settings(tmp_path)
     initialise_database(item)
-    if seed_market:
-        seed_market_target(item)
+    seed_market_target(item)
     client = FakeTushare()
-    setattr(client, attribute, getattr(client, attribute).iloc[:1].copy())
+    client.daily_basic_frame = client.daily_basic_frame.iloc[:1].copy()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
 
     import qrp_atlas.pipeline.market_data_contracts as subject
 
     write_calls: list[str] = []
-    if pipeline is MARKET_DAILY_UPDATE:
-        monkeypatch.setattr(subject, "_atomic_csv", lambda *_args, **_kwargs: write_calls.append("csv"))
-        monkeypatch.setattr(subject, "_insert_frame", lambda *_args, **_kwargs: write_calls.append("insert"))
-    else:
-        monkeypatch.setattr(subject, "_replace_target_date", lambda *_args, **_kwargs: write_calls.append("replace"))
+    monkeypatch.setattr(subject, "_replace_target_date", lambda *_args, **_kwargs: write_calls.append("replace"))
 
-    result = run(pipeline, item)
+    result = run(DAILY_BASIC_UPDATE, item)
 
     assert result.status is ResultStatus.FAILED
-    assert error_code in diagnostics(result)
+    assert "DAILY_BASIC_API_PARTIAL" in diagnostics(result)
     assert not write_calls
 
 
-def test_market_and_daily_basic_reject_obviously_truncated_responses_but_allow_suspended_and_inactive_stocks(
+def test_market_daily_does_not_infer_coverage_from_stock_info_or_suspend_d(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -398,68 +374,19 @@ def test_market_and_daily_basic_reject_obviously_truncated_responses_but_allow_s
     initialise_database(item)
     connection = duckdb.connect(str(item.paths.duckdb_path))
     try:
-        connection.execute(
-            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["300001.SZ", "Suspended", "SZ", "MAIN", PREVIOUS],
-        )
-        connection.execute(
-            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, FALSE)",
-            ["300002.SZ", "Inactive", "SZ", "MAIN", PREVIOUS],
-        )
-        connection.execute(
-            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["300004.SZ", "Resumed", "SZ", "MAIN", PREVIOUS],
-        )
-        connection.execute(
-            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
-            [TARGET, "300001.SZ", "S"],
-        )
-        connection.execute(
-            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
-            [TARGET, "300004.SZ", "R"],
-        )
+        connection.execute("DROP TABLE stock_info")
+        connection.execute("DROP TABLE suspend_d")
     finally:
         connection.close()
     client = FakeTushare()
-    resumed_market = market_frame().iloc[[0]].copy()
-    resumed_market["ts_code"] = "300004.SZ"
-    resumed_market["close"] = 5.0
-    client.daily_frame = pd.concat((client.daily_frame, resumed_market), ignore_index=True)
-    resumed_basic = daily_basic_frame().iloc[[0]].copy()
-    resumed_basic["ts_code"] = "300004.SZ"
-    resumed_basic["close"] = 5.0
-    client.daily_basic_frame = pd.concat((client.daily_basic_frame, resumed_basic), ignore_index=True)
+    client.daily_frame = client.daily_frame.iloc[:1].copy()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
 
-    normal_market = run(MARKET_DAILY_UPDATE, item)
-    assert normal_market.status is ResultStatus.SUCCESS
-    assert normal_market.metrics.rows_written == 3
-    normal_basic = run(DAILY_BASIC_UPDATE, item)
-    assert normal_basic.status is ResultStatus.SUCCESS
-    assert normal_basic.metrics.rows_written == 3
+    result = run(MARKET_DAILY_UPDATE, item)
 
-    connection = duckdb.connect(str(item.paths.duckdb_path))
-    try:
-        connection.execute(
-            "INSERT INTO stock_info (ticker, name, exchange, market, list_date, is_active) VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["300003.SZ", "Expected", "SZ", "MAIN", PREVIOUS],
-        )
-        connection.execute(
-            "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
-            [TARGET, "300003.SZ", 5.0],
-        )
-    finally:
-        connection.close()
-
-    client.daily_frame = market_frame().iloc[:1].copy()
-    market_partial = run(MARKET_DAILY_UPDATE, item)
-    assert market_partial.status is ResultStatus.FAILED
-    assert "MARKET_DAILY_API_PARTIAL" in diagnostics(market_partial)
-
-    client.daily_basic_frame = daily_basic_frame().iloc[:1].copy()
-    basic_partial = run(DAILY_BASIC_UPDATE, item)
-    assert basic_partial.status is ResultStatus.FAILED
-    assert "DAILY_BASIC_API_PARTIAL" in diagnostics(basic_partial)
+    assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.rows_written == 1
+    assert "MARKET_DAILY_API_PARTIAL" not in diagnostics(result)
 
 
 def test_adj_factor_requires_complete_market_universe_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -952,30 +879,6 @@ def test_equivalent_daily_scale_benchmark_records_metrics_for_all_six_contracts(
             "suspend_type": ["S"] * len(client.daily_frame),
         }
     )
-    connection = duckdb.connect(str(item.paths.duckdb_path))
-    try:
-        connection.execute("DELETE FROM stock_info")
-        connection.register(
-            "benchmark_universe",
-            pd.DataFrame(
-                {
-                    "ticker": client.daily_frame["ts_code"],
-                    "name": ["Benchmark"] * len(client.daily_frame),
-                    "list_date": [PREVIOUS] * len(client.daily_frame),
-                }
-            ),
-        )
-        try:
-            connection.execute(
-                """
-                INSERT INTO stock_info (ticker, name, list_date, is_active)
-                SELECT ticker, name, list_date, TRUE FROM benchmark_universe
-                """
-            )
-        finally:
-            connection.unregister("benchmark_universe")
-    finally:
-        connection.close()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
     monkeypatch.setattr(
         "qrp_atlas.pipeline.market_data_contracts.ak.stock_zh_index_daily",

@@ -29,7 +29,6 @@ from qrp_atlas.contracts import (
     DT_POOL,
     INDEX_DAILY,
     SUSPEND_D,
-    STOCK_INFO,
     TRADING_CALENDAR,
     ZT_POOL,
     align_to_schema,
@@ -320,83 +319,6 @@ def _market_target_freshness(context: PipelineRunContext) -> CheckResult:
             target_date=target.isoformat(),
         )
     return CheckResult.success("market_daily_target_freshness", target_date=target.isoformat(), rows=count)
-
-
-def _market_coverage_structure(context: PipelineRunContext) -> CheckResult:
-    stock_check = _require_table(
-        context,
-        STOCK_INFO.name,
-        ("ticker", "is_active", "list_date", "delist_date"),
-        "MARKET_COVERAGE_STRUCTURE_MISSING",
-    )
-    if not stock_check.passed:
-        return stock_check
-    return _require_table(
-        context,
-        SUSPEND_D.name,
-        ("trade_date", "ticker"),
-        "MARKET_COVERAGE_STRUCTURE_MISSING",
-    )
-
-
-def _market_coverage_freshness(context: PipelineRunContext) -> CheckResult:
-    return _calendar_has_open_date(
-        context,
-        error_code="MARKET_COVERAGE_STALE",
-        check_id="market_coverage_target_freshness",
-    )
-
-
-def _expected_market_tickers(context: PipelineRunContext, target: date) -> set[str]:
-    """Return the explicit target-day universe before requesting provider data.
-
-    Active listings are the expected market population.  A same-day non-resume
-    suspend_d row is an explicit, contract-backed exclusion; inactive,
-    not-yet-listed, and delisted securities are never expected in a daily
-    market response.
-    """
-
-    try:
-        connection = _connect(context, read_only=True)
-        try:
-            active = {
-                normalize_ticker(row[0])
-                for row in connection.execute(
-                    """
-                    SELECT ticker
-                    FROM stock_info
-                    WHERE is_active = TRUE
-                      AND list_date IS NOT NULL
-                      AND list_date <= ?
-                      AND (delist_date IS NULL OR delist_date >= ?)
-                    """,
-                    [target, target],
-                ).fetchall()
-            }
-            suspended = {
-                normalize_ticker(row[0])
-                for row in connection.execute(
-                    """
-                    SELECT DISTINCT ticker
-                    FROM suspend_d
-                    WHERE trade_date = ?
-                      AND upper(coalesce(suspend_type, '')) <> 'R'
-                      AND coalesce(suspend_type, '') NOT LIKE '%复牌%'
-                    """,
-                    [target],
-                ).fetchall()
-            }
-        finally:
-            connection.close()
-    except Exception as exc:
-        raise ContractError("MARKET_DAILY_COVERAGE_UNAVAILABLE", type(exc).__name__) from exc
-    expected = active - suspended
-    if not expected:
-        raise ContractError(
-            "MARKET_DAILY_COVERAGE_UNAVAILABLE",
-            f"no active non-suspended stock_info tickers for {target.isoformat()}",
-        )
-    return expected
 
 
 def _expected_market_output_tickers(context: PipelineRunContext, target: date, *, error_code: str) -> set[str]:
@@ -726,17 +648,16 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
     target = _target_date(context)
     started = time.monotonic()
     try:
-        expected = _expected_market_tickers(context, target)
         client = get_tushare_pro(settings=context.settings)
         raw = client.daily(trade_date=target.strftime("%Y%m%d"))
         if raw is None or raw.empty:
             raise ContractError("MARKET_DAILY_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"), "MARKET_DAILY_API_PARTIAL")
+        # Tushare daily has no authoritative count or tradability field.  Do
+        # not fabricate one from stock_info or unscheduled suspend_d data.
         _ensure_target_rows(raw, target, "MARKET_DAILY_API_PARTIAL")
-        _ensure_expected_ticker_coverage(raw, expected, ticker_column="ts_code", code="MARKET_DAILY_API_PARTIAL")
         cleaned = clean_daily_snapshot(raw, source="tushare_daily")
         _ensure_target_rows(cleaned, target, "MARKET_DAILY_CLEAN_EMPTY")
-        _ensure_expected_ticker_coverage(cleaned, expected, ticker_column="ticker", code="MARKET_DAILY_API_PARTIAL")
     except ContractError:
         raise
     except Exception as exc:
@@ -786,7 +707,6 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
                 completed=True,
                 detail={
                     "target_date": target.isoformat(),
-                    "expected_tickers": len(expected),
                     "raw_snapshot": str(raw_path),
                     "canonical_snapshot": str(canonical_path),
                 },
@@ -1313,7 +1233,11 @@ MARKET_DAILY_UPDATE = register_pipeline(
     PipelineContract(
         pipeline_id="market_daily_update",
         name="A-share daily market snapshot",
-        description="Fetches, cleans, enriches, and atomically replaces one trading date of daily_market_snapshot.",
+        description=(
+            "Fetches, cleans, enriches, and atomically replaces one trading date of daily_market_snapshot. "
+            "Tushare daily has no authoritative target-date total or per-security tradability field, so source "
+            "validation is limited to a non-empty, required-schema, exact-target-date response."
+        ),
         contract_version="1.1.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_market_daily_update,
@@ -1342,23 +1266,6 @@ MARKET_DAILY_UPDATE = register_pipeline(
                     non_trading_day_policy=NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
                     error_code="MARKET_HISTORY_STALE",
                     checker=_market_history_freshness,
-                ),
-            ),
-            InputContract(
-                input_id="market_coverage_universe",
-                kind=InputKind.TABLE,
-                source="quant_db.stock_info active listings minus quant_db.suspend_d target-date non-resume suspensions",
-                required_fields=("ticker", "is_active", "list_date", "delist_date", "trade_date"),
-                target_date_semantics="active listings on target date, excluding explicit target-date non-resume suspension events, are the required Tushare daily coverage set",
-                missing_error_code="MARKET_COVERAGE_STRUCTURE_MISSING",
-                structure_check=_market_coverage_structure,
-                freshness=FreshnessContract(
-                    check_id="market_coverage_target_freshness",
-                    target_date_semantics="the coverage universe is evaluated for the resolved open target date before the provider request",
-                    maximum_lag_trading_days=0,
-                    non_trading_day_policy=NonTradingDayPolicy.REJECT,
-                    error_code="MARKET_COVERAGE_STALE",
-                    checker=_market_coverage_freshness,
                 ),
             ),
         ),
