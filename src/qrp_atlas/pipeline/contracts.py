@@ -10,11 +10,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
-import threading
-import time
 from typing import TYPE_CHECKING, Any
 
-from qrp_atlas.pipeline.runtime.models import OverlapPolicy
+from qrp_atlas.orchestration.execution_control import ExecutionControl
+from qrp_atlas.orchestration.models import OverlapPolicy
 
 if TYPE_CHECKING:
     from qrp_atlas.config.settings import AppSettings
@@ -27,65 +26,6 @@ class ContractError(ValueError):
         self.code = code
         self.detail = detail
         super().__init__(code)
-
-
-@dataclass(slots=True)
-class ExecutionControl:
-    """Cooperative cancellation and deadline state shared by one invocation."""
-
-    deadline: datetime | None = None
-    cancel_event: threading.Event = field(default_factory=threading.Event)
-    deadline_monotonic: float | None = field(default=None, repr=False)
-    _cancel_reason: str | None = field(default=None, init=False, repr=False)
-    _reason_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-
-    def cancel(self, reason: str) -> None:
-        with self._reason_lock:
-            if self._cancel_reason is None:
-                self._cancel_reason = reason[:500]
-            self.cancel_event.set()
-
-    @property
-    def cancel_reason(self) -> str | None:
-        with self._reason_lock:
-            return self._cancel_reason
-
-    def remaining_seconds(self) -> float | None:
-        if self.deadline_monotonic is not None:
-            return max(0.0, self.deadline_monotonic - time.monotonic())
-        if self.deadline is None:
-            return None
-        if self.deadline.tzinfo is None:
-            raise ValueError("execution deadline must be timezone-aware")
-        return max(0.0, (self.deadline - datetime.now(self.deadline.tzinfo)).total_seconds())
-
-    def bounded_timeout(self, requested: float | None = None) -> float | None:
-        """Return a wait/network timeout that cannot exceed this invocation's deadline."""
-
-        remaining = self.remaining_seconds()
-        if requested is not None and requested < 0:
-            raise ValueError("requested timeout must be non-negative")
-        if remaining is None:
-            return requested
-        return remaining if requested is None else min(remaining, requested)
-
-    def wait(self, event: threading.Event, timeout: float | None = None) -> bool:
-        """Wait cooperatively and re-check cancellation/deadline on wake-up."""
-
-        self.check()
-        woke = event.wait(self.bounded_timeout(timeout))
-        self.check()
-        return woke
-
-    def check(self) -> None:
-        """Raise a stable ContractError before unsafe work continues."""
-
-        remaining = self.remaining_seconds()
-        if remaining is not None and remaining <= 0:
-            self.cancel("execution deadline exceeded")
-            raise ContractError("EXECUTION_TIMED_OUT", "execution deadline exceeded")
-        if self.cancel_event.is_set():
-            raise ContractError("EXECUTION_CANCELLED", self.cancel_reason or "execution cancelled")
 
 
 class PipelineKind(StrEnum):

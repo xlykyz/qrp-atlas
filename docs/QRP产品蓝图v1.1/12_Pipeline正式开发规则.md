@@ -26,7 +26,7 @@
 
 ### 2.2 Pipeline runtime
 
-既有 `qrp_atlas.pipeline.runtime` 仍是唯一运行编排基础，负责：
+通用 `qrp_atlas.orchestration` 是 Job 编排基础，负责：
 
 - scheduler 根据 cron 创建运行记录和判断依赖状态；
 - SQLite run record 的 claim、overlap、lease、heartbeat 和 stale recovery；
@@ -34,7 +34,7 @@
 - 子进程执行、timeout、retry、日志、状态和历史；
 - 将正式 Pipeline 的结构化结果写入独立 runtime SQLite。
 
-正式 Contract 不重写 scheduler、锁或 lease。它通过 `runtime.contract_adapter` 映射为既有 `PipelineDefinition`，使 runtime 得到 executor 入口、依赖、锁、timeout、retry、性能预算和新鲜度摘要。
+正式 Contract 不重写 scheduler、锁或 lease。它通过 `qrp_atlas.pipeline.job_adapter` 映射为 `JobDefinition`，使 Orchestration 得到 executor 入口、依赖、锁、timeout、retry、性能预算和新鲜度摘要。
 
 ### 2.3 生产部署
 
@@ -181,7 +181,7 @@
 | `diagnostics` | 稳定错误码、等级、无凭据消息和结构化细节。 |
 | `noop_reason` | 仅允许 NOOP 时的明确原因。 |
 
-runtime 把该 JSON 结果写到其独立 SQLite 的 `pipeline_result` 表，并和 `pipeline_run` 的日志、状态、lease 历史关联。`runtime/results/<run_id>.json` 仅是 executor 到 runner 的一次性 IPC 文件：runner 完成读取和持久化尝试后立即删除，无论结果有效、无效还是落库失败；SQLite 中的 `pipeline_result` 是唯一需要保留的结构化结果。runtime 的进程层成功状态表示受控 executor 已返回成功或 NOOP；业务 NOOP 的真实语义保留在结构化结果中。
+Orchestration 把该 JSON 结果写到其独立 SQLite 的 `job_result` 表，并和 `job_run` 的日志、状态、lease 历史关联。`orchestration/results/<run_id>.json` 仅是 executor 到 runner 的一次性 IPC 文件：runner 完成读取和持久化尝试后立即删除，无论结果有效、无效还是落库失败；SQLite 中的 `job_result` 是唯一需要保留的结构化结果。Orchestration 的进程层成功状态表示受控 executor 已返回成功或 NOOP；业务 NOOP 的真实语义保留在结构化结果中。
 
 ## 4. 统一生命周期
 
@@ -198,20 +198,20 @@ runtime 创建/claim run
 → 源码声明的事务或 staging 原子写入
 → 输出 completion 与质量检查
 → 记录性能与结构化结果
-→ runtime 持久化运行状态和结果
+→ Orchestration 持久化 Job 状态和结果
 ```
 
 正式命令为：
 
 ```bash
-qrp-atlas-pipeline validate-contracts
-qrp-atlas-pipeline list-contracts
-qrp-atlas-pipeline run pipeline_id
-qrp-atlas-pipeline run pipeline_id --trade-date 2026-07-29
-qrp-atlas-pipeline run pipeline_id --set batch_size=500
+qrp-atlas-jobs validate-contracts
+qrp-atlas-jobs list-contracts
+qrp-atlas-jobs run job_id
+qrp-atlas-jobs run job_id --trade-date 2026-07-29
+qrp-atlas-jobs run job_id --set batch_size=500
 ```
 
-`run` 不是绕开 runtime 的脚本快捷方式：它创建独立 runtime run record 后再使用既有 claim、锁、heartbeat、timeout 和结果落库。排程场景使用 `scan`/`run-pending --contract-selections ...`，由合同适配器生成内部 argv；部署不需要也不得手写业务 argv。
+`run` 不是绕开 Orchestration 的脚本快捷方式：它创建独立 Job Run 后再使用既有 claim、锁、heartbeat、timeout 和结果落库。排程场景使用 `serve --contract-selections ...`，由 Pipeline adapter 生成 Job Definition；部署不需要也不得手写业务 argv。
 
 ## 5. 原子任务和顶层 DAG
 
@@ -227,7 +227,7 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 2. 用 `register_pipeline(contract)` 注册；
 3. 将模块名显式加入 `pipeline.contract_catalog.CONTRACT_MODULES`；
 4. 为该合同补充公共验收测试和性能证据；
-5. 通过 `qrp-atlas-pipeline validate-contracts` 后，才可在单独的部署选择清单中引用它。
+5. 通过 `qrp-atlas-jobs validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
 `qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
 

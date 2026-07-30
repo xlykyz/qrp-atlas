@@ -1,4 +1,4 @@
-"""Loading and validation for Git-versioned Pipeline definition manifests."""
+"""Loading and validation for Git-versioned Job definition manifests."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .cron import CronExpression, CronExpressionError
-from .models import OverlapPolicy, PipelineDefinition
+from .models import OverlapPolicy, JobDefinition
 
 
 class DefinitionValidationError(ValueError):
@@ -39,10 +39,12 @@ def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
     return value
 
 
-def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
+def parse_definition(payload: Mapping[str, Any]) -> JobDefinition:
     """Parse one JSON definition without resolving relative working directories."""
 
-    pipeline_id = _required_string(payload.get("pipeline_id"), "pipeline_id")
+    # ``pipeline_id`` is accepted only for pre-existing shadow manifests;
+    # all parsed runtime objects and persisted columns use ``job_id``.
+    job_id = _required_string(payload.get("job_id", payload.get("pipeline_id")), "job_id")
     name = _required_string(payload.get("name"), "name")
     if not isinstance(payload.get("enabled"), bool):
         raise DefinitionValidationError("enabled must be a boolean")
@@ -50,12 +52,12 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     try:
         CronExpression.parse(schedule)
     except CronExpressionError as exc:
-        raise DefinitionValidationError(f"invalid schedule for {pipeline_id}: {exc}") from exc
+        raise DefinitionValidationError(f"invalid schedule for {job_id}: {exc}") from exc
     timezone = _required_string(payload.get("timezone"), "timezone")
     try:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as exc:
-        raise DefinitionValidationError(f"invalid timezone for {pipeline_id}: {timezone}") from exc
+        raise DefinitionValidationError(f"invalid timezone for {job_id}: {timezone}") from exc
     command = _string_tuple(payload.get("command"), "command")
     working_directory_value = payload.get("working_directory")
     if working_directory_value is not None and not isinstance(working_directory_value, str):
@@ -95,8 +97,8 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     manual_execution_allowed = payload.get("manual_execution_allowed", True)
     if not isinstance(manual_execution_allowed, bool):
         raise DefinitionValidationError("manual_execution_allowed must be a boolean")
-    return PipelineDefinition(
-        pipeline_id=pipeline_id,
+    return JobDefinition(
+        job_id=job_id,
         name=name,
         enabled=payload["enabled"],
         schedule=schedule,
@@ -119,7 +121,7 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     )
 
 
-def load_definitions(path: str | Path = DEFAULT_DEFINITIONS_PATH) -> tuple[PipelineDefinition, ...]:
+def load_definitions(path: str | Path = DEFAULT_DEFINITIONS_PATH) -> tuple[JobDefinition, ...]:
     """Load a repository-controlled JSON manifest and validate cross references."""
 
     manifest_path = Path(path)
@@ -137,45 +139,45 @@ def load_definitions(path: str | Path = DEFAULT_DEFINITIONS_PATH) -> tuple[Pipel
     definitions = tuple(parse_definition(entry) for entry in entries if isinstance(entry, dict))
     if len(definitions) != len(entries):
         raise DefinitionValidationError("every definition must be an object")
-    ids = {definition.pipeline_id for definition in definitions}
+    ids = {definition.job_id for definition in definitions}
     if len(ids) != len(definitions):
-        raise DefinitionValidationError("pipeline_id values must be unique")
+        raise DefinitionValidationError("job_id values must be unique")
     for definition in definitions:
         missing = set(definition.dependencies) - ids
         if missing:
             raise DefinitionValidationError(
-                f"{definition.pipeline_id} references missing dependencies: {', '.join(sorted(missing))}"
+                f"{definition.job_id} references missing dependencies: {', '.join(sorted(missing))}"
             )
     _validate_acyclic_dependencies(definitions)
     return definitions
 
 
-def _validate_acyclic_dependencies(definitions: tuple[PipelineDefinition, ...]) -> None:
+def _validate_acyclic_dependencies(definitions: tuple[JobDefinition, ...]) -> None:
     """Reject every directed dependency cycle with a readable cycle path."""
 
-    graph = {definition.pipeline_id: definition.dependencies for definition in definitions}
+    graph = {definition.job_id: definition.dependencies for definition in definitions}
     visiting: set[str] = set()
     visited: set[str] = set()
     path: list[str] = []
 
-    def visit(pipeline_id: str) -> None:
-        if pipeline_id in visiting:
-            cycle_start = path.index(pipeline_id)
-            cycle = path[cycle_start:] + [pipeline_id]
+    def visit(job_id: str) -> None:
+        if job_id in visiting:
+            cycle_start = path.index(job_id)
+            cycle = path[cycle_start:] + [job_id]
             raise DefinitionValidationError(f"pipeline dependency cycle detected: {' -> '.join(cycle)}")
-        if pipeline_id in visited:
+        if job_id in visited:
             return
-        visiting.add(pipeline_id)
-        path.append(pipeline_id)
-        for dependency_id in graph[pipeline_id]:
+        visiting.add(job_id)
+        path.append(job_id)
+        for dependency_id in graph[job_id]:
             visit(dependency_id)
         path.pop()
-        visiting.remove(pipeline_id)
-        visited.add(pipeline_id)
+        visiting.remove(job_id)
+        visited.add(job_id)
 
-    for pipeline_id in graph:
-        visit(pipeline_id)
+    for job_id in graph:
+        visit(job_id)
 
 
-def definitions_by_id(definitions: tuple[PipelineDefinition, ...]) -> dict[str, PipelineDefinition]:
-    return {definition.pipeline_id: definition for definition in definitions}
+def definitions_by_id(definitions: tuple[JobDefinition, ...]) -> dict[str, JobDefinition]:
+    return {definition.job_id: definition for definition in definitions}

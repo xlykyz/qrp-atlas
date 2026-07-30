@@ -1,4 +1,4 @@
-"""Pure dependency planning helpers for the Pipeline command surface."""
+"""Pure dependency planning helpers for the Job command surface."""
 
 from __future__ import annotations
 
@@ -7,25 +7,25 @@ from zoneinfo import ZoneInfo
 
 from .cron import CronExpression
 from .definitions import DefinitionValidationError, definitions_by_id
-from .models import PipelineDefinition
+from .models import JobDefinition
 
 
 def dependency_plan(
-    definitions: tuple[PipelineDefinition, ...], pipeline_id: str, *, include_dependencies: bool = True
-) -> tuple[PipelineDefinition, ...]:
-    """Return a stable topological order ending at ``pipeline_id``.
+    definitions: tuple[JobDefinition, ...], job_id: str, *, include_dependencies: bool = True
+) -> tuple[JobDefinition, ...]:
+    """Return a stable topological order ending at ``job_id``.
 
     Definition loading already rejects invalid graphs.  Keeping this traversal
     independently defensive makes CLI planning safe for programmatic callers.
     """
 
     by_id = definitions_by_id(definitions)
-    if pipeline_id not in by_id:
-        raise DefinitionValidationError(f"unknown pipeline definition: {pipeline_id}")
+    if job_id not in by_id:
+        raise DefinitionValidationError(f"unknown Job definition: {job_id}")
     if not include_dependencies:
-        return (by_id[pipeline_id],)
+        return (by_id[job_id],)
 
-    ordered: list[PipelineDefinition] = []
+    ordered: list[JobDefinition] = []
     visiting: set[str] = set()
     visited: set[str] = set()
 
@@ -36,7 +36,7 @@ def dependency_plan(
             return
         current = by_id.get(current_id)
         if current is None:
-            raise DefinitionValidationError(f"missing pipeline dependency: {current_id}")
+            raise DefinitionValidationError(f"missing Job dependency: {current_id}")
         visiting.add(current_id)
         for dependency_id in current.dependencies:
             visit(dependency_id)
@@ -44,11 +44,11 @@ def dependency_plan(
         visited.add(current_id)
         ordered.append(current)
 
-    visit(pipeline_id)
+    visit(job_id)
     return tuple(ordered)
 
 
-def scheduled_instant_for_target_date(definition: PipelineDefinition, target_date: date) -> datetime:
+def scheduled_instant_for_target_date(definition: JobDefinition, target_date: date) -> datetime:
     """Locate the first configured schedule occurrence for a local business date.
 
     This only maps a user-selected date onto the Definition's declared target
@@ -65,5 +65,5 @@ def scheduled_instant_for_target_date(definition: PipelineDefinition, target_dat
             return current.astimezone(UTC)
         current += timedelta(minutes=1)
     raise DefinitionValidationError(
-        f"{definition.pipeline_id} has no configured schedule occurrence on {target_date.isoformat()}"
+        f"{definition.job_id} has no configured schedule occurrence on {target_date.isoformat()}"
     )

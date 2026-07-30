@@ -1,4 +1,4 @@
-"""Operational CLI for the isolated Pipeline runtime database."""
+"""Operational CLI for the isolated Job runtime database."""
 
 from __future__ import annotations
 
@@ -19,28 +19,28 @@ from qrp_atlas.pipeline.contracts import PipelineInvocation, ResultStatus
 from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.registry import default_registry
 
-from .contract_adapter import (
+from qrp_atlas.pipeline.job_adapter import (
     ContractDeploymentSelection,
     contract_runtime_definition,
     definitions_from_contract_selections,
     load_contract_selections,
     make_in_process_contract_executor,
 )
-from .definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
-from .models import PipelineDefinition, PipelineStatus
-from .planning import dependency_plan, scheduled_instant_for_target_date
-from .result_log import PipelineResultLog, ResultLogConfigurationError
-from .runner import PipelineRunner, PipelineRuntimePaths
-from .scheduler import (
+from qrp_atlas.orchestration.definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
+from qrp_atlas.orchestration.models import JobDefinition, JobStatus
+from qrp_atlas.orchestration.planning import dependency_plan, scheduled_instant_for_target_date
+from qrp_atlas.orchestration.result_log import JobResultLog, ResultLogConfigurationError
+from qrp_atlas.orchestration.runner import JobRunner, JobRuntimePaths
+from qrp_atlas.orchestration.scheduler import (
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     DEFAULT_LEASE_SECONDS,
     DEFAULT_MAX_CATCH_UP_MINUTES,
     DEFAULT_STALE_AFTER_SECONDS,
     DEFAULT_SCHEDULER_ID,
-    PipelineScheduler,
+    JobScheduler,
 )
-from .service import PipelineService, PipelineServiceFatalError
-from .store import PipelineRuntimeStore, RunClaimFailure, utc_now
+from qrp_atlas.orchestration.service import JobService, JobServiceFatalError
+from qrp_atlas.orchestration.store import JobRuntimeStore, JobClaimFailure, utc_now
 
 
 def _parse_instant(value: str) -> datetime:
@@ -68,7 +68,7 @@ def _parse_parameter_assignments(values: Sequence[str]) -> dict[str, str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="qrp-atlas-pipeline")
+    parser = argparse.ArgumentParser(prog="qrp-atlas-jobs")
     parser.add_argument("--env-file", help="explicit QRP environment file")
     parser.add_argument(
         "--runtime-dir",
@@ -99,11 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     listing_alias.add_argument("--definitions", type=Path)
     listing_alias.add_argument("--contract-selections", type=Path)
     show = subparsers.add_parser("show", help="show one registered Pipeline definition and dependencies")
-    show.add_argument("pipeline_id")
+    show.add_argument("job_id")
     show.add_argument("--definitions", type=Path)
     show.add_argument("--contract-selections", type=Path)
     plan = subparsers.add_parser("plan", help="produce a non-executing dependency plan for one Pipeline")
-    plan.add_argument("pipeline_id")
+    plan.add_argument("job_id")
     plan.add_argument("--definitions", type=Path)
     plan.add_argument("--contract-selections", type=Path)
     plan.add_argument("--target-date", type=_parse_trade_date)
@@ -122,14 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id", help="specific pending run id; defaults to the oldest pending record")
     run.add_argument("--heartbeat-interval-seconds", type=float, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
     run.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
-    runs = subparsers.add_parser("status", help="show isolated Pipeline runtime records")
-    runs.add_argument("--pipeline-id")
-    runs.add_argument("--status", choices=[status.value for status in PipelineStatus])
+    runs = subparsers.add_parser("status", help="show isolated Job runtime records")
+    runs.add_argument("--job-id", "--pipeline-id", dest="job_id")
+    runs.add_argument("--status", choices=[status.value for status in JobStatus])
     runs.add_argument("--limit", type=int, default=100)
     runs.add_argument("--include-result", action="store_true")
     runs.add_argument("--run-id")
     latest = subparsers.add_parser("latest", help="show the latest run for one Pipeline")
-    latest.add_argument("pipeline_id")
+    latest.add_argument("job_id")
     latest.add_argument("--include-result", action="store_true")
     cleanup = subparsers.add_parser("cleanup", help="fail stale RUNNING records and reclaim expired leases")
     cleanup.add_argument("--stale-after-seconds", type=int, required=True)
@@ -140,9 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("--execute", action="store_true", help="execute the newly created retry attempt immediately")
     formal_run = subparsers.add_parser(
         "run",
-        help="create and execute one formal Pipeline run by pipeline_id through the existing runtime",
+        help="create and execute one formal Pipeline run by job_id through the existing runtime",
     )
-    formal_run.add_argument("pipeline_id")
+    formal_run.add_argument("job_id")
     formal_run.add_argument("--trade-date", "--target-date", dest="trade_date", type=_parse_trade_date)
     formal_run.add_argument("--set", dest="parameter_assignments", action="append", default=[], metavar="NAME=VALUE")
     formal_run.add_argument("--scheduled-for", type=_parse_instant)
@@ -155,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--definitions", type=Path)
     serve.add_argument("--contract-selections", type=Path)
     serve.add_argument("--scheduler-id", default=DEFAULT_SCHEDULER_ID)
-    serve.add_argument("--service-name", default="pipeline-scheduler")
+    serve.add_argument("--service-name", default="job-scheduler")
     serve.add_argument("--poll-interval-seconds", type=float, default=5.0)
     serve.add_argument("--max-workers", type=int, default=4)
     serve.add_argument("--max-catch-up-minutes", type=int, default=DEFAULT_MAX_CATCH_UP_MINUTES)
@@ -165,18 +165,18 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--once", action="store_true", help="run one service cycle and exit; intended for controlled checks")
     health = subparsers.add_parser("health", help="report runtime database and scheduler-service health")
     health.add_argument("--scheduler-id", default=DEFAULT_SCHEDULER_ID)
-    health.add_argument("--service-name", default="pipeline-scheduler")
+    health.add_argument("--service-name", default="job-scheduler")
     execute_contract = subparsers.add_parser("execute-contract", help=argparse.SUPPRESS)
-    execute_contract.add_argument("pipeline_id")
+    execute_contract.add_argument("job_id")
     return parser
 
 
-def _runtime_paths(args: argparse.Namespace) -> PipelineRuntimePaths:
+def _runtime_paths(args: argparse.Namespace) -> JobRuntimePaths:
     if args.runtime_dir:
-        paths = PipelineRuntimePaths(Path(args.runtime_dir).resolve(strict=False))
+        paths = JobRuntimePaths(Path(args.runtime_dir).resolve(strict=False))
     else:
         settings = AppSettings.load(env_file=args.env_file)
-        paths = PipelineRuntimePaths.from_settings(settings)
+        paths = JobRuntimePaths.from_settings(settings)
     if args.result_log_dir:
         paths = replace(paths, result_logs_dir_override=Path(args.result_log_dir).resolve(strict=False))
     return paths
@@ -185,7 +185,7 @@ def _runtime_paths(args: argparse.Namespace) -> PipelineRuntimePaths:
 def _print_run(run, *, result: object | None = None, submitted_to_service: bool = False) -> None:
     payload = {
         "run_id": run.run_id,
-        "pipeline_id": run.pipeline_id,
+        "job_id": run.job_id,
         "definition_version": run.definition_version,
         "scheduled_at": run.scheduled_at.isoformat(),
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -241,13 +241,13 @@ def _load_definitions_for_args(args: argparse.Namespace, *, require_source: bool
     return load_definitions(DEFAULT_DEFINITIONS_PATH)
 
 
-def _print_definition(definition: PipelineDefinition) -> None:
+def _print_definition(definition: JobDefinition) -> None:
     """Display configuration without exposing environment values."""
 
     print(
         json.dumps(
             {
-                "pipeline_id": definition.pipeline_id,
+                "job_id": definition.job_id,
                 "name": definition.name,
                 "enabled": definition.enabled,
                 "schedule": definition.schedule,
@@ -269,7 +269,7 @@ def _print_definition(definition: PipelineDefinition) -> None:
     )
 
 
-def _formal_runtime_definitions(*, environment: dict[str, str] | None = None) -> tuple[PipelineDefinition, ...]:
+def _formal_runtime_definitions(*, environment: dict[str, str] | None = None) -> tuple[JobDefinition, ...]:
     """Adapt every registered source contract for manual inspection/execution only."""
 
     registry = default_registry()
@@ -285,16 +285,16 @@ def _formal_runtime_definitions(*, environment: dict[str, str] | None = None) ->
 
 
 def _apply_definition_environment(
-    definitions: tuple[PipelineDefinition, ...],
+    definitions: tuple[JobDefinition, ...],
     environment: dict[str, str],
-) -> tuple[PipelineDefinition, ...]:
+) -> tuple[JobDefinition, ...]:
     if not environment:
         return definitions
-    merged: list[PipelineDefinition] = []
+    merged: list[JobDefinition] = []
     for item in definitions:
         merged_environment = {**item.environment, **environment}
         if item.in_process_executor is not None:
-            contract = default_registry().get(item.pipeline_id)
+            contract = default_registry().get(item.job_id)
             item = replace(
                 item,
                 environment=merged_environment,
@@ -309,7 +309,7 @@ def _apply_definition_environment(
     return tuple(merged)
 
 
-def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[str, str]) -> tuple[PipelineDefinition, ...]:
+def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[str, str]) -> tuple[JobDefinition, ...]:
     if args.definitions is not None:
         definitions = _load_definitions_for_args(args, require_source=True)
         if args.parameter_assignments:
@@ -323,24 +323,15 @@ def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[s
     return _formal_runtime_definitions(environment=environment)
 
 
-def _write_result_log(paths: PipelineRuntimePaths, store: PipelineRuntimeStore, run) -> None:
-    PipelineResultLog(paths.result_logs_dir).write(run, store.get_result(run.run_id))
+def _write_result_log(paths: JobRuntimePaths, store: JobRuntimeStore, run) -> None:
+    JobResultLog(paths.result_logs_dir).write(run, store.get_result(run.run_id))
 
 
 def _manual_run_environment(args: argparse.Namespace) -> dict[str, str]:
-    environment: dict[str, str] = {
-        "QRP_PIPELINE_PARAMETER_OVERRIDES": json.dumps(
-            _parse_parameter_assignments(args.parameter_assignments), sort_keys=True
-        )
-    }
-    if args.trade_date is not None:
-        # Formal contracts consume QRP_PIPELINE_TRADE_DATE.  The generic name
-        # lets a repository-controlled argv definition consume the same value.
-        environment["QRP_PIPELINE_TRADE_DATE"] = args.trade_date.isoformat()
-        environment["QRP_PIPELINE_TARGET_DATE"] = args.trade_date.isoformat()
-    if args.env_file:
-        environment["QRP_ENV_FILE"] = args.env_file
-    return environment
+    # Business overrides belong to the durable JobRun invocation context. Do
+    # not close them over in a Definition executor: a dependency would then
+    # observe the target Job's parameters when the service executes the run.
+    return {"QRP_ENV_FILE": args.env_file} if args.env_file else {}
 
 
 def _write_result_atomically(path: Path, payload: dict[str, object]) -> None:
@@ -351,40 +342,43 @@ def _write_result_atomically(path: Path, payload: dict[str, object]) -> None:
 
 
 def _execute_contract_command(args: argparse.Namespace) -> int:
-    run_id = os.environ.get("QRP_PIPELINE_RUN_ID")
-    pipeline_id = os.environ.get("QRP_PIPELINE_ID")
-    scheduled_for = os.environ.get("QRP_PIPELINE_SCHEDULED_FOR")
-    attempt = os.environ.get("QRP_PIPELINE_ATTEMPT")
-    result_path = os.environ.get("QRP_PIPELINE_RESULT_PATH")
-    if not all((run_id, pipeline_id, scheduled_for, attempt, result_path)):
+    run_id = os.environ.get("QRP_JOB_RUN_ID") or os.environ.get("QRP_PIPELINE_RUN_ID")
+    job_id = os.environ.get("QRP_JOB_ID") or os.environ.get("QRP_PIPELINE_ID")
+    scheduled_for = os.environ.get("QRP_JOB_SCHEDULED_FOR") or os.environ.get("QRP_PIPELINE_SCHEDULED_FOR")
+    attempt = os.environ.get("QRP_JOB_ATTEMPT") or os.environ.get("QRP_PIPELINE_ATTEMPT")
+    result_path = os.environ.get("QRP_JOB_RESULT_PATH") or os.environ.get("QRP_PIPELINE_RESULT_PATH")
+    if not all((run_id, job_id, scheduled_for, attempt, result_path)):
         _print_error("EXECUTION_CONTEXT_MISSING")
         return 2
-    if pipeline_id != args.pipeline_id:
-        _print_error("PIPELINE_ID_MISMATCH", detail=args.pipeline_id)
+    if job_id != args.job_id:
+        _print_error("JOB_ID_MISMATCH", detail=args.job_id)
         return 2
     try:
         scheduled = _parse_instant(scheduled_for)
         parsed_attempt = int(attempt)
         if parsed_attempt < 1:
             raise ValueError("attempt must be positive")
-        trade_date_raw = os.environ.get("QRP_PIPELINE_TRADE_DATE")
+        trade_date_raw = os.environ.get("QRP_JOB_TRADE_DATE") or os.environ.get("QRP_PIPELINE_TRADE_DATE")
         trade_date = _parse_trade_date(trade_date_raw) if trade_date_raw else None
-        raw_parameters = json.loads(os.environ.get("QRP_PIPELINE_PARAMETER_OVERRIDES", "{}"))
+        raw_parameters = json.loads(
+            os.environ.get("QRP_JOB_PARAMETER_OVERRIDES")
+            or os.environ.get("QRP_PIPELINE_PARAMETER_OVERRIDES", "{}")
+        )
         if not isinstance(raw_parameters, dict) or any(not isinstance(key, str) for key in raw_parameters):
             raise ValueError("INVALID_PARAMETER_ASSIGNMENT")
-        contract = default_registry().get(args.pipeline_id)
+        contract = default_registry().get(args.job_id)
         settings = AppSettings.load(env_file=args.env_file or os.environ.get("QRP_ENV_FILE"))
         result = execute_pipeline_contract(
             contract,
             PipelineInvocation(
                 run_id=run_id,
-                pipeline_id=args.pipeline_id,
+                pipeline_id=args.job_id,
                 scheduled_for=scheduled,
                 attempt=parsed_attempt,
                 settings=settings,
                 trade_date_override=trade_date,
                 parameter_overrides=raw_parameters,
-                audit_context={"runtime": "pipeline_runtime"},
+                audit_context={"runtime": "job_runtime"},
             ),
         )
         payload = result.as_dict()
@@ -407,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"valid contracts: {len(contracts)}")
             return 0
         except (DefinitionValidationError, ContractValidationError, ValueError, KeyError) as exc:
-            print(f"pipeline error: {exc}", file=sys.stderr)
+            print(f"Job error: {exc}", file=sys.stderr)
             return 2
     if args.command == "list-contracts":
         try:
@@ -419,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(contract.describe(), ensure_ascii=False, sort_keys=True))
             return 0
         except (DefinitionValidationError, ContractValidationError, ValueError, KeyError) as exc:
-            print(f"pipeline error: {exc}", file=sys.stderr)
+            print(f"Job error: {exc}", file=sys.stderr)
             return 2
     if args.command == "execute-contract":
         return _execute_contract_command(args)
@@ -432,30 +426,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for definition in definitions:
                         _print_definition(definition)
                     return 0
-                definition = by_id.get(args.pipeline_id)
+                definition = by_id.get(args.job_id)
                 if definition is None:
-                    raise DefinitionValidationError(f"unknown pipeline definition: {args.pipeline_id}")
+                    raise DefinitionValidationError(f"unknown pipeline definition: {args.job_id}")
                 if args.command == "show":
                     _print_definition(definition)
                     return 0
             else:
-                registry = default_registry()
-                contracts = validate_contracts(registry.all())
-                if args.command == "list":
-                    for contract in contracts:
-                        print(json.dumps(contract.describe(), ensure_ascii=False, sort_keys=True))
-                    return 0
-                contract = registry.get(args.pipeline_id)
-                if args.command == "show":
-                    print(json.dumps(contract.describe(), ensure_ascii=False, sort_keys=True))
-                    return 0
                 definitions = _formal_runtime_definitions()
                 by_id = definitions_by_id(definitions)
-                definition = by_id[args.pipeline_id]
-            planned = dependency_plan(definitions, definition.pipeline_id)
+                if args.command == "list":
+                    for definition in definitions:
+                        _print_definition(definition)
+                    return 0
+                if args.command == "show":
+                    definition = by_id.get(args.job_id)
+                    if definition is None:
+                        raise DefinitionValidationError(f"unknown Job definition: {args.job_id}")
+                    _print_definition(definition)
+                    return 0
+                definition = by_id.get(args.job_id)
+                if definition is None:
+                    raise DefinitionValidationError(f"unknown Job definition: {args.job_id}")
+            planned = dependency_plan(definitions, definition.job_id)
             for item in planned:
                 payload: dict[str, object] = {
-                    "pipeline_id": item.pipeline_id,
+                    "job_id": item.job_id,
                     "definition_version": item.definition_version,
                     "dependencies": list(item.dependencies),
                     "enabled": item.enabled,
@@ -469,14 +465,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return 0
         except (DefinitionValidationError, ContractValidationError, ValueError, KeyError) as exc:
-            print(f"pipeline error: {exc}", file=sys.stderr)
+            print(f"Job error: {exc}", file=sys.stderr)
             return 2
     try:
         paths = _runtime_paths(args)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
-    store = PipelineRuntimeStore(paths.database_path)
+    store = JobRuntimeStore(paths.database_path)
     try:
         if args.command == "init":
             store.initialize()
@@ -501,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(
                     json.dumps(
                         {
-                            "pipeline_id": definition.pipeline_id,
+                            "job_id": definition.job_id,
                             "name": definition.name,
                             "enabled": definition.enabled,
                             "schedule": definition.schedule,
@@ -514,7 +510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             return 0
         if args.command == "scan":
-            result = PipelineScheduler(
+            result = JobScheduler(
                 store,
                 definitions,
                 scheduler_id=args.scheduler_id,
@@ -551,18 +547,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if target is None:
                     _print_error("RUN_NOT_FOUND", detail=args.run_id)
                     return 2
-                if target.status is not PipelineStatus.PENDING:
+                if target.status is not JobStatus.PENDING:
                     _print_error("RUN_NOT_PENDING", detail=target.status.value)
                     return 2
             else:
-                pending = store.list_runs(status=PipelineStatus.PENDING, limit=1_000)
+                pending = store.list_runs(status=JobStatus.PENDING, limit=1_000)
                 target = min(pending, key=lambda run: (run.scheduled_at, run.attempt), default=None)
                 if target is None:
                     print(json.dumps({"status": "IDLE", "reason": "NO_PENDING_RUN"}, sort_keys=True))
                     return 0
-            definition = definitions_by_id(definitions).get(target.pipeline_id)
+            definition = definitions_by_id(definitions).get(target.job_id)
             if definition is None:
-                _print_error("DEFINITION_MISSING", detail=target.pipeline_id)
+                _print_error("DEFINITION_MISSING", detail=target.job_id)
                 return 2
             if definition.definition_version != target.definition_version:
                 _print_error(
@@ -574,53 +570,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_run(target, submitted_to_service=True)
                 return 0
             try:
-                PipelineResultLog(paths.result_logs_dir).validate()
-                result = PipelineRunner(
+                JobResultLog(paths.result_logs_dir).validate()
+                result = JobRunner(
                     store,
                     paths,
                     heartbeat_interval_seconds=args.heartbeat_interval_seconds,
                     lease_seconds=args.lease_seconds,
                 ).run(target.run_id, definition)
-            except RunClaimFailure as exc:
+            except JobClaimFailure as exc:
                 _print_error(exc.code, detail=exc.detail)
                 return 1
             _print_run(result)
             _write_result_log(paths, store, result)
-            return 0 if result.status is PipelineStatus.SUCCESS else 1
+            return 0 if result.status is JobStatus.SUCCESS else 1
         if args.command == "run":
             environment = _manual_run_environment(args)
             parameter_overrides = _parse_parameter_assignments(args.parameter_assignments)
             definitions = _definitions_for_manual_run(args, environment=environment)
-            if args.parameter_assignments and (args.definitions is None and args.contract_selections is None):
-                # Source Contract parameters belong to the user-selected
-                # Pipeline.  Dependencies receive the same target date/config
-                # context but must validate their own default parameters.
-                definitions = tuple(
-                    replace(
-                        item,
-                        environment={
-                            **item.environment,
-                            "QRP_PIPELINE_PARAMETER_OVERRIDES": (
-                                environment["QRP_PIPELINE_PARAMETER_OVERRIDES"]
-                                if item.pipeline_id == args.pipeline_id
-                                else "{}"
-                            ),
-                        },
-                    )
-                    for item in definitions
-                )
             by_id = definitions_by_id(definitions)
-            if args.pipeline_id not in by_id:
-                raise DefinitionValidationError(f"unknown formal pipeline: {args.pipeline_id}")
-            planned = dependency_plan(definitions, args.pipeline_id, include_dependencies=args.with_dependencies)
+            if args.job_id not in by_id:
+                raise DefinitionValidationError(f"unknown formal pipeline: {args.job_id}")
+            planned = dependency_plan(definitions, args.job_id, include_dependencies=args.with_dependencies)
             if any(not item.manual_execution_allowed for item in planned):
-                denied = next(item.pipeline_id for item in planned if not item.manual_execution_allowed)
+                denied = next(item.job_id for item in planned if not item.manual_execution_allowed)
                 raise DefinitionValidationError(f"manual execution is disabled for {denied}")
             store.initialize()
             service_owns_execution = store.has_active_service_lease()
             if not service_owns_execution:
-                PipelineResultLog(paths.result_logs_dir).validate()
-            scheduler = PipelineScheduler(
+                JobResultLog(paths.result_logs_dir).validate()
+            scheduler = JobScheduler(
                 store,
                 definitions,
                 heartbeat_interval_seconds=args.heartbeat_interval_seconds,
@@ -647,12 +625,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     error_summary=eligibility[1],
                     trade_date_override=args.trade_date,
                     parameter_overrides=(
-                        parameter_overrides if definition.pipeline_id == args.pipeline_id else {}
+                        parameter_overrides if definition.job_id == args.job_id else {}
                     ),
                 )
-                if target.status is PipelineStatus.PENDING:
+                if target.status is JobStatus.PENDING:
                     if not service_owns_execution:
-                        result = PipelineRunner(
+                        result = JobRunner(
                             store,
                             paths,
                             heartbeat_interval_seconds=args.heartbeat_interval_seconds,
@@ -663,13 +641,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_run(
                     target,
                     result=store.get_result(target.run_id),
-                    submitted_to_service=service_owns_execution and target.status is PipelineStatus.PENDING,
+                    submitted_to_service=service_owns_execution and target.status is JobStatus.PENDING,
                 )
-                if not service_owns_execution and target.status is not PipelineStatus.SUCCESS:
+                if not service_owns_execution and target.status is not JobStatus.SUCCESS:
                     exit_code = 1
             return exit_code
         if args.command == "status":
-            status = PipelineStatus(args.status) if args.status else None
+            status = JobStatus(args.status) if args.status else None
             if args.run_id is not None:
                 run = store.get_run(args.run_id)
                 if run is None:
@@ -677,13 +655,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
                 _print_run(run, result=store.get_result(run.run_id) if args.include_result else None)
                 return 0
-            for run in store.list_runs(pipeline_id=args.pipeline_id, status=status, limit=args.limit):
+            for run in store.list_runs(job_id=args.job_id, status=status, limit=args.limit):
                 _print_run(run, result=store.get_result(run.run_id) if args.include_result else None)
             return 0
         if args.command == "latest":
-            run = next(iter(store.list_runs(pipeline_id=args.pipeline_id, limit=1)), None)
+            run = next(iter(store.list_runs(job_id=args.job_id, limit=1)), None)
             if run is None:
-                _print_error("RUN_NOT_FOUND", detail=args.pipeline_id)
+                _print_error("RUN_NOT_FOUND", detail=args.job_id)
                 return 2
             _print_run(run, result=store.get_result(run.run_id) if args.include_result else None)
             return 0
@@ -696,7 +674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if previous is None:
                 print(f"unknown pipeline run {args.run_id}", file=sys.stderr)
                 return 2
-            definition = definitions_by_id(definitions).get(previous.pipeline_id)
+            definition = definitions_by_id(definitions).get(previous.job_id)
             if definition is None or definition.definition_version != previous.definition_version:
                 print("matching definition/version is required to retry", file=sys.stderr)
                 return 2
@@ -707,8 +685,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if store.has_active_service_lease():
                 _print_run(retry_run, submitted_to_service=True)
                 return 0
-            PipelineResultLog(paths.result_logs_dir).validate()
-            result = PipelineRunner(
+            JobResultLog(paths.result_logs_dir).validate()
+            result = JobRunner(
                 store,
                 paths,
                 heartbeat_interval_seconds=DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
@@ -716,9 +694,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             ).run(retry_run.run_id, definition)
             _write_result_log(paths, store, result)
             _print_run(result, result=store.get_result(result.run_id))
-            return 0 if result.status is PipelineStatus.SUCCESS else 1
+            return 0 if result.status is JobStatus.SUCCESS else 1
         if args.command == "serve":
-            service = PipelineService(
+            service = JobService(
                 store,
                 paths,
                 definitions,
@@ -749,10 +727,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         sort_keys=True,
                     )
                 )
-                return 0 if all(run.status is PipelineStatus.SUCCESS for run in cycle.executed_runs) else 1
+                return 0 if all(run.status is JobStatus.SUCCESS for run in cycle.executed_runs) else 1
 
             def report_cycle_error(exc: Exception) -> None:
-                _print_error("SCHEDULER_CYCLE_ERROR", detail=f"{type(exc).__name__}: {exc}")
+                _print_error("JOB_SCHEDULER_CYCLE_ERROR", detail=f"{type(exc).__name__}: {exc}")
 
             sigterm = getattr(signal, "SIGTERM", None)
             previous_sigterm = signal.getsignal(sigterm) if sigterm is not None else None
@@ -760,8 +738,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 signal.signal(sigterm, lambda *_: service.request_stop())
             try:
                 service.run_forever(on_cycle_error=report_cycle_error)
-            except PipelineServiceFatalError as exc:
-                _print_error("SCHEDULER_FATAL", detail=str(exc))
+            except JobServiceFatalError as exc:
+                _print_error("JOB_SCHEDULER_FATAL", detail=str(exc))
                 return 1
             except KeyboardInterrupt:
                 service.request_stop()
@@ -774,8 +752,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             lease = store.get_service_lease(args.service_name)
             cursor = store.get_scheduler_cursor(args.scheduler_id)
             active = lease is not None and lease.lease_expires_at > now
-            pending = len(store.list_runs(status=PipelineStatus.PENDING, limit=10_000))
-            running = len(store.list_runs(status=PipelineStatus.RUNNING, limit=10_000))
+            pending = len(store.list_runs(status=JobStatus.PENDING, limit=10_000))
+            running = len(store.list_runs(status=JobStatus.RUNNING, limit=10_000))
             print(
                 json.dumps(
                     {
@@ -795,18 +773,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0 if active else 1
     except (OSError, sqlite3.Error) as exc:
-        _print_error("PIPELINE_RUNTIME_UNAVAILABLE", detail=f"{type(exc).__name__}: {exc}")
+        _print_error("JOB_RUNTIME_UNAVAILABLE", detail=f"{type(exc).__name__}: {exc}")
         return 1
     except (
         DefinitionValidationError,
         ContractValidationError,
         ResultLogConfigurationError,
-        PipelineServiceFatalError,
-        RunClaimFailure,
+        JobServiceFatalError,
+        JobClaimFailure,
         ValueError,
         KeyError,
     ) as exc:
-        print(f"pipeline error: {exc}", file=sys.stderr)
+        print(f"Job error: {exc}", file=sys.stderr)
         return 2
     return 2
 

@@ -24,13 +24,13 @@ from qrp_atlas.pipeline.contracts import (
     ResultStatus,
 )
 from qrp_atlas.pipeline.registry import PipelineRegistry
-from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
-from qrp_atlas.pipeline.runtime.contract_adapter import (
+from qrp_atlas.jobs_cli import main as pipeline_cli
+from qrp_atlas.pipeline.job_adapter import (
     ContractDeploymentSelection,
     definitions_from_contract_selections,
     load_contract_selections,
 )
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore
+from qrp_atlas.orchestration.store import JobRuntimeStore
 from qrp_atlas.pipeline.testing import ContractTestHarness, assert_contract_result_matches_context
 
 
@@ -263,7 +263,7 @@ def test_default_registry_contains_only_admitted_market_contracts_and_never_the_
     }
     assert pipeline_cli(["--runtime-dir", str(runtime_dir), "run", "contract_template_example"]) == 2
     assert "unknown formal pipeline" in capsys.readouterr().err
-    assert not (runtime_dir / "pipeline_runtime.sqlite3").exists()
+    assert not (runtime_dir / "job_runtime.sqlite3").exists()
 
 
 def test_cli_contract_validation_is_config_free(capsys) -> None:

@@ -99,6 +99,7 @@ v1.0 已经形成以下真实产品闭环：
 qrp-atlas/
 ├── src/qrp_atlas/
 │   ├── contracts/              # 标准字段、schema、映射、约定与校验
+│   ├── orchestration/          # 通用 Job 编排、调度、资源 lease 与结果审计
 │   ├── pipeline/               # 外部数据采集、标准化、PIT 回补与入库
 │   ├── indicators/             # 指标、特征、因子与客观状态
 │   ├── strategies/             # 策略定义、注册、校验与实现

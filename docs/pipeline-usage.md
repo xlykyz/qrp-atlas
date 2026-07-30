@@ -2,12 +2,12 @@
 
 ## 目的与边界
 
-Pipeline Runtime 是 QRP Atlas 的独立日常任务执行系统。它用版本化 Definition 或源码注册的 Contract 描述任务，生成持久化运行记录，按依赖关系执行，并在仓库外保留简洁的最终结果审计日志。
+Job Orchestration 是 QRP Atlas 的独立日常任务执行系统。Pipeline Contract 通过 adapter 接入通用 Job Definition，生成持久化 Job Run，按依赖关系执行，并在仓库外保留简洁的最终结果审计日志。
 
 本手册的正式入口是：
 
 ```bash
-qrp-atlas-pipeline
+qrp-atlas-jobs
 ```
 
 当前版本不安装服务、不启用操作系统定时器、不访问生产数据库，也不替代任何现有生产调度。所有示例应先指向测试或受控运行时目录。
@@ -15,11 +15,11 @@ qrp-atlas-pipeline
 ## 核心对象
 
 ```text
-Pipeline Contract / Definition
+Pipeline Contract / Job Definition
         |
         +-- dependencies, target schedule, timezone, locks, retry policy
         |
-Pipeline Run (one Definition execution attempt)
+Job Run (one Definition execution attempt)
         |
         +-- atomic claim, RUNNING heartbeat, final result and task summary
         |
@@ -30,10 +30,10 @@ Task execution
 ```
 
 - **Contract**：源码拥有的业务语义，包括输入、输出、业务日期解析、幂等性、事务、依赖、读写资源、资源锁和人工执行许可。
-- **Definition**：Runtime 可执行定义，包含 `pipeline_id`、定义版本、启用状态、cron schedule、时区、依赖、`resource_reads` 和 `resource_locks`。普通 JSON Definition 还包含 argv；正式 Contract Definition 绑定进程内 executor，不再通过 argv 子进程执行。
+- **Job Definition**：Orchestration 可执行定义，包含 `job_id`、定义版本、启用状态、cron schedule、时区、依赖、`resource_reads` 和 `resource_locks`。普通 JSON Definition 还包含 argv；正式 Pipeline Contract Definition 绑定进程内 executor，不再通过 argv 子进程执行。
 - **Dependency**：有向无环图中的上游任务。计划按拓扑顺序排列；上游未成功时下游保持 `BLOCKED`，不会被错误执行。
-- **Pipeline Run**：每次尝试的持久化记录。单个 Definition 是当前 Runtime 的最小任务单位，因此一个 Pipeline Run 同时承载该任务的认领、状态和结果摘要；业务代码如需细分阶段，可使用 Stage Run API 记录阶段输入/输出行数。
-- **Task execution**：Runner 原子领取 Pipeline Run、获取资源 lease、发送心跳并写入最终状态。正式 Contract 在 `serve` 进程的线程 worker 内调用 executor；普通兼容 Definition 才以 argv 启动子进程。
+- **Job Run**：每次尝试的持久化记录。单个 Definition 是当前 Orchestration 的最小任务单位，因此一个 Job Run 同时承载该任务的认领、状态和结果摘要；业务代码如需细分阶段，可使用 Stage Run API 记录阶段输入/输出行数。
+- **Task execution**：Runner 原子领取 Job Run、获取资源 lease、发送心跳并写入最终状态。正式 Contract 在 `serve` 进程的线程 worker 内调用 executor；普通兼容 Definition 才以 argv 启动子进程。
 
 运行状态为 `PENDING`、`BLOCKED`、`RUNNING`、`SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 和 `SKIPPED`。终态不可回退；重试永远创建新的 attempt，保留失败证据。
 
@@ -43,28 +43,28 @@ Task execution
 
 ```dotenv
 QRP_DATA_DIR=/srv/qrp-atlas/data
-QRP_PIPELINE_RUNTIME_DIR=/srv/qrp-atlas/runtime/pipeline
+QRP_JOB_RUNTIME_DIR=/srv/qrp-atlas/runtime/job
 QRP_LOG_DIR=/srv/qrp-atlas/logs
 ```
 
 最终审计日志固定在：
 
 ```text
-$QRP_LOG_DIR/pipeline/pipeline-results-YYYY-MM-DD.jsonl
+$QRP_LOG_DIR/job/job-results-YYYY-MM-DD.jsonl
 ```
 
 运行状态库位于：
 
 ```text
-$QRP_PIPELINE_RUNTIME_DIR/pipeline_runtime.sqlite3
+$QRP_JOB_RUNTIME_DIR/job_runtime.sqlite3
 ```
 
 命令支持受控覆盖，主要用于临时验收环境：
 
 ```bash
-qrp-atlas-pipeline \
-  --runtime-dir /tmp/qrp-pipeline-runtime \
-  --result-log-dir /tmp/qrp-pipeline-logs/pipeline \
+qrp-atlas-jobs \
+  --runtime-dir /tmp/qrp-job-runtime \
+  --result-log-dir /tmp/qrp-job-logs/job \
   init
 ```
 
@@ -85,12 +85,12 @@ Runtime 会拒绝将最终结果日志写到源码仓库、当前工作目录回
 检查已注册 Contract：
 
 ```bash
-qrp-atlas-pipeline list
-qrp-atlas-pipeline show market_daily_update
-qrp-atlas-pipeline validate-contracts
+qrp-atlas-jobs list
+qrp-atlas-jobs show market_daily_update
+qrp-atlas-jobs validate-contracts
 ```
 
-`list` 与 `show` 默认读取源码注册的 Contract。它们不启动任务，也不会输出环境变量值。
+`list` 与 `show` 默认读取源码注册 Contract 适配出的 Job Definition；`list-contracts` 用于查看业务 Contract 详情。它们不启动任务，也不会输出环境变量值。
 
 ## 自动调度配置
 
@@ -116,7 +116,7 @@ deployment selection 是仅含选择信息的 JSON：
 查看目标日期的拓扑计划而不执行：
 
 ```bash
-qrp-atlas-pipeline plan market_daily_update \
+qrp-atlas-jobs plan market_daily_update \
   --contract-selections /etc/qrp-atlas/pipeline-selection.json \
   --target-date 2026-07-30
 ```
@@ -130,7 +130,7 @@ qrp-atlas-pipeline plan market_daily_update \
   "schema_version": 1,
   "definitions": [
     {
-      "pipeline_id": "example_daily",
+      "job_id": "example_daily",
       "name": "Example daily task",
       "enabled": true,
       "schedule": "30 16 * * 1-5",
@@ -160,23 +160,23 @@ qrp-atlas-pipeline plan market_daily_update \
 先校验和查看配置：
 
 ```bash
-qrp-atlas-pipeline validate-definitions --definitions ./pipelines.json
-qrp-atlas-pipeline list --definitions ./pipelines.json
-qrp-atlas-pipeline show example_daily --definitions ./pipelines.json
-qrp-atlas-pipeline plan example_daily --definitions ./pipelines.json --target-date 2026-07-30
+qrp-atlas-jobs validate-definitions --definitions ./pipelines.json
+qrp-atlas-jobs list --definitions ./pipelines.json
+qrp-atlas-jobs show example_daily --definitions ./pipelines.json
+qrp-atlas-jobs plan example_daily --definitions ./pipelines.json --target-date 2026-07-30
 ```
 
 执行单个已注册 Contract，指定业务日期：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   run market_daily_update --target-date 2026-07-30
 ```
 
 Contract 声明参数时，可用重复的 `--set NAME=VALUE` 提供人工覆盖：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   run market_daily_update --target-date 2026-07-30 --set batch_size=500
 ```
 
@@ -185,14 +185,14 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
 执行完整依赖链：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   run adj_factor_daily --target-date 2026-07-30 --with-dependencies
 ```
 
 对普通 Definition 使用显式 manifest：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   run example_daily --definitions ./pipelines.json --target-date 2026-07-30
 ```
 
@@ -201,17 +201,17 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
 查询状态和最新结果：
 
 ```bash
-qrp-atlas-pipeline status
-qrp-atlas-pipeline status --pipeline-id market_daily_update --limit 20
-qrp-atlas-pipeline status --run-id RUN_ID --include-result
-qrp-atlas-pipeline latest market_daily_update --include-result
+qrp-atlas-jobs status
+qrp-atlas-jobs status --job-id market_daily_update --limit 20
+qrp-atlas-jobs status --run-id RUN_ID --include-result
+qrp-atlas-jobs latest market_daily_update --include-result
 ```
 
 人工重试只允许 `FAILED` 和 `TIMED_OUT`，且受到 Definition 的 `max_retries` 限制：
 
 ```bash
-qrp-atlas-pipeline retry RUN_ID --contract-selections /etc/qrp-atlas/pipeline-selection.json
-qrp-atlas-pipeline retry RUN_ID --definitions ./pipelines.json --execute
+qrp-atlas-jobs retry RUN_ID --contract-selections /etc/qrp-atlas/pipeline-selection.json
+qrp-atlas-jobs retry RUN_ID --definitions ./pipelines.json --execute
 ```
 
 第一条命令只创建新的 `PENDING` attempt；第二条显式创建并立即执行。Runtime 不会无限自动重试。
@@ -223,15 +223,15 @@ qrp-atlas-pipeline retry RUN_ID --definitions ./pipelines.json --execute
 启动前先确认 definition、运行库和日志路径：
 
 ```bash
-qrp-atlas-pipeline validate-contracts --contract-selections /etc/qrp-atlas/pipeline-selection.json
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs validate-contracts --contract-selections /etc/qrp-atlas/pipeline-selection.json
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   serve --contract-selections /etc/qrp-atlas/pipeline-selection.json --max-workers 4
 ```
 
 普通 Definition 的等价入口：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   serve --definitions ./pipelines.json
 ```
 
@@ -242,7 +242,7 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
 受控验收可以只跑一个循环：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env \
   serve --contract-selections /etc/qrp-atlas/pipeline-selection.json --once
 ```
 
@@ -251,18 +251,18 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
 服务健康检查：
 
 ```bash
-qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env health
+qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env health
 ```
 
-输出包括服务 owner、服务心跳、lease 截止时间、最近扫描时刻、`PENDING`/`RUNNING` 数量和最近致命/循环错误。相同运行状态库上第二个同名 `serve` 进程无法取得服务 lease；即使发生竞争，Pipeline Run 的原子认领和资源锁仍会阻止重复执行。
+输出包括服务 owner、服务心跳、lease 截止时间、最近扫描时刻、`PENDING`/`RUNNING` 数量和最近致命/循环错误。相同运行状态库上第二个同名 `serve` 进程无法取得服务 lease；即使发生竞争，Job Run 的原子认领和资源锁仍会阻止重复执行。
 
 ## 恢复与稳定性规则
 
 - 到期前不会创建运行。
 - 服务首次启动时，会在 `--max-catch-up-minutes` 窗口中为每个 Definition 选择最近一次到期点，补偿“目标时间已过但没有运行记录”的情况。
-- 已有 scheduler cursor 时，重启会精确扫描 cursor 与当前时刻之间遗漏的 cron 分钟；已存在或已成功的同一 `pipeline_id`、业务时刻和定义版本不会重复创建有效日常运行。
+- 已有 scheduler cursor 时，重启会精确扫描 cursor 与当前时刻之间遗漏的 cron 分钟；已存在或已成功的同一 `job_id`、业务时刻和定义版本不会重复创建有效日常运行。
 - `RUNNING` 记录的心跳超时会被标记为 `FAILED`，资源 lease 被回收。它不会自动重试，必须由人工 `retry`。
-- 子进程退出异常、超时、心跳失败或 Runner 内部执行异常会落到对应 Pipeline Run 的最终失败状态，单个任务失败不会终止其他独立任务。
+- 子进程退出异常、超时、心跳失败或 Runner 内部执行异常会落到对应 Job Run 的最终失败状态，单个任务失败不会终止其他独立任务。
 - 正式 Contract 使用协作式 deadline/cancellation：外部等待使用 `ExecutionControl.bounded_timeout()`，执行阶段和 DuckDB 写事务前调用 `execution_control.check()`。到期状态为 `TIMED_OUT`；租约/心跳丢失会取消当前执行并禁止进入新的写事务。Python 线程不会被强制杀死，因此 Contract 不得忽略这些检查或把不可取消的无限阻塞调用放进正式 executor。
 - 普通扫描/计划局部异常被记录到服务 lease，并进入下一轮；状态库不可用、审计日志不可用或服务所有权丢失属于致命错误，`serve` 会明确退出而不是伪装健康。
 - 无任务时服务以 `--poll-interval-seconds` 等待，不忙轮询，也不写“没有任务”的日志。
@@ -273,7 +273,7 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env health
 
 每个完成的任务写入一行 JSONL，包含：
 
-- `recorded_at`、`pipeline_id`、`definition_version`、`run_id`；
+- `recorded_at`、`job_id`、`definition_version`、`job_run_id`（CLI 也显示同值的 `run_id`）；
 - `business_date`（Contract structured result 可用时）、计划/实际开始/结束时间；
 - 最终状态和毫秒耗时；
 - 任务摘要、输出 ID 与行数摘要；
@@ -283,14 +283,14 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env health
 
 ## 测试方法
 
-所有 Pipeline Runtime 验证必须使用临时运行库和临时日志目录：
+所有 Job Orchestration 验证必须使用临时运行库和临时日志目录：
 
 ```bash
 .venv/bin/pytest -q \
-  tests/pipeline/test_runtime_foundation.py \
-  tests/pipeline/test_runtime_regressions.py \
-  tests/pipeline/test_runtime_structured_results.py \
-  tests/pipeline/test_runtime_service.py
+  tests/orchestration/test_foundation.py \
+  tests/orchestration/test_regressions.py \
+  tests/orchestration/test_structured_results.py \
+  tests/orchestration/test_service.py
 ```
 
 覆盖范围包括 Definition 唯一性与环检测、Contract 校验、拓扑顺序、手动依赖链、目标时间前后行为、首次补偿、重启去重、运行认领、孤儿恢复、失败隔离、显式重试、服务 lease、活动服务时的 CLI 提交、读写资源冲突仲裁、无冲突任务并发、CLI 查询以及仓库外的静默结果审计日志。

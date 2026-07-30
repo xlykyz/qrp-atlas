@@ -1,4 +1,4 @@
-"""SQLite WAL storage for Pipeline scheduling, runs, stages, and resource leases."""
+"""SQLite WAL storage for Job scheduling, runs, stages, and resource leases."""
 
 from __future__ import annotations
 
@@ -15,18 +15,18 @@ from typing import Any
 
 from .models import (
     OverlapPolicy,
-    PipelineDefinition,
-    PipelineRun,
-    PipelineStatus,
-    StageRun,
+    JobDefinition,
+    JobRun,
+    JobStatus,
+    JobStageRun,
     assert_status_transition,
 )
 
 
-_STATUS_SQL = ", ".join(f"'{status.value}'" for status in PipelineStatus)
+_STATUS_SQL = ", ".join(f"'{status.value}'" for status in JobStatus)
 
 
-class RunClaimFailure(RuntimeError):
+class JobClaimFailure(RuntimeError):
     """A fail-closed reason returned by the atomic runner claim operation."""
 
     def __init__(self, code: str, detail: str | None = None) -> None:
@@ -37,7 +37,7 @@ class RunClaimFailure(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class SchedulerCursor:
+class JobSchedulerCursor:
     scheduler_id: str
     last_scanned_at: datetime
     created_at: datetime
@@ -45,7 +45,7 @@ class SchedulerCursor:
 
 
 @dataclass(frozen=True, slots=True)
-class ServiceLease:
+class JobServiceLease:
     """One live scheduler service identity stored in the isolated runtime DB."""
 
     service_name: str
@@ -101,10 +101,25 @@ def _decode_parameter_overrides(value: str | None) -> Mapping[str, Any]:
     try:
         decoded = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("pipeline run contains invalid parameter_overrides_json") from exc
+        raise RuntimeError("Job run contains invalid parameter_overrides_json") from exc
     if not isinstance(decoded, dict) or any(not isinstance(key, str) for key in decoded):
-        raise RuntimeError("pipeline run parameter_overrides_json must be an object")
+        raise RuntimeError("Job run parameter_overrides_json must be an object")
     return decoded
+
+
+_SECRET_VALUE_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|token|password|passwd|secret|credential)(\s*[:=]\s*)[^\s,;]+"
+)
+
+
+def _bounded_error_summary(value: str | None) -> str | None:
+    """Keep persisted failure evidence single-line, bounded, and redacted."""
+
+    if value is None:
+        return None
+    normalized = " ".join(str(value).replace("\x00", " ").split())
+    normalized = _SECRET_VALUE_PATTERN.sub(r"\1\2[REDACTED]", normalized)
+    return normalized[:500]
 
 
 def _resource_scope(resource_name: str) -> tuple[str, str | None] | None:
@@ -142,7 +157,7 @@ def _resources_conflict(left: str, right: str) -> bool:
     return left_object is None or right_object is None or left_object == right_object
 
 
-class PipelineRuntimeStore:
+class JobRuntimeStore:
     """Owns a single isolated SQLite runtime database, never a market database."""
 
     def __init__(self, database_path: str | Path) -> None:
@@ -182,9 +197,9 @@ class PipelineRuntimeStore:
         try:
             connection.executescript(
                 f"""
-                CREATE TABLE IF NOT EXISTS pipeline_run (
+                CREATE TABLE IF NOT EXISTS job_run (
                     run_id TEXT PRIMARY KEY,
-                    pipeline_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
                     definition_version TEXT NOT NULL,
                     scheduled_at TEXT NOT NULL,
                     started_at TEXT,
@@ -202,18 +217,18 @@ class PipelineRuntimeStore:
                     user_cpu_ms INTEGER,
                     system_cpu_ms INTEGER,
                     peak_rss_kb INTEGER,
-                    retry_of_run_id TEXT REFERENCES pipeline_run(run_id),
+                    retry_of_run_id TEXT REFERENCES job_run(run_id),
                     trade_date_override TEXT,
                     parameter_overrides_json TEXT NOT NULL DEFAULT '{{}}',
                     created_at TEXT NOT NULL,
-                    UNIQUE(pipeline_id, scheduled_at, attempt)
+                    UNIQUE(job_id, scheduled_at, attempt)
                 );
-                CREATE INDEX IF NOT EXISTS pipeline_run_status_idx
-                    ON pipeline_run(status, scheduled_at);
-                CREATE INDEX IF NOT EXISTS pipeline_run_pipeline_idx
-                    ON pipeline_run(pipeline_id, scheduled_at DESC, attempt DESC);
+                CREATE INDEX IF NOT EXISTS job_run_status_idx
+                    ON job_run(status, scheduled_at);
+                CREATE INDEX IF NOT EXISTS job_run_job_idx
+                    ON job_run(job_id, scheduled_at DESC, attempt DESC);
                 CREATE TABLE IF NOT EXISTS stage_run (
-                    run_id TEXT NOT NULL REFERENCES pipeline_run(run_id),
+                    run_id TEXT NOT NULL REFERENCES job_run(run_id),
                     stage_name TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     finished_at TEXT,
@@ -226,7 +241,7 @@ class PipelineRuntimeStore:
                 );
                 CREATE TABLE IF NOT EXISTS resource_lock (
                     resource_name TEXT PRIMARY KEY,
-                    owner_run_id TEXT NOT NULL REFERENCES pipeline_run(run_id),
+                    owner_run_id TEXT NOT NULL REFERENCES job_run(run_id),
                     acquired_at TEXT NOT NULL,
                     heartbeat_at TEXT NOT NULL,
                     lease_expires_at TEXT NOT NULL
@@ -235,7 +250,7 @@ class PipelineRuntimeStore:
                     ON resource_lock(lease_expires_at);
                 CREATE TABLE IF NOT EXISTS resource_read_lease (
                     resource_name TEXT NOT NULL,
-                    owner_run_id TEXT NOT NULL REFERENCES pipeline_run(run_id),
+                    owner_run_id TEXT NOT NULL REFERENCES job_run(run_id),
                     acquired_at TEXT NOT NULL,
                     heartbeat_at TEXT NOT NULL,
                     lease_expires_at TEXT NOT NULL,
@@ -249,12 +264,12 @@ class PipelineRuntimeStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS pipeline_result (
-                    run_id TEXT PRIMARY KEY REFERENCES pipeline_run(run_id),
+                CREATE TABLE IF NOT EXISTS job_result (
+                    run_id TEXT PRIMARY KEY REFERENCES job_run(run_id),
                     result_json TEXT NOT NULL,
                     recorded_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS pipeline_service_lease (
+                CREATE TABLE IF NOT EXISTS job_service_lease (
                     service_name TEXT PRIMARY KEY,
                     owner_id TEXT NOT NULL,
                     started_at TEXT NOT NULL,
@@ -262,29 +277,36 @@ class PipelineRuntimeStore:
                     lease_expires_at TEXT NOT NULL,
                     last_error TEXT
                 );
-                CREATE INDEX IF NOT EXISTS pipeline_service_lease_expiry_idx
-                    ON pipeline_service_lease(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS job_service_lease_expiry_idx
+                    ON job_service_lease(lease_expires_at);
                 """
             )
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(pipeline_run)").fetchall()}
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_run)").fetchall()}
             if "trade_date_override" not in columns:
-                connection.execute("ALTER TABLE pipeline_run ADD COLUMN trade_date_override TEXT")
+                connection.execute("ALTER TABLE job_run ADD COLUMN trade_date_override TEXT")
             if "parameter_overrides_json" not in columns:
                 connection.execute(
-                    "ALTER TABLE pipeline_run ADD COLUMN parameter_overrides_json TEXT NOT NULL DEFAULT '{}'"
+                    "ALTER TABLE job_run ADD COLUMN parameter_overrides_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS job_run_target_date_idx
+                ON job_run(job_id, definition_version, trade_date_override, attempt)
+                WHERE trade_date_override IS NOT NULL
+                """
+            )
         finally:
             connection.close()
 
-    def _run_from_row(self, row: sqlite3.Row) -> PipelineRun:
-        return PipelineRun(
+    def _run_from_row(self, row: sqlite3.Row) -> JobRun:
+        return JobRun(
             run_id=row["run_id"],
-            pipeline_id=row["pipeline_id"],
+            job_id=row["job_id"],
             definition_version=row["definition_version"],
             scheduled_at=_parse_timestamp(row["scheduled_at"]),  # type: ignore[arg-type]
             started_at=_parse_timestamp(row["started_at"]),
             finished_at=_parse_timestamp(row["finished_at"]),
-            status=PipelineStatus(row["status"]),
+            status=JobStatus(row["status"]),
             attempt=row["attempt"],
             exit_code=row["exit_code"],
             timed_out=bool(row["timed_out"]),
@@ -302,26 +324,26 @@ class PipelineRuntimeStore:
             parameter_overrides=_decode_parameter_overrides(row["parameter_overrides_json"]),
         )
 
-    def get_run(self, run_id: str) -> PipelineRun | None:
+    def get_run(self, run_id: str) -> JobRun | None:
         connection = self._connect()
         try:
-            row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            row = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             return self._run_from_row(row) if row is not None else None
         finally:
             connection.close()
 
     def record_result(self, run_id: str, payload: Mapping[str, object], *, now: datetime | None = None) -> None:
-        """Persist a formal PipelineResult payload with the existing run evidence."""
+        """Persist a structured Job result payload with the existing run evidence."""
 
         timestamp = now or utc_now()
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self._transaction() as connection:
-            exists = connection.execute("SELECT 1 FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            exists = connection.execute("SELECT 1 FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if exists is None:
-                raise KeyError(f"unknown pipeline run {run_id}")
+                raise KeyError(f"unknown Job run {run_id}")
             connection.execute(
                 """
-                INSERT INTO pipeline_result(run_id, result_json, recorded_at)
+                INSERT INTO job_result(run_id, result_json, recorded_at)
                 VALUES (?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET result_json = excluded.result_json, recorded_at = excluded.recorded_at
                 """,
@@ -331,12 +353,12 @@ class PipelineRuntimeStore:
     def get_result(self, run_id: str) -> Mapping[str, object] | None:
         connection = self._connect()
         try:
-            row = connection.execute("SELECT result_json FROM pipeline_result WHERE run_id = ?", [run_id]).fetchone()
+            row = connection.execute("SELECT result_json FROM job_result WHERE run_id = ?", [run_id]).fetchone()
             if row is None:
                 return None
             payload = json.loads(row["result_json"])
             if not isinstance(payload, dict):
-                raise RuntimeError(f"stored pipeline result for {run_id} is not an object")
+                raise RuntimeError(f"stored Job result for {run_id} is not an object")
             return payload
         finally:
             connection.close()
@@ -344,15 +366,15 @@ class PipelineRuntimeStore:
     def list_runs(
         self,
         *,
-        pipeline_id: str | None = None,
-        status: PipelineStatus | None = None,
+        job_id: str | None = None,
+        status: JobStatus | None = None,
         limit: int = 100,
-    ) -> list[PipelineRun]:
+    ) -> list[JobRun]:
         clauses: list[str] = []
         values: list[object] = []
-        if pipeline_id is not None:
-            clauses.append("pipeline_id = ?")
-            values.append(pipeline_id)
+        if job_id is not None:
+            clauses.append("job_id = ?")
+            values.append(job_id)
         if status is not None:
             clauses.append("status = ?")
             values.append(status.value)
@@ -361,7 +383,7 @@ class PipelineRuntimeStore:
         connection = self._connect()
         try:
             rows = connection.execute(
-                f"SELECT * FROM pipeline_run {where} ORDER BY scheduled_at DESC, attempt DESC LIMIT ?",
+                f"SELECT * FROM job_run {where} ORDER BY scheduled_at DESC, attempt DESC LIMIT ?",
                 values,
             ).fetchall()
             return [self._run_from_row(row) for row in rows]
@@ -370,18 +392,18 @@ class PipelineRuntimeStore:
 
     def create_scheduled_run(
         self,
-        definition: PipelineDefinition,
+        definition: JobDefinition,
         *,
         scheduled_at: datetime,
         trigger_type: str = "SCHEDULED",
-        status: PipelineStatus = PipelineStatus.PENDING,
+        status: JobStatus = JobStatus.PENDING,
         error_summary: str | None = None,
         trade_date_override: date | None = None,
         parameter_overrides: Mapping[str, Any] | None = None,
-    ) -> tuple[PipelineRun, bool]:
+    ) -> tuple[JobRun, bool]:
         """Insert the first attempt once; concurrent scans return the same row."""
 
-        if status not in {PipelineStatus.PENDING, PipelineStatus.BLOCKED, PipelineStatus.SKIPPED}:
+        if status not in {JobStatus.PENDING, JobStatus.BLOCKED, JobStatus.SKIPPED}:
             raise ValueError("scheduled runs must start as PENDING, BLOCKED, or SKIPPED")
         self.initialize()
         now = utc_now()
@@ -401,29 +423,29 @@ class PipelineRuntimeStore:
     def _create_scheduled_run_in_transaction(
         self,
         connection: sqlite3.Connection,
-        definition: PipelineDefinition,
+        definition: JobDefinition,
         *,
         scheduled_at: datetime,
         trigger_type: str,
-        status: PipelineStatus,
+        status: JobStatus,
         error_summary: str | None,
         trade_date_override: date | None,
         parameter_overrides: Mapping[str, Any] | None,
         created_at: datetime,
-    ) -> tuple[PipelineRun, bool]:
+    ) -> tuple[JobRun, bool]:
         scheduled_text = _timestamp(scheduled_at)
         parameter_overrides_json = _encode_parameter_overrides(parameter_overrides)
         cursor = connection.execute(
             """
-            INSERT OR IGNORE INTO pipeline_run (
-                run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
+            INSERT OR IGNORE INTO job_run (
+                run_id, job_id, definition_version, scheduled_at, status, attempt,
                 timed_out, trigger_type, error_summary, trade_date_override,
                 parameter_overrides_json, created_at
             ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)
             """,
             [
                 str(uuid.uuid4()),
-                definition.pipeline_id,
+                definition.job_id,
                 definition.definition_version,
                 scheduled_text,
                 status.value,
@@ -434,15 +456,27 @@ class PipelineRuntimeStore:
                 _timestamp(created_at),
             ],
         )
-        row = connection.execute(
-            "SELECT * FROM pipeline_run WHERE pipeline_id = ? AND scheduled_at = ? AND attempt = 1",
-            [definition.pipeline_id, scheduled_text],
-        ).fetchone()
+        if cursor.rowcount == 1 or trade_date_override is None:
+            row = connection.execute(
+                "SELECT * FROM job_run WHERE job_id = ? AND scheduled_at = ? AND attempt = 1",
+                [definition.job_id, scheduled_text],
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT * FROM job_run
+                WHERE job_id = ? AND definition_version = ?
+                  AND trade_date_override = ? AND attempt = 1
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                [definition.job_id, definition.definition_version, trade_date_override.isoformat()],
+            ).fetchone()
         if row is None:
             raise RuntimeError("failed to create or retrieve scheduled run")
         return self._run_from_row(row), cursor.rowcount == 1
 
-    def get_scheduler_cursor(self, scheduler_id: str) -> SchedulerCursor | None:
+    def get_scheduler_cursor(self, scheduler_id: str) -> JobSchedulerCursor | None:
         self.initialize()
         connection = self._connect()
         try:
@@ -456,7 +490,7 @@ class PipelineRuntimeStore:
             updated_at = _parse_timestamp(row["updated_at"])
             if last_scanned_at is None or created_at is None or updated_at is None:
                 raise RuntimeError("scheduler cursor contains an invalid timestamp")
-            return SchedulerCursor(
+            return JobSchedulerCursor(
                 scheduler_id=row["scheduler_id"],
                 last_scanned_at=last_scanned_at,
                 created_at=created_at,
@@ -466,13 +500,13 @@ class PipelineRuntimeStore:
             connection.close()
 
     @staticmethod
-    def _service_lease_from_row(row: sqlite3.Row) -> ServiceLease:
+    def _service_lease_from_row(row: sqlite3.Row) -> JobServiceLease:
         started_at = _parse_timestamp(row["started_at"])
         heartbeat_at = _parse_timestamp(row["heartbeat_at"])
         lease_expires_at = _parse_timestamp(row["lease_expires_at"])
         if started_at is None or heartbeat_at is None or lease_expires_at is None:
-            raise RuntimeError("pipeline service lease contains an invalid timestamp")
-        return ServiceLease(
+            raise RuntimeError("Job service lease contains an invalid timestamp")
+        return JobServiceLease(
             service_name=row["service_name"],
             owner_id=row["owner_id"],
             started_at=started_at,
@@ -481,14 +515,14 @@ class PipelineRuntimeStore:
             last_error=row["last_error"],
         )
 
-    def get_service_lease(self, service_name: str) -> ServiceLease | None:
+    def get_service_lease(self, service_name: str) -> JobServiceLease | None:
         """Return the live or expired service lease without changing it."""
 
         self.initialize()
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+                "SELECT * FROM job_service_lease WHERE service_name = ?", [service_name]
             ).fetchone()
             return self._service_lease_from_row(row) if row is not None else None
         finally:
@@ -501,7 +535,7 @@ class PipelineRuntimeStore:
         owner_id: str,
         lease_seconds: int,
         now: datetime | None = None,
-    ) -> ServiceLease:
+    ) -> JobServiceLease:
         """Atomically claim the scheduler-service lease or fail without takeover."""
 
         if not service_name.strip() or not owner_id.strip():
@@ -512,15 +546,15 @@ class PipelineRuntimeStore:
         expires_at = timestamp + timedelta(seconds=lease_seconds)
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+                "SELECT * FROM job_service_lease WHERE service_name = ?", [service_name]
             ).fetchone()
             if row is not None:
                 existing = self._service_lease_from_row(row)
                 if existing.lease_expires_at > timestamp and existing.owner_id != owner_id:
-                    raise RunClaimFailure("SCHEDULER_SERVICE_ACTIVE", existing.owner_id)
+                    raise JobClaimFailure("SCHEDULER_SERVICE_ACTIVE", existing.owner_id)
                 connection.execute(
                     """
-                    UPDATE pipeline_service_lease
+                    UPDATE job_service_lease
                     SET owner_id = ?, started_at = ?, heartbeat_at = ?, lease_expires_at = ?, last_error = NULL
                     WHERE service_name = ?
                     """,
@@ -535,7 +569,7 @@ class PipelineRuntimeStore:
             else:
                 connection.execute(
                     """
-                    INSERT INTO pipeline_service_lease(
+                    INSERT INTO job_service_lease(
                         service_name, owner_id, started_at, heartbeat_at, lease_expires_at, last_error
                     ) VALUES (?, ?, ?, ?, ?, NULL)
                     """,
@@ -548,7 +582,7 @@ class PipelineRuntimeStore:
                     ],
                 )
             updated = connection.execute(
-                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+                "SELECT * FROM job_service_lease WHERE service_name = ?", [service_name]
             ).fetchone()
             if updated is None:
                 raise RuntimeError("service lease disappeared while being claimed")
@@ -571,7 +605,7 @@ class PipelineRuntimeStore:
         with self._transaction() as connection:
             updated = connection.execute(
                 """
-                UPDATE pipeline_service_lease
+                UPDATE job_service_lease
                 SET heartbeat_at = ?, lease_expires_at = ?, last_error = ?
                 WHERE service_name = ? AND owner_id = ? AND lease_expires_at > ?
                 """,
@@ -591,7 +625,7 @@ class PipelineRuntimeStore:
 
         with self._transaction() as connection:
             deleted = connection.execute(
-                "DELETE FROM pipeline_service_lease WHERE service_name = ? AND owner_id = ?",
+                "DELETE FROM job_service_lease WHERE service_name = ? AND owner_id = ?",
                 [service_name, owner_id],
             ).rowcount
             return deleted == 1
@@ -602,9 +636,9 @@ class PipelineRuntimeStore:
         scheduler_id: str,
         expected_last_scanned_at: datetime | None,
         scanned_through_at: datetime,
-        candidates: Iterable[tuple[PipelineDefinition, datetime, PipelineStatus, str | None]],
+        candidates: Iterable[tuple[JobDefinition, datetime, JobStatus, str | None]],
         now: datetime | None = None,
-    ) -> list[PipelineRun] | None:
+    ) -> list[JobRun] | None:
         """Persist a complete scan interval and cursor advance in one transaction.
 
         ``None`` means another scheduler committed a newer cursor after this
@@ -623,7 +657,7 @@ class PipelineRuntimeStore:
             current_text = current["last_scanned_at"] if current is not None else None
             if current_text != expected_text:
                 return None
-            created: list[PipelineRun] = []
+            created: list[JobRun] = []
             for definition, scheduled_at, status, error_summary in candidates:
                 run, inserted = self._create_scheduled_run_in_transaction(
                     connection,
@@ -657,27 +691,27 @@ class PipelineRuntimeStore:
                 )
             return created
 
-    def latest_run_before(self, pipeline_id: str, scheduled_at: datetime) -> PipelineRun | None:
+    def latest_run_before(self, job_id: str, scheduled_at: datetime) -> JobRun | None:
         connection = self._connect()
         try:
             row = connection.execute(
                 """
-                SELECT * FROM pipeline_run
-                WHERE pipeline_id = ? AND scheduled_at <= ?
+                SELECT * FROM job_run
+                WHERE job_id = ? AND scheduled_at <= ?
                 ORDER BY scheduled_at DESC, attempt DESC LIMIT 1
                 """,
-                [pipeline_id, _timestamp(scheduled_at)],
+                [job_id, _timestamp(scheduled_at)],
             ).fetchone()
             return self._run_from_row(row) if row is not None else None
         finally:
             connection.close()
 
-    def has_active_pipeline_run(self, pipeline_id: str) -> bool:
+    def has_active_job_run(self, job_id: str) -> bool:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT 1 FROM pipeline_run WHERE pipeline_id = ? AND status IN (?, ?) LIMIT 1",
-                [pipeline_id, PipelineStatus.PENDING.value, PipelineStatus.RUNNING.value],
+                "SELECT 1 FROM job_run WHERE job_id = ? AND status IN (?, ?) LIMIT 1",
+                [job_id, JobStatus.PENDING.value, JobStatus.RUNNING.value],
             ).fetchone()
             return row is not None
         finally:
@@ -714,7 +748,7 @@ class PipelineRuntimeStore:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT 1 FROM pipeline_service_lease WHERE lease_expires_at > ? LIMIT 1",
+                "SELECT 1 FROM job_service_lease WHERE lease_expires_at > ? LIMIT 1",
                 [_timestamp(now or utc_now())],
             ).fetchone()
             return row is not None
@@ -725,7 +759,7 @@ class PipelineRuntimeStore:
         self,
         run_id: str,
         *,
-        pipeline_id: str,
+        job_id: str,
         definition_version: str,
         overlap_policy: OverlapPolicy,
         resource_locks: Iterable[str],
@@ -734,10 +768,10 @@ class PipelineRuntimeStore:
         stderr_path: Path | None = None,
         lease_seconds: int,
         now: datetime | None = None,
-    ) -> PipelineRun:
+    ) -> JobRun:
         """Atomically validate, claim, and lease one PENDING run.
 
-        Every rejection raises :class:`RunClaimFailure` while the surrounding
+        Every rejection raises :class:`JobClaimFailure` while the surrounding
         ``BEGIN IMMEDIATE`` transaction rolls back. Scheduler eligibility
         checks are only advisory; this is the final concurrency gate.
         """
@@ -750,26 +784,26 @@ class PipelineRuntimeStore:
         lock_names = tuple(sorted(set(resource_locks)))
         read_names = tuple(sorted(set(resource_reads) - set(lock_names)))
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            row = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if row is None:
-                raise RunClaimFailure("RUN_NOT_FOUND", run_id)
-            if PipelineStatus(row["status"]) is not PipelineStatus.PENDING:
-                raise RunClaimFailure("RUN_NOT_PENDING", PipelineStatus(row["status"]).value)
-            if row["pipeline_id"] != pipeline_id:
-                raise RunClaimFailure("PIPELINE_ID_MISMATCH", row["pipeline_id"])
+                raise JobClaimFailure("RUN_NOT_FOUND", run_id)
+            if JobStatus(row["status"]) is not JobStatus.PENDING:
+                raise JobClaimFailure("RUN_NOT_PENDING", JobStatus(row["status"]).value)
+            if row["job_id"] != job_id:
+                raise JobClaimFailure("JOB_ID_MISMATCH", row["job_id"])
             if row["definition_version"] != definition_version:
-                raise RunClaimFailure("DEFINITION_VERSION_MISMATCH", row["definition_version"])
+                raise JobClaimFailure("DEFINITION_VERSION_MISMATCH", row["definition_version"])
             if overlap_policy is OverlapPolicy.FORBID:
                 overlap = connection.execute(
                     """
-                    SELECT run_id FROM pipeline_run
-                    WHERE pipeline_id = ? AND status = ? AND run_id != ?
+                    SELECT run_id FROM job_run
+                    WHERE job_id = ? AND status = ? AND run_id != ?
                     LIMIT 1
                     """,
-                    [pipeline_id, PipelineStatus.RUNNING.value, run_id],
+                    [job_id, JobStatus.RUNNING.value, run_id],
                 ).fetchone()
                 if overlap is not None:
-                    raise RunClaimFailure("OVERLAP_FORBIDDEN", overlap["run_id"])
+                    raise JobClaimFailure("OVERLAP_FORBIDDEN", overlap["run_id"])
             connection.execute("DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             connection.execute("DELETE FROM resource_read_lease WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             if lock_names:
@@ -787,7 +821,7 @@ class PipelineRuntimeStore:
                     None,
                 )
                 if conflict is not None:
-                    raise RunClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict)
+                    raise JobClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict)
                 active_readers = connection.execute(
                     "SELECT resource_name FROM resource_read_lease WHERE lease_expires_at > ?",
                     [_timestamp(timestamp)],
@@ -802,7 +836,7 @@ class PipelineRuntimeStore:
                     None,
                 )
                 if reader_conflict is not None:
-                    raise RunClaimFailure("RESOURCE_READERS_ACTIVE", reader_conflict)
+                    raise JobClaimFailure("RESOURCE_READERS_ACTIVE", reader_conflict)
             if read_names:
                 active_writers = connection.execute(
                     "SELECT resource_name FROM resource_lock WHERE lease_expires_at > ?",
@@ -818,16 +852,16 @@ class PipelineRuntimeStore:
                     None,
                 )
                 if writer_conflict is not None:
-                    raise RunClaimFailure("RESOURCE_WRITER_ACTIVE", writer_conflict)
-            assert_status_transition(PipelineStatus.PENDING, PipelineStatus.RUNNING)
+                    raise JobClaimFailure("RESOURCE_WRITER_ACTIVE", writer_conflict)
+            assert_status_transition(JobStatus.PENDING, JobStatus.RUNNING)
             connection.execute(
                 """
-                UPDATE pipeline_run
+                UPDATE job_run
                 SET status = ?, started_at = ?, heartbeat_at = ?, stdout_path = ?, stderr_path = ?
                 WHERE run_id = ?
                 """,
                 [
-                    PipelineStatus.RUNNING.value,
+                    JobStatus.RUNNING.value,
                     _timestamp(timestamp),
                     _timestamp(timestamp),
                     str(stdout_path) if stdout_path is not None else None,
@@ -863,15 +897,15 @@ class PipelineRuntimeStore:
                         _timestamp(expires),
                     ],
                 )
-            claimed = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            claimed = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             return self._run_from_row(claimed) if claimed is not None else None
 
     def heartbeat(self, run_id: str, *, lease_seconds: int, now: datetime | None = None) -> bool:
         timestamp = now or utc_now()
         with self._transaction() as connection:
             cursor = connection.execute(
-                "UPDATE pipeline_run SET heartbeat_at = ? WHERE run_id = ? AND status = ?",
-                [_timestamp(timestamp), run_id, PipelineStatus.RUNNING.value],
+                "UPDATE job_run SET heartbeat_at = ? WHERE run_id = ? AND status = ?",
+                [_timestamp(timestamp), run_id, JobStatus.RUNNING.value],
             )
             if cursor.rowcount != 1:
                 return False
@@ -895,7 +929,7 @@ class PipelineRuntimeStore:
         self,
         run_id: str,
         *,
-        status: PipelineStatus,
+        status: JobStatus,
         exit_code: int | None,
         timed_out: bool,
         error_summary: str | None,
@@ -904,24 +938,24 @@ class PipelineRuntimeStore:
         system_cpu_ms: int | None,
         peak_rss_kb: int | None,
         now: datetime | None = None,
-    ) -> PipelineRun:
+    ) -> JobRun:
         if status not in {
-            PipelineStatus.SUCCESS,
-            PipelineStatus.FAILED,
-            PipelineStatus.TIMED_OUT,
-            PipelineStatus.CANCELLED,
+            JobStatus.SUCCESS,
+            JobStatus.FAILED,
+            JobStatus.TIMED_OUT,
+            JobStatus.CANCELLED,
         }:
             raise ValueError("finish_run requires a terminal execution status")
         timestamp = now or utc_now()
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            row = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if row is None:
-                raise KeyError(f"unknown pipeline run {run_id}")
-            current = PipelineStatus(row["status"])
+                raise KeyError(f"unknown Job run {run_id}")
+            current = JobStatus(row["status"])
             assert_status_transition(current, status)
             connection.execute(
                 """
-                UPDATE pipeline_run
+                UPDATE job_run
                 SET status = ?, finished_at = ?, heartbeat_at = ?, exit_code = ?, timed_out = ?,
                     error_summary = ?, wall_duration_ms = ?, user_cpu_ms = ?, system_cpu_ms = ?,
                     peak_rss_kb = ?
@@ -933,7 +967,7 @@ class PipelineRuntimeStore:
                     _timestamp(timestamp),
                     exit_code,
                     int(timed_out),
-                    error_summary,
+                    _bounded_error_summary(error_summary),
                     wall_duration_ms,
                     user_cpu_ms,
                     system_cpu_ms,
@@ -943,7 +977,7 @@ class PipelineRuntimeStore:
             )
             connection.execute("DELETE FROM resource_lock WHERE owner_run_id = ?", [run_id])
             connection.execute("DELETE FROM resource_read_lease WHERE owner_run_id = ?", [run_id])
-            result = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            result = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if result is None:
                 raise RuntimeError("run disappeared while being finalized")
             return self._run_from_row(result)
@@ -954,37 +988,37 @@ class PipelineRuntimeStore:
         *,
         max_retries: int | None = None,
         now: datetime | None = None,
-    ) -> PipelineRun:
+    ) -> JobRun:
         """Create another attempt without changing the failed run evidence."""
 
         timestamp = now or utc_now()
         with self._transaction() as connection:
-            previous = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            previous = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if previous is None:
-                raise KeyError(f"unknown pipeline run {run_id}")
-            if PipelineStatus(previous["status"]) not in {PipelineStatus.FAILED, PipelineStatus.TIMED_OUT}:
+                raise KeyError(f"unknown Job run {run_id}")
+            if JobStatus(previous["status"]) not in {JobStatus.FAILED, JobStatus.TIMED_OUT}:
                 raise ValueError("only FAILED or TIMED_OUT runs may be retried")
             next_attempt = connection.execute(
-                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM pipeline_run WHERE pipeline_id = ? AND scheduled_at = ?",
-                [previous["pipeline_id"], previous["scheduled_at"]],
+                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM job_run WHERE job_id = ? AND scheduled_at = ?",
+                [previous["job_id"], previous["scheduled_at"]],
             ).fetchone()[0]
             if max_retries is not None and next_attempt > max_retries + 1:
-                raise ValueError(f"max_retries={max_retries} exhausted for {previous['pipeline_id']}")
+                raise ValueError(f"max_retries={max_retries} exhausted for {previous['job_id']}")
             retry_id = str(uuid.uuid4())
             connection.execute(
                 """
-                INSERT INTO pipeline_run (
-                    run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
+                INSERT INTO job_run (
+                    run_id, job_id, definition_version, scheduled_at, status, attempt,
                     timed_out, trigger_type, retry_of_run_id, trade_date_override,
                     parameter_overrides_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 """,
                 [
                     retry_id,
-                    previous["pipeline_id"],
+                    previous["job_id"],
                     previous["definition_version"],
                     previous["scheduled_at"],
-                    PipelineStatus.PENDING.value,
+                    JobStatus.PENDING.value,
                     next_attempt,
                     "RETRY",
                     run_id,
@@ -993,24 +1027,24 @@ class PipelineRuntimeStore:
                     _timestamp(timestamp),
                 ],
             )
-            row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [retry_id]).fetchone()
+            row = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [retry_id]).fetchone()
             if row is None:
                 raise RuntimeError("retry run was not created")
             return self._run_from_row(row)
 
-    def unblock_run(self, run_id: str) -> PipelineRun | None:
+    def unblock_run(self, run_id: str) -> JobRun | None:
         """Return a still-relevant BLOCKED record to PENDING without duplicating it."""
 
         with self._transaction() as connection:
-            row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
-            if row is None or PipelineStatus(row["status"]) is not PipelineStatus.BLOCKED:
+            row = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
+            if row is None or JobStatus(row["status"]) is not JobStatus.BLOCKED:
                 return None
-            assert_status_transition(PipelineStatus.BLOCKED, PipelineStatus.PENDING)
+            assert_status_transition(JobStatus.BLOCKED, JobStatus.PENDING)
             connection.execute(
-                "UPDATE pipeline_run SET status = ?, error_summary = NULL WHERE run_id = ?",
-                [PipelineStatus.PENDING.value, run_id],
+                "UPDATE job_run SET status = ?, error_summary = NULL WHERE run_id = ?",
+                [JobStatus.PENDING.value, run_id],
             )
-            result = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
+            result = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             return self._run_from_row(result) if result is not None else None
 
     def recover_stale(self, *, stale_after_seconds: int, now: datetime | None = None) -> tuple[int, int]:
@@ -1023,20 +1057,20 @@ class PipelineRuntimeStore:
         with self._transaction() as connection:
             stale = connection.execute(
                 """
-                SELECT run_id FROM pipeline_run
+                SELECT run_id FROM job_run
                 WHERE status = ? AND (heartbeat_at IS NULL OR heartbeat_at < ?)
                 """,
-                [PipelineStatus.RUNNING.value, _timestamp(cutoff)],
+                [JobStatus.RUNNING.value, _timestamp(cutoff)],
             ).fetchall()
             for row in stale:
                 connection.execute(
                     """
-                    UPDATE pipeline_run
+                    UPDATE job_run
                     SET status = ?, finished_at = ?, error_summary = ?
                     WHERE run_id = ?
                     """,
                     [
-                        PipelineStatus.FAILED.value,
+                        JobStatus.FAILED.value,
                         _timestamp(timestamp),
                         "stale heartbeat recovery",
                         row["run_id"],
@@ -1060,7 +1094,7 @@ class PipelineRuntimeStore:
         input_rows: int | None = None,
         metadata: Mapping[str, object] | None = None,
         now: datetime | None = None,
-    ) -> StageRun:
+    ) -> JobStageRun:
         timestamp = now or utc_now()
         with self._transaction() as connection:
             connection.execute(
@@ -1072,18 +1106,18 @@ class PipelineRuntimeStore:
                     run_id,
                     stage_name,
                     _timestamp(timestamp),
-                    PipelineStatus.RUNNING.value,
+                    JobStatus.RUNNING.value,
                     input_rows,
                     json.dumps(metadata or {}, sort_keys=True),
                 ],
             )
-        return StageRun(
+        return JobStageRun(
             run_id=run_id,
             stage_name=stage_name,
             started_at=timestamp,
             finished_at=None,
             duration_ms=None,
-            status=PipelineStatus.RUNNING,
+            status=JobStatus.RUNNING,
             input_rows=input_rows,
             output_rows=None,
             metadata=metadata or {},
@@ -1094,12 +1128,12 @@ class PipelineRuntimeStore:
         run_id: str,
         stage_name: str,
         *,
-        status: PipelineStatus,
+        status: JobStatus,
         output_rows: int | None = None,
         metadata: Mapping[str, object] | None = None,
         now: datetime | None = None,
-    ) -> StageRun:
-        if status not in {PipelineStatus.SUCCESS, PipelineStatus.FAILED, PipelineStatus.SKIPPED}:
+    ) -> JobStageRun:
+        if status not in {JobStatus.SUCCESS, JobStatus.FAILED, JobStatus.SKIPPED}:
             raise ValueError("stage completion must be SUCCESS, FAILED, or SKIPPED")
         timestamp = now or utc_now()
         with self._transaction() as connection:
@@ -1128,7 +1162,7 @@ class PipelineRuntimeStore:
                     stage_name,
                 ],
             )
-        return StageRun(
+        return JobStageRun(
             run_id=run_id,
             stage_name=stage_name,
             started_at=started,

@@ -1,4 +1,4 @@
-"""Versioned pipeline definitions and runtime records."""
+"""Versioned Job definitions and durable runtime records."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any, Mapping
 from datetime import date
 
 
-class PipelineStatus(StrEnum):
+class JobStatus(StrEnum):
     PENDING = "PENDING"
     BLOCKED = "BLOCKED"
     RUNNING = "RUNNING"
@@ -27,39 +27,39 @@ class OverlapPolicy(StrEnum):
     ALLOW = "ALLOW"
 
 
-_ALLOWED_TRANSITIONS: dict[PipelineStatus, frozenset[PipelineStatus]] = {
-    PipelineStatus.PENDING: frozenset(
-        {PipelineStatus.BLOCKED, PipelineStatus.RUNNING, PipelineStatus.CANCELLED, PipelineStatus.SKIPPED}
+_ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
+    JobStatus.PENDING: frozenset(
+        {JobStatus.BLOCKED, JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.SKIPPED}
     ),
-    PipelineStatus.BLOCKED: frozenset(
-        {PipelineStatus.PENDING, PipelineStatus.CANCELLED, PipelineStatus.SKIPPED}
+    JobStatus.BLOCKED: frozenset(
+        {JobStatus.PENDING, JobStatus.CANCELLED, JobStatus.SKIPPED}
     ),
-    PipelineStatus.RUNNING: frozenset(
+    JobStatus.RUNNING: frozenset(
         {
-            PipelineStatus.SUCCESS,
-            PipelineStatus.FAILED,
-            PipelineStatus.TIMED_OUT,
-            PipelineStatus.CANCELLED,
+            JobStatus.SUCCESS,
+            JobStatus.FAILED,
+            JobStatus.TIMED_OUT,
+            JobStatus.CANCELLED,
         }
     ),
-    PipelineStatus.SUCCESS: frozenset(),
-    PipelineStatus.FAILED: frozenset(),
-    PipelineStatus.TIMED_OUT: frozenset(),
-    PipelineStatus.CANCELLED: frozenset(),
-    PipelineStatus.SKIPPED: frozenset(),
+    JobStatus.SUCCESS: frozenset(),
+    JobStatus.FAILED: frozenset(),
+    JobStatus.TIMED_OUT: frozenset(),
+    JobStatus.CANCELLED: frozenset(),
+    JobStatus.SKIPPED: frozenset(),
 }
 
 
-def assert_status_transition(current: PipelineStatus, target: PipelineStatus) -> None:
+def assert_status_transition(current: JobStatus, target: JobStatus) -> None:
     """Reject state changes outside the run state machine."""
 
     if target not in _ALLOWED_TRANSITIONS[current]:
-        raise ValueError(f"illegal pipeline status transition: {current} -> {target}")
+        raise ValueError(f"illegal Job status transition: {current} -> {target}")
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineDefinition:
-    pipeline_id: str
+class JobDefinition:
+    job_id: str
     name: str
     enabled: bool
     schedule: str
@@ -81,7 +81,7 @@ class PipelineDefinition:
     manual_execution_allowed: bool = True
     # Source-registered formal Contracts execute in the owning serve process.
     # JSON/argv definitions leave this unset and continue through subprocess.
-    in_process_executor: Callable[["PipelineRun"], object] | None = field(
+    in_process_executor: Callable[["JobRun"], object] | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -89,14 +89,14 @@ class PipelineDefinition:
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineRun:
+class JobRun:
     run_id: str
-    pipeline_id: str
+    job_id: str
     definition_version: str
     scheduled_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
-    status: PipelineStatus
+    status: JobStatus
     attempt: int
     exit_code: int | None
     timed_out: bool
@@ -116,13 +116,22 @@ class PipelineRun:
 
 
 @dataclass(frozen=True, slots=True)
-class StageRun:
+class JobExecutionResult:
+    """Adapter-neutral outcome returned by an in-process Job executor."""
+
+    status: JobStatus
+    payload: Mapping[str, object] | None = None
+    error_summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobStageRun:
     run_id: str
     stage_name: str
     started_at: datetime
     finished_at: datetime | None
     duration_ms: int | None
-    status: PipelineStatus
+    status: JobStatus
     input_rows: int | None
     output_rows: int | None
     metadata: Mapping[str, Any]

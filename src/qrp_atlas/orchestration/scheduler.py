@@ -1,4 +1,4 @@
-"""Create due Pipeline run records; execution belongs exclusively to the Runner."""
+"""Create due Job run records; execution belongs exclusively to the Runner."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .cron import CronExpression
-from .models import OverlapPolicy, PipelineDefinition, PipelineRun, PipelineStatus
-from .store import PipelineRuntimeStore
+from .models import OverlapPolicy, JobDefinition, JobRun, JobStatus
+from .store import JobRuntimeStore
 
 
 DEFAULT_SCHEDULER_ID = "default"
@@ -20,10 +20,10 @@ DEFAULT_STALE_AFTER_SECONDS = 180
 
 
 @dataclass(frozen=True, slots=True)
-class SchedulerScanResult(Sequence[PipelineRun]):
+class SchedulerScanResult(Sequence[JobRun]):
     """Durable scan outcome, including the cursor interval actually handled."""
 
-    created_runs: tuple[PipelineRun, ...]
+    created_runs: tuple[JobRun, ...]
     scheduler_id: str
     requested_start_at: datetime | None
     scan_start_at: datetime | None
@@ -32,20 +32,20 @@ class SchedulerScanResult(Sequence[PipelineRun]):
     stale_runs_recovered: int
     expired_locks_reclaimed: int
 
-    def __getitem__(self, index: int | slice) -> PipelineRun | tuple[PipelineRun, ...]:
+    def __getitem__(self, index: int | slice) -> JobRun | tuple[JobRun, ...]:
         return self.created_runs[index]
 
     def __len__(self) -> int:
         return len(self.created_runs)
 
 
-class PipelineScheduler:
+class JobScheduler:
     """Cursor-backed, non-executing scanner for Git-versioned definitions."""
 
     def __init__(
         self,
-        store: PipelineRuntimeStore,
-        definitions: tuple[PipelineDefinition, ...],
+        store: JobRuntimeStore,
+        definitions: tuple[JobDefinition, ...],
         *,
         scheduler_id: str = DEFAULT_SCHEDULER_ID,
         max_catch_up_minutes: int = DEFAULT_MAX_CATCH_UP_MINUTES,
@@ -118,7 +118,7 @@ class PipelineScheduler:
             if interval_minutes > self.max_catch_up_minutes:
                 scan_start = instant - timedelta(minutes=self.max_catch_up_minutes - 1)
                 catch_up_limited = True
-            candidates: list[tuple[PipelineDefinition, datetime, PipelineStatus, str | None]] = []
+            candidates: list[tuple[JobDefinition, datetime, JobStatus, str | None]] = []
             for scheduled_at in _minutes_between(scan_start, instant):
                 for definition, cron, timezone in compiled_definitions:
                     local_time = scheduled_at.astimezone(timezone)
@@ -130,9 +130,9 @@ class PipelineScheduler:
                 # A fresh runtime has no durable evidence for every missed
                 # high-frequency tick.  Bootstrap the latest due occurrence of
                 # each definition; normal cursor-backed recovery remains exact.
-                latest_candidates: dict[str, tuple[PipelineDefinition, datetime, PipelineStatus, str | None]] = {}
+                latest_candidates: dict[str, tuple[JobDefinition, datetime, JobStatus, str | None]] = {}
                 for candidate in candidates:
-                    latest_candidates[candidate[0].pipeline_id] = candidate
+                    latest_candidates[candidate[0].job_id] = candidate
                 candidates = list(latest_candidates.values())
             created = self.store.commit_scheduler_scan(
                 scheduler_id=self.scheduler_id,
@@ -155,13 +155,13 @@ class PipelineScheduler:
         raise RuntimeError("scheduler cursor changed repeatedly; scan was not committed")
 
     def _refresh_blocked_runs(self) -> None:
-        definitions = {definition.pipeline_id: definition for definition in self.definitions}
-        for run in self.store.list_runs(status=PipelineStatus.BLOCKED, limit=10_000):
-            definition = definitions.get(run.pipeline_id)
+        definitions = {definition.job_id: definition for definition in self.definitions}
+        for run in self.store.list_runs(status=JobStatus.BLOCKED, limit=10_000):
+            definition = definitions.get(run.job_id)
             if definition is None or definition.definition_version != run.definition_version:
                 continue
             status, _ = self._eligibility(definition, run.scheduled_at)
-            if status is PipelineStatus.PENDING:
+            if status is JobStatus.PENDING:
                 self.store.unblock_run(run.run_id)
 
     def refresh_blocked_runs(self) -> None:
@@ -169,31 +169,31 @@ class PipelineScheduler:
 
         self._refresh_blocked_runs()
 
-    def eligibility(self, definition: PipelineDefinition, scheduled_at: datetime) -> tuple[PipelineStatus, str | None]:
+    def eligibility(self, definition: JobDefinition, scheduled_at: datetime) -> tuple[JobStatus, str | None]:
         """Expose the runtime's existing dependency and overlap gate for manual runs."""
 
         return self._eligibility(definition, scheduled_at)
 
     def _eligibility(
         self,
-        definition: PipelineDefinition,
+        definition: JobDefinition,
         scheduled_at: datetime,
-    ) -> tuple[PipelineStatus, str | None]:
+    ) -> tuple[JobStatus, str | None]:
         failed_dependencies: list[str] = []
         for dependency_id in definition.dependencies:
             dependency_run = self.store.latest_run_before(dependency_id, scheduled_at)
             if dependency_run is None:
                 failed_dependencies.append(f"dependency {dependency_id} has no completed run")
-            elif dependency_run.status is not PipelineStatus.SUCCESS:
+            elif dependency_run.status is not JobStatus.SUCCESS:
                 failed_dependencies.append(
                     f"dependency {dependency_id} latest status is {dependency_run.status.value}"
                 )
         if failed_dependencies:
-            return PipelineStatus.BLOCKED, "; ".join(failed_dependencies)
-        if definition.overlap_policy is OverlapPolicy.FORBID and self.store.has_active_pipeline_run(
-            definition.pipeline_id
+            return JobStatus.BLOCKED, "; ".join(failed_dependencies)
+        if definition.overlap_policy is OverlapPolicy.FORBID and self.store.has_active_job_run(
+            definition.job_id
         ):
-            return PipelineStatus.BLOCKED, "overlap_policy=FORBID has an active run"
+            return JobStatus.BLOCKED, "overlap_policy=FORBID has an active run"
         locked = [
             resource_name
             for resource_name in definition.resource_locks
@@ -201,15 +201,15 @@ class PipelineScheduler:
             or self.store.has_active_resource_read_lease(resource_name)
         ]
         if locked:
-            return PipelineStatus.BLOCKED, f"active resource access: {', '.join(locked)}"
+            return JobStatus.BLOCKED, f"active resource access: {', '.join(locked)}"
         reading_conflicts = [
             resource_name
             for resource_name in definition.resource_reads
             if self.store.has_active_resource_lock(resource_name)
         ]
         if reading_conflicts:
-            return PipelineStatus.BLOCKED, f"active resource writers: {', '.join(reading_conflicts)}"
-        return PipelineStatus.PENDING, None
+            return JobStatus.BLOCKED, f"active resource writers: {', '.join(reading_conflicts)}"
+        return JobStatus.PENDING, None
 
 
 def _minutes_between(start: datetime, end: datetime) -> Iterator[datetime]:

@@ -65,7 +65,7 @@ from .daily_basic.clean import clean_daily_basic
 from .daily_update.clean import clean_daily_snapshot
 from .daily_update.enrich import enrich_daily_snapshot
 from .registry import register_pipeline
-from .runtime.models import OverlapPolicy
+from qrp_atlas.orchestration.models import OverlapPolicy
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")

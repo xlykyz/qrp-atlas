@@ -1,4 +1,4 @@
-"""Long-running, single-leader Pipeline service built on the runtime store."""
+"""Long-running, single-leader Job service built on the runtime store."""
 
 from __future__ import annotations
 
@@ -10,36 +10,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from .models import PipelineDefinition, PipelineRun, PipelineStatus
+from .models import JobDefinition, JobRun, JobStatus
 from .planning import dependency_plan
-from .result_log import PipelineResultLog, ResultLogConfigurationError
-from .runner import PipelineRunner, PipelineRuntimePaths
-from .scheduler import PipelineScheduler
-from .store import PipelineRuntimeStore, RunClaimFailure
+from .result_log import JobResultLog, ResultLogConfigurationError
+from .runner import JobRunner, JobRuntimePaths
+from .scheduler import JobScheduler
+from .store import JobRuntimeStore, JobClaimFailure
 
 
 @dataclass(frozen=True, slots=True)
-class ServiceCycleResult:
+class JobCycleResult:
     """One quiet scheduler pass; idle cycles intentionally produce no log record."""
 
-    created_runs: tuple[PipelineRun, ...]
-    executed_runs: tuple[PipelineRun, ...]
+    created_runs: tuple[JobRun, ...]
+    executed_runs: tuple[JobRun, ...]
     stale_runs_recovered: int
     expired_locks_reclaimed: int
 
 
-class PipelineServiceFatalError(RuntimeError):
+class JobServiceFatalError(RuntimeError):
     """The service can no longer make safe scheduling decisions."""
 
 
-class PipelineService:
+class JobService:
     """Run scheduled work continuously with a durable service lease and heartbeat."""
 
     def __init__(
         self,
-        store: PipelineRuntimeStore,
-        paths: PipelineRuntimePaths,
-        definitions: tuple[PipelineDefinition, ...],
+        store: JobRuntimeStore,
+        paths: JobRuntimePaths,
+        definitions: tuple[JobDefinition, ...],
         *,
         scheduler_id: str,
         heartbeat_interval_seconds: float,
@@ -48,7 +48,7 @@ class PipelineService:
         max_catch_up_minutes: int,
         poll_interval_seconds: float = 5.0,
         max_workers: int = 4,
-        service_name: str = "pipeline-scheduler",
+        service_name: str = "job-scheduler",
         owner_id: str | None = None,
     ) -> None:
         if poll_interval_seconds <= 0:
@@ -58,7 +58,7 @@ class PipelineService:
         self.store = store
         self.paths = paths
         self.definitions = definitions
-        self.scheduler = PipelineScheduler(
+        self.scheduler = JobScheduler(
             store,
             definitions,
             scheduler_id=scheduler_id,
@@ -74,7 +74,7 @@ class PipelineService:
         self.max_workers = max_workers
         self.service_name = service_name
         self.owner_id = owner_id or str(uuid.uuid4())
-        self.result_log = PipelineResultLog(paths.result_logs_dir)
+        self.result_log = JobResultLog(paths.result_logs_dir)
         self._stop_event = threading.Event()
         self._lost_lease = threading.Event()
         self._lease_heartbeater: threading.Thread | None = None
@@ -97,7 +97,7 @@ class PipelineService:
         self._started = True
         self._lease_heartbeater = threading.Thread(
             target=self._heartbeat_loop,
-            name=f"pipeline-service-heartbeat-{self.owner_id}",
+            name=f"job-service-heartbeat-{self.owner_id}",
             daemon=True,
         )
         self._lease_heartbeater.start()
@@ -121,25 +121,25 @@ class PipelineService:
     def request_stop(self) -> None:
         self._stop_event.set()
 
-    def run_once(self, *, now: datetime | None = None) -> ServiceCycleResult:
+    def run_once(self, *, now: datetime | None = None) -> JobCycleResult:
         """Scan due work, then execute all currently runnable tasks in dependency order."""
 
         if not self._started:
-            raise RuntimeError("pipeline service must be started before run_once")
+            raise RuntimeError("Job service must be started before run_once")
         if self._lost_lease.is_set():
-            raise PipelineServiceFatalError(self._fatal_reason or "pipeline scheduler service lease was lost")
+            raise JobServiceFatalError(self._fatal_reason or "pipeline scheduler service lease was lost")
         instant = (now or datetime.now(UTC)).astimezone(UTC)
         try:
             scan = self.scheduler.scan(now=instant)
             executed = self._execute_available(instant)
             self._last_error = None
-            return ServiceCycleResult(
+            return JobCycleResult(
                 created_runs=scan.created_runs,
                 executed_runs=tuple(executed),
                 stale_runs_recovered=scan.stale_runs_recovered,
                 expired_locks_reclaimed=scan.expired_locks_reclaimed,
             )
-        except PipelineServiceFatalError:
+        except JobServiceFatalError:
             raise
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {exc}"[:500]
@@ -154,14 +154,14 @@ class PipelineService:
             while not self._stop_event.is_set():
                 try:
                     self.run_once()
-                except PipelineServiceFatalError as exc:
+                except JobServiceFatalError as exc:
                     raise
                 except Exception as exc:
                     if on_cycle_error is not None:
                         on_cycle_error(exc)
                 self._stop_event.wait(self.poll_interval_seconds)
             if self._lost_lease.is_set():
-                raise PipelineServiceFatalError(self._fatal_reason or "pipeline scheduler service lease was lost")
+                raise JobServiceFatalError(self._fatal_reason or "pipeline scheduler service lease was lost")
         finally:
             self.stop()
 
@@ -176,7 +176,7 @@ class PipelineService:
                     last_error=self._last_error,
                 )
             except Exception as exc:
-                self._fatal_reason = f"pipeline runtime store is unavailable: {type(exc).__name__}: {exc}"
+                self._fatal_reason = f"Job runtime store is unavailable: {type(exc).__name__}: {exc}"
                 renewed = False
             if not renewed:
                 self._fatal_reason = self._fatal_reason or "pipeline scheduler service lease was lost"
@@ -195,28 +195,28 @@ class PipelineService:
                 last_error=self._last_error,
             )
         except Exception as heartbeat_error:
-            raise PipelineServiceFatalError(
-                f"pipeline runtime store is unavailable: {type(heartbeat_error).__name__}: {heartbeat_error}"
+            raise JobServiceFatalError(
+                f"Job runtime store is unavailable: {type(heartbeat_error).__name__}: {heartbeat_error}"
             ) from original
         if not renewed:
-            raise PipelineServiceFatalError("pipeline scheduler service lease was lost") from original
+            raise JobServiceFatalError("pipeline scheduler service lease was lost") from original
         if isinstance(original, (sqlite3.Error, OSError, ResultLogConfigurationError)):
-            raise PipelineServiceFatalError(
-                f"pipeline service cannot continue safely: {type(original).__name__}: {original}"
+            raise JobServiceFatalError(
+                f"Job service cannot continue safely: {type(original).__name__}: {original}"
             ) from original
 
     def _execution_order(self) -> dict[str, int]:
         ordered: list[str] = []
         for definition in self.definitions:
-            for item in dependency_plan(self.definitions, definition.pipeline_id):
-                if item.pipeline_id not in ordered:
-                    ordered.append(item.pipeline_id)
-        return {pipeline_id: index for index, pipeline_id in enumerate(ordered)}
+            for item in dependency_plan(self.definitions, definition.job_id):
+                if item.job_id not in ordered:
+                    ordered.append(item.job_id)
+        return {job_id: index for index, job_id in enumerate(ordered)}
 
-    def _execute_available(self, now: datetime) -> list[PipelineRun]:
-        by_id = {definition.pipeline_id: definition for definition in self.definitions}
+    def _execute_available(self, now: datetime) -> list[JobRun]:
+        by_id = {definition.job_id: definition for definition in self.definitions}
         order = self._execution_order()
-        completed: list[PipelineRun] = []
+        completed: list[JobRun] = []
         # A successful upstream task can release a BLOCKED downstream task in
         # this same service pass.  A fixed point also lets independent work run
         # when another chain has failed.
@@ -224,27 +224,27 @@ class PipelineService:
             self.scheduler.refresh_blocked_runs()
             pending = [
                 run
-                for run in self.store.list_runs(status=PipelineStatus.PENDING, limit=10_000)
+                for run in self.store.list_runs(status=JobStatus.PENDING, limit=10_000)
                 if run.scheduled_at <= now
-                and run.pipeline_id in by_id
-                and by_id[run.pipeline_id].definition_version == run.definition_version
+                and run.job_id in by_id
+                and by_id[run.job_id].definition_version == run.definition_version
             ]
             if not pending:
                 break
-            pending.sort(key=lambda run: (run.scheduled_at, order.get(run.pipeline_id, len(order)), run.attempt))
+            pending.sort(key=lambda run: (run.scheduled_at, order.get(run.job_id, len(order)), run.attempt))
             progressed = False
 
-            def execute(pending_run: PipelineRun) -> PipelineRun | None:
-                definition = by_id[pending_run.pipeline_id]
+            def execute(pending_run: JobRun) -> JobRun | None:
+                definition = by_id[pending_run.job_id]
                 try:
-                    finished = PipelineRunner(
+                    finished = JobRunner(
                         self.store,
                         self.paths,
                         heartbeat_interval_seconds=self.heartbeat_interval_seconds,
                         lease_seconds=self.lease_seconds,
                         cancel_event=self._stop_event,
                     ).run(pending_run.run_id, definition)
-                except RunClaimFailure:
+                except JobClaimFailure:
                     # Another permitted runtime may have claimed it between the
                     # list and claim.  Keep the service healthy and rescan later.
                     return None
@@ -252,7 +252,7 @@ class PipelineService:
                 return finished
 
             workers = min(self.max_workers, len(pending))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pipeline-worker") as executor:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="job-worker") as executor:
                 futures = [executor.submit(execute, pending_run) for pending_run in pending]
                 for future in as_completed(futures):
                     finished = future.result()

@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from qrp_atlas.pipeline.runtime.definitions import load_definitions
+from qrp_atlas.orchestration.definitions import load_definitions
 
 
 ROOT = Path(__file__).resolve().parents[2]

@@ -26,7 +26,7 @@ from ..contracts import (
     TransactionMode,
     WriteMode,
 )
-from ..runtime.models import OverlapPolicy
+from qrp_atlas.orchestration.models import OverlapPolicy
 
 
 def _fixture_target_date(invocation) -> TargetWindow:

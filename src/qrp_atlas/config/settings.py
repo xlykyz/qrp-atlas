@@ -213,7 +213,7 @@ class PathSettings:
     db_dir: Path
     duckdb_path: Path
     state_dir: Path
-    pipeline_runtime_dir: Path
+    job_runtime_dir: Path
     backtest_runs_dir: Path
     backtest_tasks_dir: Path
     robustness_runs_dir: Path
@@ -232,7 +232,7 @@ class PathSettings:
             self.canonical_dir,
             self.db_dir,
             self.state_dir,
-            self.pipeline_runtime_dir,
+            self.job_runtime_dir,
             self.backtest_runs_dir,
             self.backtest_tasks_dir,
             self.robustness_runs_dir,
@@ -367,9 +367,9 @@ class AppSettings:
             reader.get("QRP_STATE_DIR", str(data_dir / "state")),
             base=root,
         )
-        pipeline_runtime_dir = _resolve_path(
-            "QRP_PIPELINE_RUNTIME_DIR",
-            reader.get("QRP_PIPELINE_RUNTIME_DIR", str(data_dir / "runtime" / "pipeline")),
+        job_runtime_dir = _resolve_path(
+            "QRP_JOB_RUNTIME_DIR",
+            reader.get("QRP_JOB_RUNTIME_DIR", str(data_dir / "runtime" / "job")),
             base=root,
         )
         backtest_runs_dir = _resolve_path(
@@ -535,7 +535,7 @@ class AppSettings:
             db_dir=db_dir,
             duckdb_path=duckdb_path,
             state_dir=state_dir,
-            pipeline_runtime_dir=pipeline_runtime_dir,
+            job_runtime_dir=job_runtime_dir,
             backtest_runs_dir=backtest_runs_dir,
             backtest_tasks_dir=backtest_tasks_dir,
             robustness_runs_dir=robustness_runs_dir,
@@ -597,7 +597,7 @@ class AppSettings:
                 "data_dir": str(self.paths.data_dir),
                 "duckdb_path": str(self.paths.duckdb_path),
                 "state_dir": str(self.paths.state_dir),
-                "pipeline_runtime_dir": str(self.paths.pipeline_runtime_dir),
+                "job_runtime_dir": str(self.paths.job_runtime_dir),
                 "backtest_runs_dir": str(self.paths.backtest_runs_dir),
                 "backtest_tasks_dir": str(self.paths.backtest_tasks_dir),
                 "robustness_runs_dir": str(self.paths.robustness_runs_dir),
@@ -744,7 +744,7 @@ SUPPORTED_ENV_VARS = frozenset(
         "QRP_DATA_DIR",
         "QRP_DUCKDB_PATH",
         "QRP_STATE_DIR",
-        "QRP_PIPELINE_RUNTIME_DIR",
+        "QRP_JOB_RUNTIME_DIR",
         "QRP_BACKTEST_RUNS_DIR",
         "QRP_BACKTEST_TASKS_DIR",
         "QRP_ROBUSTNESS_RUNS_DIR",

@@ -26,9 +26,9 @@ from qrp_atlas.pipeline.market_data_contracts import (
     SUSPEND_D_INGEST,
     ZT_DT_POOL_DAILY,
 )
-from qrp_atlas.pipeline.runtime.contract_adapter import ContractDeploymentSelection, contract_runtime_definition
-from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore
+from qrp_atlas.pipeline.job_adapter import ContractDeploymentSelection, contract_runtime_definition
+from qrp_atlas.jobs_cli import main as pipeline_cli
+from qrp_atlas.orchestration.store import JobRuntimeStore
 from qrp_atlas.pipeline.testing import ContractTestHarness, assert_contract_result_matches_context
 
 
@@ -818,8 +818,8 @@ def test_formal_cli_uses_existing_runner_claim_and_persists_a_structured_failure
     )
 
     assert code == 1
-    store = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3")
-    runs = store.list_runs(pipeline_id="market_daily_update")
+    store = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3")
+    runs = store.list_runs(job_id="market_daily_update")
     assert len(runs) == 1
     assert runs[0].status.value == "FAILED"
     result = store.get_result(runs[0].run_id)

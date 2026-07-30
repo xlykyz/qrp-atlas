@@ -28,7 +28,7 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
     """Execute common preflight, business logic, completion, and result assembly.
 
     Dependency state, claiming, locking, timeout, heartbeat, and retry remain the
-    responsibility of ``pipeline.runtime``.  This function intentionally never
+    responsibility of the generic Job orchestrator.  This function intentionally never
     implements those runtime concerns a second time.
     """
 

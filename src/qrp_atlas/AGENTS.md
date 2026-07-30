@@ -18,7 +18,8 @@ contracts → indicators → strategies
 
 ```text
 contracts          定义标准数据与时间语义
-pipeline           生产、版本化和读取标准数据
+orchestration       通用 Job 编排、调度、资源 lease、状态持久化与结果审计
+pipeline            生产、版本化和读取标准数据；通过 job_adapter 接入 orchestration
 indicators         计算客观指标、特征、因子与状态
 strategies         输出交易决策和目标
 backtest runtime   准备输入并运行策略
@@ -48,6 +49,7 @@ api                编排并暴露应用能力
 ## 允许的依赖方向
 
 ```text
+pipeline/job_adapter → orchestration
 pipeline → contracts
 indicators → contracts
 strategies → indicators / contracts
@@ -61,6 +63,8 @@ auth → users
 api → auth / users / indicators / strategies / backtest / results
 frontend → api
 ```
+
+`orchestration/` 是业务无关的顶级 Job Runtime。它不得导入 `pipeline`、`indicators`、`strategies`、`backtest` 或 `api`，也不得理解 DuckDB 表、市场数据源、交易日期或业务质量规则。Pipeline Contract 的业务语义保留在 `pipeline/`，由 `pipeline/job_adapter.py` 将 `PipelineContract.pipeline_id` 映射为 `JobDefinition.job_id`。正式入口是 `qrp-atlas-jobs`；通用运行库使用 `job_runtime.sqlite3` 和 `job_result`，不得重新引入 `pipeline/runtime`。
 
 禁止的典型依赖：
 

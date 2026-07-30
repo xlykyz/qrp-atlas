@@ -32,7 +32,7 @@ qrp-atlas-auth = "qrp_atlas.auth.cli:main"
 qrp-atlas-system-b = "qrp_atlas.pipeline.system_b.cli:main"
 qrp-atlas-system-b-episode = "qrp_atlas.pipeline.system_b_episode.cli:main"
 qrp-atlas-system-b-pools = "qrp_atlas.pipeline.system_b_pools.cli:main"
-qrp-atlas-pipeline = "qrp_atlas.pipeline.runtime.cli:main"
+qrp-atlas-jobs = "qrp_atlas.jobs_cli:main"
 
 [project.optional-dependencies]
 test = [
@@ -52,7 +52,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"qrp_atlas.pipeline.runtime" = ["*.json"]
+"qrp_atlas.orchestration" = ["*.json"]
 
 # ==========================
 # pytest 配置

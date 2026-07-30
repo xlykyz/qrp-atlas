@@ -13,11 +13,11 @@ import duckdb
 import pytest
 
 from qrp_atlas.pipeline.contracts import ContractError
-from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
-from qrp_atlas.pipeline.runtime.models import OverlapPolicy, PipelineDefinition, PipelineStatus
-from qrp_atlas.pipeline.runtime.service import PipelineService
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore, RunClaimFailure
-from qrp_atlas.pipeline.runtime.runner import PipelineRunner, PipelineRuntimePaths
+from qrp_atlas.jobs_cli import main as pipeline_cli
+from qrp_atlas.orchestration.models import OverlapPolicy, JobDefinition, JobStatus
+from qrp_atlas.orchestration.service import JobService
+from qrp_atlas.orchestration.store import JobRuntimeStore, JobClaimFailure
+from qrp_atlas.orchestration.runner import JobRunner, JobRuntimePaths
 
 
 def instant(hour: int, minute: int) -> datetime:
@@ -26,7 +26,7 @@ def instant(hour: int, minute: int) -> datetime:
 
 def fixture_definition(
     tmp_path: Path,
-    pipeline_id: str,
+    job_id: str,
     *,
     schedule: str = "* * * * *",
     dependencies: tuple[str, ...] = (),
@@ -34,8 +34,8 @@ def fixture_definition(
     resource_locks: tuple[str, ...] = (),
     resource_reads: tuple[str, ...] = (),
     sleep_seconds: float = 0.0,
-) -> tuple[PipelineDefinition, Path]:
-    marker = tmp_path / f"{pipeline_id}.marker"
+) -> tuple[JobDefinition, Path]:
+    marker = tmp_path / f"{job_id}.marker"
     marker.parent.mkdir(parents=True, exist_ok=True)
     source = (
         "from pathlib import Path; import os, time; "
@@ -44,9 +44,9 @@ def fixture_definition(
     )
     command = (sys.executable, "-c", source if succeeds else "raise SystemExit(7)")
     return (
-        PipelineDefinition(
-            pipeline_id=pipeline_id,
-            name=pipeline_id,
+        JobDefinition(
+            job_id=job_id,
+            name=job_id,
             enabled=True,
             schedule=schedule,
             timezone="Asia/Shanghai",
@@ -65,13 +65,13 @@ def fixture_definition(
     )
 
 
-def service(tmp_path: Path, definitions: tuple[PipelineDefinition, ...], *, owner_id: str = "fixture-service") -> PipelineService:
-    paths = PipelineRuntimePaths(
+def service(tmp_path: Path, definitions: tuple[JobDefinition, ...], *, owner_id: str = "fixture-service") -> JobService:
+    paths = JobRuntimePaths(
         tmp_path / "runtime",
         result_logs_dir_override=tmp_path / "external-audit" / "pipeline",
     )
-    return PipelineService(
-        PipelineRuntimeStore(paths.database_path),
+    return JobService(
+        JobRuntimeStore(paths.database_path),
         paths,
         definitions,
         scheduler_id="fixture-scheduler",
@@ -95,7 +95,7 @@ class _InProcessResult:
         run = self.run
         return {
             "run_id": run.run_id,
-            "pipeline_id": run.pipeline_id,
+            "job_id": run.job_id,
             "status": self.status,
             "target_window": {"target_date": run.scheduled_at.date().isoformat()},
             "metrics": {"rows_written": 1},
@@ -106,14 +106,14 @@ class _InProcessResult:
 
 def in_process_definition(
     tmp_path: Path,
-    pipeline_id: str,
+    job_id: str,
     *,
     table: str,
     resource_locks: tuple[str, ...] = (),
     resource_reads: tuple[str, ...] = (),
     sleep_seconds: float = 0.0,
     started: threading.Event | None = None,
-) -> PipelineDefinition:
+) -> JobDefinition:
     database = tmp_path / "shared.duckdb"
 
     def execute(run: object) -> _InProcessResult:
@@ -127,9 +127,9 @@ def in_process_definition(
             connection.close()
         return _InProcessResult(run)
 
-    return PipelineDefinition(
-        pipeline_id=pipeline_id,
-        name=pipeline_id,
+    return JobDefinition(
+        job_id=job_id,
+        name=job_id,
         enabled=True,
         schedule="* * * * *",
         timezone="Asia/Shanghai",
@@ -154,7 +154,7 @@ def test_service_waits_until_target_then_bootstraps_and_does_not_repeat(tmp_path
         assert not marker.exists()
         assert not list((tmp_path / "external-audit" / "pipeline").glob("*.jsonl"))
         after = first.run_once(now=instant(0, 5))
-        assert [run.status for run in after.executed_runs] == [PipelineStatus.SUCCESS]
+        assert [run.status for run in after.executed_runs] == [JobStatus.SUCCESS]
         assert marker.read_text(encoding="utf-8") == "daily"
     finally:
         first.stop()
@@ -169,10 +169,10 @@ def test_service_waits_until_target_then_bootstraps_and_does_not_repeat(tmp_path
     finally:
         restarted.stop()
 
-    store = PipelineRuntimeStore(tmp_path / "runtime" / "pipeline_runtime.sqlite3")
-    runs = store.list_runs(pipeline_id="daily")
+    store = JobRuntimeStore(tmp_path / "runtime" / "job_runtime.sqlite3")
+    runs = store.list_runs(job_id="daily")
     assert len(runs) == 1
-    assert runs[0].status is PipelineStatus.SUCCESS
+    assert runs[0].status is JobStatus.SUCCESS
 
 
 def test_service_continues_after_task_failure_and_writes_safe_result_logs(tmp_path: Path) -> None:
@@ -186,14 +186,14 @@ def test_service_continues_after_task_failure_and_writes_safe_result_logs(tmp_pa
     finally:
         runtime.stop()
 
-    outcomes = {run.pipeline_id: run.status for run in cycle.executed_runs}
-    assert outcomes == {"failing": PipelineStatus.FAILED, "independent": PipelineStatus.SUCCESS}
+    outcomes = {run.job_id: run.status for run in cycle.executed_runs}
+    assert outcomes == {"failing": JobStatus.FAILED, "independent": JobStatus.SUCCESS}
     assert not failing_marker.exists()
     assert independent_marker.read_text(encoding="utf-8") == "independent"
-    store = PipelineRuntimeStore(tmp_path / "runtime" / "pipeline_runtime.sqlite3")
-    assert store.list_runs(pipeline_id="blocked")[0].status is PipelineStatus.BLOCKED
+    store = JobRuntimeStore(tmp_path / "runtime" / "job_runtime.sqlite3")
+    assert store.list_runs(job_id="blocked")[0].status is JobStatus.BLOCKED
     records = [json.loads(line) for path in (tmp_path / "external-audit" / "pipeline").glob("*.jsonl") for line in path.read_text(encoding="utf-8").splitlines()]
-    assert {record["pipeline_id"] for record in records} == {"failing", "independent"}
+    assert {record["job_id"] for record in records} == {"failing", "independent"}
     assert all(set(record) >= {"run_id", "business_date", "tasks", "duration_ms", "status"} for record in records)
     assert "FIXTURE_MARKER" not in json.dumps(records)
 
@@ -204,7 +204,7 @@ def test_service_lease_rejects_second_scheduler_process(tmp_path: Path) -> None:
     second = service(tmp_path, (definition,), owner_id="second")
     first.start()
     try:
-        with pytest.raises(RunClaimFailure, match="SCHEDULER_SERVICE_ACTIVE"):
+        with pytest.raises(JobClaimFailure, match="SCHEDULER_SERVICE_ACTIVE"):
             second.start()
     finally:
         first.stop()
@@ -221,7 +221,7 @@ def test_service_parallelizes_only_resource_independent_tasks(tmp_path: Path) ->
         concurrent_elapsed = time.monotonic() - started
     finally:
         concurrent.stop()
-    assert {run.status for run in concurrent_cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert {run.status for run in concurrent_cycle.executed_runs} == {JobStatus.SUCCESS}
 
     writer, _ = fixture_definition(
         tmp_path / "serial",
@@ -243,7 +243,7 @@ def test_service_parallelizes_only_resource_independent_tasks(tmp_path: Path) ->
         serialized_elapsed = time.monotonic() - started
     finally:
         serialized.stop()
-    assert {run.status for run in serialized_cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert {run.status for run in serialized_cycle.executed_runs} == {JobStatus.SUCCESS}
     # The same Runtime and host execute both batches.  A shared writer/read
     # pair must wait for two child durations, while independent tasks overlap.
     assert serialized_elapsed > concurrent_elapsed + 0.20
@@ -263,13 +263,13 @@ def test_formal_contract_runs_in_serve_process_without_stdout_stderr_files(tmp_p
         table="target",
         resource_locks=(f"duckdb://{database}#target",),
     )
-    runtime_paths = PipelineRuntimePaths(
+    runtime_paths = JobRuntimePaths(
         tmp_path / "runtime",
         result_logs_dir_override=tmp_path / "audit" / "pipeline",
     )
-    store = PipelineRuntimeStore(runtime_paths.database_path)
+    store = JobRuntimeStore(runtime_paths.database_path)
     run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
-    result = PipelineService(
+    result = JobService(
         store,
         runtime_paths,
         (definition,),
@@ -288,7 +288,7 @@ def test_formal_contract_runs_in_serve_process_without_stdout_stderr_files(tmp_p
     finally:
         result.stop()
     assert cycle.executed_runs[0].run_id == run.run_id
-    assert cycle.executed_runs[0].status is PipelineStatus.SUCCESS
+    assert cycle.executed_runs[0].status is JobStatus.SUCCESS
     assert cycle.executed_runs[0].stdout_path is None
     assert cycle.executed_runs[0].stderr_path is None
     assert not (runtime_paths.logs_dir).exists()
@@ -319,8 +319,8 @@ def test_in_process_deadline_cancels_before_duckdb_write(tmp_path: Path) -> None
             connection.close()
         return _InProcessResult(run)
 
-    definition = PipelineDefinition(
-        pipeline_id="deadline_contract",
+    definition = JobDefinition(
+        job_id="deadline_contract",
         name="deadline_contract",
         enabled=True,
         schedule="0 0 1 1 *",
@@ -335,14 +335,14 @@ def test_in_process_deadline_cancels_before_duckdb_write(tmp_path: Path) -> None
         definition_version="deadline-v1",
         in_process_executor=execute,
     )
-    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
-    store = PipelineRuntimeStore(paths.database_path)
+    paths = JobRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = JobRuntimeStore(paths.database_path)
     run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
-    result = PipelineRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
+    result = JobRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
         run.run_id, definition
     )
 
-    assert result.status is PipelineStatus.TIMED_OUT
+    assert result.status is JobStatus.TIMED_OUT
     assert result.timed_out is True
     connection = duckdb.connect(str(database), read_only=True)
     try:
@@ -373,8 +373,8 @@ def test_lease_loss_cancels_in_process_contract_before_duckdb_write(tmp_path: Pa
             connection.close()
         return _InProcessResult(run)
 
-    definition = PipelineDefinition(
-        pipeline_id="lease_loss_contract",
+    definition = JobDefinition(
+        job_id="lease_loss_contract",
         name="lease_loss_contract",
         enabled=True,
         schedule="0 0 1 1 *",
@@ -389,15 +389,15 @@ def test_lease_loss_cancels_in_process_contract_before_duckdb_write(tmp_path: Pa
         definition_version="lease-loss-v1",
         in_process_executor=execute,
     )
-    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
-    store = PipelineRuntimeStore(paths.database_path)
+    paths = JobRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = JobRuntimeStore(paths.database_path)
     run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
     monkeypatch.setattr(store, "heartbeat", lambda *_args, **_kwargs: False)
-    result = PipelineRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
+    result = JobRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
         run.run_id, definition
     )
 
-    assert result.status is PipelineStatus.FAILED
+    assert result.status is JobStatus.FAILED
     assert result.error_summary is not None and "heartbeat failure" in result.error_summary
     connection = duckdb.connect(str(database), read_only=True)
     try:
@@ -410,12 +410,12 @@ def test_service_uses_persisted_invocation_context_and_retry_inherits_it(tmp_pat
     observed: list[tuple[str, date | None, dict[str, object]]] = []
 
     def execute(run: object) -> _InProcessResult:
-        observed.append((run.pipeline_id, run.trade_date_override, dict(run.parameter_overrides)))
+        observed.append((run.job_id, run.trade_date_override, dict(run.parameter_overrides)))
         status = "FAILED" if len(observed) == 1 else "SUCCESS"
         return _InProcessResult(run, status=status)
 
-    definition = PipelineDefinition(
-        pipeline_id="context_contract",
+    definition = JobDefinition(
+        job_id="context_contract",
         name="context_contract",
         enabled=True,
         schedule="0 0 1 1 *",
@@ -430,8 +430,8 @@ def test_service_uses_persisted_invocation_context_and_retry_inherits_it(tmp_pat
         definition_version="context-v1",
         in_process_executor=execute,
     )
-    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
-    store = PipelineRuntimeStore(paths.database_path)
+    paths = JobRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = JobRuntimeStore(paths.database_path)
     target_date = date(2026, 7, 24)
     original, _ = store.create_scheduled_run(
         definition,
@@ -440,7 +440,7 @@ def test_service_uses_persisted_invocation_context_and_retry_inherits_it(tmp_pat
         trade_date_override=target_date,
         parameter_overrides={"batch_size": "500"},
     )
-    runtime = PipelineService(
+    runtime = JobService(
         store,
         paths,
         (definition,),
@@ -456,10 +456,10 @@ def test_service_uses_persisted_invocation_context_and_retry_inherits_it(tmp_pat
     runtime.start()
     try:
         first = runtime.run_once(now=instant(0, 1))
-        assert first.executed_runs[0].status is PipelineStatus.FAILED
+        assert first.executed_runs[0].status is JobStatus.FAILED
         retry = store.retry_run(original.run_id, max_retries=definition.max_retries)
         second = runtime.run_once(now=instant(0, 2))
-        assert second.executed_runs[0].status is PipelineStatus.SUCCESS
+        assert second.executed_runs[0].status is JobStatus.SUCCESS
     finally:
         runtime.stop()
 
@@ -501,7 +501,7 @@ def test_same_duckdb_file_different_tables_run_concurrently(tmp_path: Path) -> N
         elapsed = time.monotonic() - started
     finally:
         runtime.stop()
-    assert {run.status for run in cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert {run.status for run in cycle.executed_runs} == {JobStatus.SUCCESS}
     assert elapsed < 0.75
 
 
@@ -534,7 +534,7 @@ def test_same_duckdb_table_read_write_conflict_is_serialized(tmp_path: Path) -> 
         elapsed = time.monotonic() - started
     finally:
         runtime.stop()
-    assert {run.status for run in cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert {run.status for run in cycle.executed_runs} == {JobStatus.SUCCESS}
     assert elapsed > 0.55
 
 
@@ -542,8 +542,8 @@ def test_formal_failure_summary_is_bounded_and_redacted(tmp_path: Path) -> None:
     def fail(_run: object) -> _InProcessResult:
         raise RuntimeError("token=super-secret " + "x" * 1_000)
 
-    definition = PipelineDefinition(
-        pipeline_id="formal_failure",
+    definition = JobDefinition(
+        job_id="formal_failure",
         name="formal_failure",
         enabled=True,
         schedule="* * * * *",
@@ -564,7 +564,7 @@ def test_formal_failure_summary_is_bounded_and_redacted(tmp_path: Path) -> None:
     finally:
         runtime.stop()
     failed = cycle.executed_runs[0]
-    assert failed.status is PipelineStatus.FAILED
+    assert failed.status is JobStatus.FAILED
     assert failed.error_summary is not None and len(failed.error_summary) <= 500
     assert "super-secret" not in failed.error_summary
     assert "[REDACTED]" in failed.error_summary
@@ -581,7 +581,7 @@ def test_cli_submits_to_active_service_without_running_business_process(
                 "schema_version": 1,
                 "definitions": [
                     {
-                        "pipeline_id": definition.pipeline_id,
+                        "job_id": definition.job_id,
                         "name": definition.name,
                         "enabled": definition.enabled,
                         "schedule": definition.schedule,
@@ -601,12 +601,12 @@ def test_cli_submits_to_active_service_without_running_business_process(
         ),
         encoding="utf-8",
     )
-    paths = PipelineRuntimePaths(
+    paths = JobRuntimePaths(
         tmp_path / "runtime",
         result_logs_dir_override=tmp_path / "audit" / "pipeline",
     )
-    runtime = PipelineService(
-        PipelineRuntimeStore(paths.database_path),
+    runtime = JobService(
+        JobRuntimeStore(paths.database_path),
         paths,
         (definition,),
         scheduler_id="submit-scheduler",
@@ -644,7 +644,7 @@ def test_cli_submits_to_active_service_without_running_business_process(
         cycle = runtime.run_once(now=scheduled_for)
     finally:
         runtime.stop()
-    assert [run.pipeline_id for run in cycle.executed_runs] == ["submitted"]
+    assert [run.job_id for run in cycle.executed_runs] == ["submitted"]
     assert marker.read_text(encoding="utf-8") == "submitted"
 
 
@@ -659,7 +659,7 @@ def test_cli_serve_once_executes_due_definition_and_reports_stopped_afterward(
                 "schema_version": 1,
                 "definitions": [
                     {
-                        "pipeline_id": definition.pipeline_id,
+                        "job_id": definition.job_id,
                         "name": definition.name,
                         "enabled": definition.enabled,
                         "schedule": definition.schedule,
@@ -702,7 +702,7 @@ def test_cli_serve_once_executes_due_definition_and_reports_stopped_afterward(
     assert pipeline_cli(["--runtime-dir", str(runtime_dir), "health"]) == 1
     health = json.loads(capsys.readouterr().out)
     assert health["status"] == "STOPPED"
-    assert len(list(audit_dir.glob("pipeline-results-*.jsonl"))) == 1
+    assert len(list(audit_dir.glob("job-results-*.jsonl"))) == 1
 
 
 def test_cli_manual_dependency_chain_and_external_log(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -720,7 +720,7 @@ def test_cli_manual_dependency_chain_and_external_log(tmp_path: Path, capsys: py
                 "schema_version": 1,
                 "definitions": [
                     {
-                        "pipeline_id": item.pipeline_id,
+                        "job_id": item.job_id,
                         "name": item.name,
                         "enabled": item.enabled,
                         "schedule": item.schedule,
@@ -761,7 +761,7 @@ def test_cli_manual_dependency_chain_and_external_log(tmp_path: Path, capsys: py
     assert upstream_marker.read_text(encoding="utf-8") == "upstream"
     assert downstream_marker.read_text(encoding="utf-8") == "downstream"
     output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert [item["pipeline_id"] for item in output] == ["upstream", "downstream"]
+    assert [item["job_id"] for item in output] == ["upstream", "downstream"]
     assert (
         pipeline_cli(
             [
@@ -776,6 +776,6 @@ def test_cli_manual_dependency_chain_and_external_log(tmp_path: Path, capsys: py
         == 0
     )
     status = json.loads(capsys.readouterr().out)
-    assert status["pipeline_id"] == "downstream"
+    assert status["job_id"] == "downstream"
     assert status["status"] == "SUCCESS"
-    assert len(list(audit_dir.glob("pipeline-results-*.jsonl"))) == 1
+    assert len(list(audit_dir.glob("job-results-*.jsonl"))) == 1

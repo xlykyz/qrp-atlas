@@ -1,4 +1,4 @@
-"""Execute one claimed Pipeline run with process-group timeout and heartbeats."""
+"""Execute one claimed Job run with process-group timeout and heartbeats."""
 
 from __future__ import annotations
 
@@ -19,20 +19,19 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
     resource = None  # type: ignore[assignment]
 
-from qrp_atlas.pipeline.contracts import ContractError, ExecutionControl
-
-from .models import PipelineDefinition, PipelineRun, PipelineStatus
-from .store import PipelineRuntimeStore
+from .execution_control import ExecutionControl
+from .models import JobDefinition, JobExecutionResult, JobRun, JobStatus
+from .store import JobRuntimeStore
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineRuntimePaths:
+class JobRuntimePaths:
     runtime_dir: Path
     result_logs_dir_override: Path | None = None
 
     @property
     def database_path(self) -> Path:
-        return self.runtime_dir / "pipeline_runtime.sqlite3"
+        return self.runtime_dir / "job_runtime.sqlite3"
 
     @property
     def logs_dir(self) -> Path:
@@ -49,20 +48,20 @@ class PipelineRuntimePaths:
         return self.result_logs_dir_override or self.runtime_dir / "result-logs"
 
     @classmethod
-    def from_settings(cls, settings) -> "PipelineRuntimePaths":
+    def from_settings(cls, settings) -> "JobRuntimePaths":
         return cls(
-            runtime_dir=settings.paths.pipeline_runtime_dir,
-            result_logs_dir_override=settings.paths.log_dir / "pipeline",
+            runtime_dir=settings.paths.job_runtime_dir,
+            result_logs_dir_override=settings.paths.log_dir / "job",
         )
 
 
-class PipelineRunner:
+class JobRunner:
     """Claim and execute one runtime record without invoking a shell or LLM."""
 
     def __init__(
         self,
-        store: PipelineRuntimeStore,
-        runtime_paths: PipelineRuntimePaths,
+        store: JobRuntimeStore,
+        runtime_paths: JobRuntimePaths,
         *,
         heartbeat_interval_seconds: float = 5.0,
         lease_seconds: int = 30,
@@ -76,7 +75,7 @@ class PipelineRunner:
         self.lease_seconds = lease_seconds
         self.cancel_event = cancel_event
 
-    def run(self, run_id: str, definition: PipelineDefinition) -> PipelineRun:
+    def run(self, run_id: str, definition: JobDefinition) -> JobRun:
         """Atomically claim and execute one PENDING record."""
 
         stdout_path: Path | None = None
@@ -90,7 +89,7 @@ class PipelineRunner:
             stderr_path = self.runtime_paths.logs_dir / f"{run_id}.stderr.log"
         claimed = self.store.claim_run(
             run_id,
-            pipeline_id=definition.pipeline_id,
+            job_id=definition.job_id,
             definition_version=definition.definition_version,
             overlap_policy=definition.overlap_policy,
             resource_locks=definition.resource_locks,
@@ -106,10 +105,10 @@ class PipelineRunner:
             # release the claim and produce a terminal run.  Otherwise one
             # worker defect would leave RUNNING state until stale recovery.
             current = self.store.get_run(claimed.run_id)
-            if current is not None and current.status is PipelineStatus.RUNNING:
+            if current is not None and current.status is JobStatus.RUNNING:
                 return self.store.finish_run(
                     claimed.run_id,
-                    status=PipelineStatus.FAILED,
+                    status=JobStatus.FAILED,
                     exit_code=1,
                     timed_out=False,
                     error_summary=f"runtime execution error: {self._safe_error_summary(exc)}",
@@ -124,16 +123,16 @@ class PipelineRunner:
                 )
             raise
 
-    def _execute_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
+    def _execute_claimed(self, claimed: JobRun, definition: JobDefinition) -> JobRun:
         if definition.in_process_executor is not None:
             return self._execute_in_process_claimed(claimed, definition)
         return self._execute_subprocess_claimed(claimed, definition)
 
-    def _execute_in_process_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
-        """Run a formal Contract in this process while the lease is alive."""
+    def _execute_in_process_claimed(self, claimed: JobRun, definition: JobDefinition) -> JobRun:
+        """Run an in-process Job while its lease and deadline remain valid."""
 
         if claimed.stdout_path is not None or claimed.stderr_path is not None:
-            raise RuntimeError("in-process pipeline run must not have stdout/stderr paths")
+            raise RuntimeError("in-process Job run must not have stdout/stderr paths")
         started = time.monotonic()
         before_usage = self._process_usage()
         deadline_monotonic = (
@@ -200,50 +199,58 @@ class PipelineRunner:
 
         heartbeater = threading.Thread(
             target=heartbeat_loop,
-            name=f"pipeline-heartbeat-{claimed.run_id}",
+            name=f"job-heartbeat-{claimed.run_id}",
             daemon=True,
         )
-        status = PipelineStatus.FAILED
+        status = JobStatus.FAILED
         timed_out = False
         result_payload: Mapping[str, object] | None = None
         error_summary: str | None = None
         heartbeater.start()
         try:
             result = definition.in_process_executor(executor_run)
-            if not hasattr(result, "as_dict"):
-                raise TypeError("formal executor must return a result with as_dict()")
-            payload = result.as_dict()
-            if not isinstance(payload, dict):
-                raise TypeError("formal executor result must serialize to an object")
-            result_payload = payload
-            result_status = payload.get("status")
-            if result_status in {"SUCCESS", "NOOP"}:
-                status = PipelineStatus.SUCCESS
-            elif result_status == "FAILED":
-                status = PipelineStatus.FAILED
-                error_summary = self._result_error_summary(payload)
+            if isinstance(result, JobExecutionResult):
+                result_payload = result.payload
+                status = result.status
+                error_summary = result.error_summary
             else:
-                status = PipelineStatus.FAILED
-                error_summary = "formal executor returned an invalid result status"
+                # Compatibility for existing in-process fixtures and simple
+                # adapters that expose the historical structured-result shape.
+                if not hasattr(result, "as_dict"):
+                    raise TypeError("in-process Job executor must return JobExecutionResult or as_dict()")
+                payload = result.as_dict()
+                if not isinstance(payload, dict):
+                    raise TypeError("in-process Job result must serialize to an object")
+                result_payload = payload
+                result_status = payload.get("status")
+                if result_status in {"SUCCESS", "NOOP"}:
+                    status = JobStatus.SUCCESS
+                elif result_status == "FAILED":
+                    status = JobStatus.FAILED
+                    error_summary = self._result_error_summary(payload)
+                else:
+                    status = JobStatus.FAILED
+                    error_summary = "in-process Job executor returned an invalid result status"
         except BaseException as exc:
-            status = PipelineStatus.FAILED
+            status = JobStatus.FAILED
             error_summary = self._safe_error_summary(exc)
         finally:
             stop_heartbeat.set()
             heartbeater.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
             peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(os.getpid()))
-        try:
-            control.check()
-        except ContractError as exc:
-            if exc.code == "EXECUTION_TIMED_OUT":
-                timed_out = True
-                status = PipelineStatus.TIMED_OUT
-                error_summary = "formal Pipeline execution exceeded its hard timeout"
-            elif control.cancel_event.is_set():
-                status = PipelineStatus.FAILED
-                error_summary = self._safe_error_summary(exc)
+        remaining = control.remaining_seconds()
+        if remaining is not None and remaining <= 0:
+            control.cancel("execution deadline exceeded")
+            timed_out = True
+            status = JobStatus.TIMED_OUT
+            error_summary = "in-process Job execution exceeded its hard timeout"
+        elif control.cancel_event.is_set():
+            status = JobStatus.CANCELLED
+            error_summary = self._safe_error_summary(
+                RuntimeError(control.cancel_reason or "in-process Job execution cancelled")
+            )
         if heartbeat_failed.is_set():
-            status = PipelineStatus.FAILED
+            status = JobStatus.FAILED
             error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
             timed_out = False
         if timed_out or control.cancel_event.is_set():
@@ -254,12 +261,12 @@ class PipelineRunner:
             try:
                 self.store.record_result(claimed.run_id, result_payload)
             except Exception as exc:
-                status = PipelineStatus.FAILED
+                status = JobStatus.FAILED
                 error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"[:500]
         return self.store.finish_run(
             claimed.run_id,
             status=status,
-            exit_code=0 if status is PipelineStatus.SUCCESS else 1,
+            exit_code=0 if status is JobStatus.SUCCESS else 1,
             timed_out=timed_out,
             error_summary=error_summary,
             wall_duration_ms=duration_ms,
@@ -268,9 +275,9 @@ class PipelineRunner:
             peak_rss_kb=peak_rss_kb[0] or None,
         )
 
-    def _execute_subprocess_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
+    def _execute_subprocess_claimed(self, claimed: JobRun, definition: JobDefinition) -> JobRun:
         if claimed.stdout_path is None or claimed.stderr_path is None:
-            raise RuntimeError("claimed pipeline run is missing log paths")
+            raise RuntimeError("claimed Job run is missing log paths")
         stdout_path = claimed.stdout_path
         stderr_path = claimed.stderr_path
         started = time.monotonic()
@@ -310,30 +317,43 @@ class PipelineRunner:
                     report_heartbeat_failure("heartbeat thread exited unexpectedly")
 
         heartbeater: threading.Thread | None = None
-        status = PipelineStatus.FAILED
+        status = JobStatus.FAILED
         exit_code: int | None = None
         timed_out = False
+        cancelled = False
         error_summary: str | None = None
         try:
             environment = self._environment(definition)
             environment.update(
                 {
+                    "QRP_JOB_RUN_ID": claimed.run_id,
+                    "QRP_JOB_ID": claimed.job_id,
+                    "QRP_JOB_SCHEDULED_FOR": claimed.scheduled_at.isoformat(),
+                    "QRP_JOB_ATTEMPT": str(claimed.attempt),
+                    # Keep the argv compatibility contract available to old
+                    # definitions while Job is the canonical runtime schema.
                     "QRP_PIPELINE_RUN_ID": claimed.run_id,
-                    "QRP_PIPELINE_ID": claimed.pipeline_id,
+                    "QRP_PIPELINE_ID": claimed.job_id,
                     "QRP_PIPELINE_SCHEDULED_FOR": claimed.scheduled_at.isoformat(),
                     "QRP_PIPELINE_ATTEMPT": str(claimed.attempt),
                 }
             )
             if claimed.trade_date_override is not None:
-                environment["QRP_PIPELINE_TRADE_DATE"] = claimed.trade_date_override.isoformat()
-                environment["QRP_PIPELINE_TARGET_DATE"] = claimed.trade_date_override.isoformat()
+                value = claimed.trade_date_override.isoformat()
+                environment["QRP_JOB_TRADE_DATE"] = value
+                environment["QRP_JOB_TARGET_DATE"] = value
+                environment["QRP_PIPELINE_TRADE_DATE"] = value
+                environment["QRP_PIPELINE_TARGET_DATE"] = value
             if claimed.parameter_overrides:
-                environment["QRP_PIPELINE_PARAMETER_OVERRIDES"] = json.dumps(
+                overrides = json.dumps(
                     dict(claimed.parameter_overrides), ensure_ascii=False, sort_keys=True
                 )
+                environment["QRP_JOB_PARAMETER_OVERRIDES"] = overrides
+                environment["QRP_PIPELINE_PARAMETER_OVERRIDES"] = overrides
             if definition.requires_structured_result:
                 self.runtime_paths.results_dir.mkdir(parents=True, exist_ok=True)
                 result_path = self.runtime_paths.results_dir / f"{claimed.run_id}.json"
+                environment["QRP_JOB_RESULT_PATH"] = str(result_path)
                 environment["QRP_PIPELINE_RESULT_PATH"] = str(result_path)
             working_directory = str(definition.working_directory) if definition.working_directory else None
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
@@ -351,7 +371,7 @@ class PipelineRunner:
                 peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
                 heartbeater = threading.Thread(
                     target=heartbeat_loop,
-                    name=f"pipeline-heartbeat-{claimed.run_id}",
+                    name=f"job-heartbeat-{claimed.run_id}",
                     daemon=True,
                 )
                 heartbeater.start()
@@ -362,6 +382,12 @@ class PipelineRunner:
                 )
                 poll_interval = min(0.25, max(0.05, self.heartbeat_interval_seconds / 2))
                 while True:
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        cancelled = True
+                        error_summary = "Job execution cancelled by service stop"
+                        self._terminate_process_group(process)
+                        exit_code = process.wait()
+                        break
                     if heartbeat_failed.is_set():
                         error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
                         self._terminate_process_group(process)
@@ -373,35 +399,37 @@ class PipelineRunner:
                     remaining = None if deadline is None else deadline - time.monotonic()
                     if remaining is not None and remaining <= 0:
                         timed_out = True
-                        error_summary = f"pipeline exceeded timeout_seconds={definition.timeout_seconds}"
+                        error_summary = f"Job exceeded timeout_seconds={definition.timeout_seconds}"
                         self._terminate_process_group(process)
                         exit_code = process.wait()
                         break
                     heartbeat_failed.wait(timeout=poll_interval if remaining is None else min(poll_interval, remaining))
             if heartbeat_failed.is_set():
-                status = PipelineStatus.FAILED
+                status = JobStatus.FAILED
+            elif cancelled:
+                status = JobStatus.CANCELLED
             elif timed_out:
-                status = PipelineStatus.TIMED_OUT
+                status = JobStatus.TIMED_OUT
             elif exit_code == 0:
-                status = PipelineStatus.SUCCESS
+                status = JobStatus.SUCCESS
             else:
-                status = PipelineStatus.FAILED
-                error_summary = f"process exited with code {exit_code}"
-            if definition.requires_structured_result:
+                status = JobStatus.FAILED
+                error_summary = f"Job process exited with code {exit_code}"
+            if definition.requires_structured_result and status not in {JobStatus.CANCELLED, JobStatus.TIMED_OUT}:
                 result_payload, result_error = self._load_structured_result(
                     result_path,
                     run_id=claimed.run_id,
-                    pipeline_id=claimed.pipeline_id,
+                    job_id=claimed.job_id,
                 )
                 if result_error is not None:
-                    status = PipelineStatus.FAILED
+                    status = JobStatus.FAILED
                     error_summary = result_error
                 elif result_payload is not None:
                     result_status = result_payload["status"]
-                    if status is PipelineStatus.SUCCESS and result_status not in {"SUCCESS", "NOOP"}:
-                        status = PipelineStatus.FAILED
+                    if status is JobStatus.SUCCESS and result_status not in {"SUCCESS", "NOOP"}:
+                        status = JobStatus.FAILED
                         error_summary = f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime=SUCCESS result={result_status}"
-                    elif status is not PipelineStatus.SUCCESS and result_status != "FAILED":
+                    elif status is not JobStatus.SUCCESS and result_status != "FAILED":
                         error_summary = (
                             error_summary
                             or f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime={status.value} result={result_status}"
@@ -416,7 +444,7 @@ class PipelineRunner:
                 self._terminate_process_group(process)
                 exit_code = process.wait()
             error_summary = f"runtime execution error: {type(exc).__name__}: {exc}"
-            status = PipelineStatus.FAILED
+            status = JobStatus.FAILED
         finally:
             stop_heartbeat.set()
             if heartbeater is not None:
@@ -429,7 +457,7 @@ class PipelineRunner:
             try:
                 self.store.record_result(claimed.run_id, result_payload)
             except Exception as exc:
-                status = PipelineStatus.FAILED
+                status = JobStatus.FAILED
                 error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"
         if definition.requires_structured_result:
             self._remove_transient_result(result_path)
@@ -445,7 +473,7 @@ class PipelineRunner:
             peak_rss_kb=peak_rss_kb[0] or None,
         )
 
-    def _environment(self, definition: PipelineDefinition) -> Mapping[str, str]:
+    def _environment(self, definition: JobDefinition) -> Mapping[str, str]:
         if definition.inherit_environment:
             environment = os.environ.copy()
         else:
@@ -484,7 +512,7 @@ class PipelineRunner:
         result_path: Path | None,
         *,
         run_id: str,
-        pipeline_id: str,
+        job_id: str,
     ) -> tuple[Mapping[str, object] | None, str | None]:
         if result_path is None or not result_path.is_file():
             return None, "STRUCTURED_RESULT_MISSING"
@@ -496,7 +524,7 @@ class PipelineRunner:
             return None, f"STRUCTURED_RESULT_INVALID: {type(exc).__name__}: {exc}"
         if not isinstance(payload, dict):
             return None, "STRUCTURED_RESULT_INVALID: result must be an object"
-        if payload.get("run_id") != run_id or payload.get("pipeline_id") != pipeline_id:
+        if payload.get("run_id") != run_id or payload.get("job_id") != job_id:
             return None, "STRUCTURED_RESULT_IDENTITY_MISMATCH"
         if payload.get("status") not in {"SUCCESS", "FAILED", "NOOP"}:
             return None, "STRUCTURED_RESULT_INVALID_STATUS"
