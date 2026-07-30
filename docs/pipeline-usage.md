@@ -173,6 +173,15 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
   run market_daily_update --target-date 2026-07-30
 ```
 
+Contract 声明参数时，可用重复的 `--set NAME=VALUE` 提供人工覆盖：
+
+```bash
+qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
+  run market_daily_update --target-date 2026-07-30 --set batch_size=500
+```
+
+人工 Run 会把 `target-date` 和受控参数覆盖保存到 Run invocation context。服务已启动时，CLI 只提交该 Run，`serve` 领取后使用保存的原值执行；依赖任务不会继承目标任务的 `--set` 参数。对失败 Run 创建的 `retry` 会继承原 invocation context，Contract 仍会在执行前再次解析和校验参数。
+
 执行完整依赖链：
 
 ```bash
@@ -254,6 +263,7 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env health
 - 已有 scheduler cursor 时，重启会精确扫描 cursor 与当前时刻之间遗漏的 cron 分钟；已存在或已成功的同一 `pipeline_id`、业务时刻和定义版本不会重复创建有效日常运行。
 - `RUNNING` 记录的心跳超时会被标记为 `FAILED`，资源 lease 被回收。它不会自动重试，必须由人工 `retry`。
 - 子进程退出异常、超时、心跳失败或 Runner 内部执行异常会落到对应 Pipeline Run 的最终失败状态，单个任务失败不会终止其他独立任务。
+- 正式 Contract 使用协作式 deadline/cancellation：外部等待使用 `ExecutionControl.bounded_timeout()`，执行阶段和 DuckDB 写事务前调用 `execution_control.check()`。到期状态为 `TIMED_OUT`；租约/心跳丢失会取消当前执行并禁止进入新的写事务。Python 线程不会被强制杀死，因此 Contract 不得忽略这些检查或把不可取消的无限阻塞调用放进正式 executor。
 - 普通扫描/计划局部异常被记录到服务 lease，并进入下一轮；状态库不可用、审计日志不可用或服务所有权丢失属于致命错误，`serve` 会明确退出而不是伪装健康。
 - 无任务时服务以 `--poll-interval-seconds` 等待，不忙轮询，也不写“没有任务”的日志。
 

@@ -11,6 +11,7 @@ from .contracts import (
     ContractCheck,
     ContractError,
     DiagnosticLevel,
+    ExecutionControl,
     PipelineContract,
     PipelineDiagnostic,
     PipelineInvocation,
@@ -41,8 +42,11 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
     business = BusinessExecution(status=ResultStatus.FAILED)
 
     try:
+        invocation.execution_control.check()
         target_window = _resolve_target_window(contract, invocation)
+        invocation.execution_control.check()
         parameters = parse_parameter_overrides(contract, invocation.parameter_overrides)
+        invocation.execution_control.check()
         context = PipelineRunContext(
             run_id=invocation.run_id,
             pipeline_id=contract.pipeline_id,
@@ -52,9 +56,15 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
             parameter_overrides=parameters,
             target_window=target_window,
             audit_context=invocation.audit_context,
+            execution_control=invocation.execution_control,
         )
         input_checks = tuple(
-            _run_check(item.structure_check, context, fallback_code=item.missing_error_code)
+            _run_check(
+                item.structure_check,
+                context,
+                control=invocation.execution_control,
+                fallback_code=item.missing_error_code,
+            )
             for item in contract.inputs
         )
         if failed := _first_failure(input_checks):
@@ -69,7 +79,12 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
             )
 
         freshness_checks = tuple(
-            _run_check(item.freshness.checker, context, fallback_code=item.freshness.error_code)
+            _run_check(
+                item.freshness.checker,
+                context,
+                control=invocation.execution_control,
+                fallback_code=item.freshness.error_code,
+            )
             for item in contract.inputs
         )
         if failed := _first_failure(freshness_checks):
@@ -84,9 +99,11 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
                 contract=contract,
             )
 
+        invocation.execution_control.check()
         business = contract.executor(context)
         if not isinstance(business, BusinessExecution):
             raise ContractError("INVALID_EXECUTOR_RETURN", "executor must return BusinessExecution")
+        invocation.execution_control.check()
         _validate_business_execution(contract, business)
         diagnostics = business.diagnostics
         if business.status is ResultStatus.FAILED:
@@ -108,13 +125,23 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
 
         if business.status is ResultStatus.SUCCESS:
             completion_checks = tuple(
-                _run_check(output.completion.checker, context, fallback_code=output.completion.error_code)
+                _run_check(
+                    output.completion.checker,
+                    context,
+                    control=invocation.execution_control,
+                    fallback_code=output.completion.error_code,
+                )
                 for output in contract.outputs
             ) + tuple(
                 result
                 for output in contract.outputs
                 for result in (
-                    _run_check(check, context, fallback_code="OUTPUT_QUALITY_CHECK_FAILED")
+                    _run_check(
+                        check,
+                        context,
+                        control=invocation.execution_control,
+                        fallback_code="OUTPUT_QUALITY_CHECK_FAILED",
+                    )
                     for check in output.quality_checks
                 )
             )
@@ -132,6 +159,7 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
                     contract=contract,
                 )
 
+        invocation.execution_control.check()
         return _result(
             invocation,
             target_window,
@@ -183,11 +211,14 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
 
 
 def _resolve_target_window(contract: PipelineContract, invocation: PipelineInvocation) -> TargetWindow:
+    invocation.execution_control.check()
     if invocation.trade_date_override is not None:
         if not contract.target_date_policy.validate_explicit_date(invocation.trade_date_override, invocation):
             raise ContractError("TARGET_DATE_OVERRIDE_INVALID")
+        invocation.execution_control.check()
         return TargetWindow.for_date(invocation.trade_date_override)
     window = contract.target_date_policy.resolver(invocation)
+    invocation.execution_control.check()
     if not isinstance(window, TargetWindow):
         raise ContractError("INVALID_TARGET_DATE_RESOLUTION")
     return window
@@ -197,9 +228,24 @@ def _fallback_target_window(invocation: PipelineInvocation) -> TargetWindow:
     return TargetWindow.for_date(invocation.trade_date_override or invocation.scheduled_for.date())
 
 
-def _run_check(check: ContractCheck, context: PipelineRunContext, *, fallback_code: str) -> CheckResult:
+def _run_check(
+    check: ContractCheck,
+    context: PipelineRunContext,
+    *,
+    control: ExecutionControl,
+    fallback_code: str,
+) -> CheckResult:
+    control.check()
     try:
         result = check(context)
+    except ContractError as exc:
+        if exc.code in {"EXECUTION_TIMED_OUT", "EXECUTION_CANCELLED"}:
+            raise
+        return CheckResult.failure(
+            "CHECK_CONTRACT_ERROR",
+            fallback_code,
+            f"contract check rejected execution with {exc.code}",
+        )
     except Exception as exc:
         return CheckResult.failure(
             "CHECK_EXCEPTION",
@@ -212,6 +258,7 @@ def _run_check(check: ContractCheck, context: PipelineRunContext, *, fallback_co
             fallback_code,
             "contract check must return CheckResult",
         )
+    control.check()
     if not result.passed and result.error_code is None:
         return CheckResult.failure(result.check_id, fallback_code, result.detail or "contract check failed")
     return result

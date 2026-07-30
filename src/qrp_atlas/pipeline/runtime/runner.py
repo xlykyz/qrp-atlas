@@ -10,13 +10,16 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
     import resource
 except ImportError:  # pragma: no cover - Windows fallback
     resource = None  # type: ignore[assignment]
+
+from qrp_atlas.pipeline.contracts import ContractError, ExecutionControl
 
 from .models import PipelineDefinition, PipelineRun, PipelineStatus
 from .store import PipelineRuntimeStore
@@ -54,7 +57,7 @@ class PipelineRuntimePaths:
 
 
 class PipelineRunner:
-    """Runs argv definitions only; it never invokes a shell or an LLM."""
+    """Claim and execute one runtime record without invoking a shell or LLM."""
 
     def __init__(
         self,
@@ -63,6 +66,7 @@ class PipelineRunner:
         *,
         heartbeat_interval_seconds: float = 5.0,
         lease_seconds: int = 30,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         if not lease_seconds > heartbeat_interval_seconds > 0:
             raise ValueError("lease_seconds must be greater than heartbeat_interval_seconds, both positive")
@@ -70,6 +74,7 @@ class PipelineRunner:
         self.runtime_paths = runtime_paths
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.lease_seconds = lease_seconds
+        self.cancel_event = cancel_event
 
     def run(self, run_id: str, definition: PipelineDefinition) -> PipelineRun:
         """Atomically claim and execute one PENDING record."""
@@ -94,7 +99,30 @@ class PipelineRunner:
             stderr_path=stderr_path,
             lease_seconds=self.lease_seconds,
         )
-        return self._execute_claimed(claimed, definition)
+        try:
+            return self._execute_claimed(claimed, definition)
+        except Exception as exc:
+            # A failure outside the executor's own guarded body must still
+            # release the claim and produce a terminal run.  Otherwise one
+            # worker defect would leave RUNNING state until stale recovery.
+            current = self.store.get_run(claimed.run_id)
+            if current is not None and current.status is PipelineStatus.RUNNING:
+                return self.store.finish_run(
+                    claimed.run_id,
+                    status=PipelineStatus.FAILED,
+                    exit_code=1,
+                    timed_out=False,
+                    error_summary=f"runtime execution error: {self._safe_error_summary(exc)}",
+                    wall_duration_ms=(
+                        max(0, int((datetime.now(UTC) - claimed.started_at).total_seconds() * 1000))
+                        if claimed.started_at is not None
+                        else 0
+                    ),
+                    user_cpu_ms=None,
+                    system_cpu_ms=None,
+                    peak_rss_kb=None,
+                )
+            raise
 
     def _execute_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
         if definition.in_process_executor is not None:
@@ -108,6 +136,18 @@ class PipelineRunner:
             raise RuntimeError("in-process pipeline run must not have stdout/stderr paths")
         started = time.monotonic()
         before_usage = self._process_usage()
+        deadline_monotonic = (
+            started + definition.timeout_seconds if definition.timeout_seconds is not None else None
+        )
+        control = ExecutionControl(
+            deadline=(
+                datetime.now(UTC) + timedelta(seconds=definition.timeout_seconds)
+                if definition.timeout_seconds is not None
+                else None
+            ),
+            deadline_monotonic=deadline_monotonic,
+        )
+        executor_run = replace(claimed, execution_control=control)
         stop_heartbeat = threading.Event()
         heartbeat_failed = threading.Event()
         heartbeat_failure_reason: list[str] = []
@@ -119,10 +159,26 @@ class PipelineRunner:
                 if not heartbeat_failed.is_set():
                     heartbeat_failure_reason.append(reason)
                     heartbeat_failed.set()
+            # A lease failure is an execution cancellation, not merely a
+            # diagnostic.  Formal Contract code checks this shared control
+            # before external calls and before opening a write transaction.
+            control.cancel(reason)
 
         def heartbeat_loop() -> None:
             try:
-                while not stop_heartbeat.wait(self.heartbeat_interval_seconds):
+                while not stop_heartbeat.is_set():
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        control.cancel("service stop requested")
+                    remaining = control.remaining_seconds()
+                    if remaining is not None and remaining <= 0:
+                        control.cancel("execution deadline exceeded")
+                        return
+                    wait_timeout = control.bounded_timeout(self.heartbeat_interval_seconds)
+                    if stop_heartbeat.wait(wait_timeout):
+                        break
+                    if control.remaining_seconds() == 0:
+                        control.cancel("execution deadline exceeded")
+                        return
                     try:
                         healthy = self.store.heartbeat(claimed.run_id, lease_seconds=self.lease_seconds)
                     except BaseException as exc:  # Never lose lease-health failures in a daemon thread.
@@ -135,7 +191,11 @@ class PipelineRunner:
             except BaseException as exc:  # pragma: no cover - defensive protection for thread failures.
                 report_heartbeat_failure(f"heartbeat thread raised {type(exc).__name__}: {exc}")
             finally:
-                if not stop_heartbeat.is_set() and not heartbeat_failed.is_set():
+                if (
+                    not stop_heartbeat.is_set()
+                    and not heartbeat_failed.is_set()
+                    and not control.cancel_event.is_set()
+                ):
                     report_heartbeat_failure("heartbeat thread exited unexpectedly")
 
         heartbeater = threading.Thread(
@@ -144,11 +204,12 @@ class PipelineRunner:
             daemon=True,
         )
         status = PipelineStatus.FAILED
+        timed_out = False
         result_payload: Mapping[str, object] | None = None
         error_summary: str | None = None
         heartbeater.start()
         try:
-            result = definition.in_process_executor(claimed)
+            result = definition.in_process_executor(executor_run)
             if not hasattr(result, "as_dict"):
                 raise TypeError("formal executor must return a result with as_dict()")
             payload = result.as_dict()
@@ -171,9 +232,22 @@ class PipelineRunner:
             stop_heartbeat.set()
             heartbeater.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
             peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(os.getpid()))
+        try:
+            control.check()
+        except ContractError as exc:
+            if exc.code == "EXECUTION_TIMED_OUT":
+                timed_out = True
+                status = PipelineStatus.TIMED_OUT
+                error_summary = "formal Pipeline execution exceeded its hard timeout"
+            elif control.cancel_event.is_set():
+                status = PipelineStatus.FAILED
+                error_summary = self._safe_error_summary(exc)
         if heartbeat_failed.is_set():
             status = PipelineStatus.FAILED
             error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
+            timed_out = False
+        if timed_out or control.cancel_event.is_set():
+            result_payload = None
         after_usage = self._process_usage()
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
         if result_payload is not None:
@@ -186,7 +260,7 @@ class PipelineRunner:
             claimed.run_id,
             status=status,
             exit_code=0 if status is PipelineStatus.SUCCESS else 1,
-            timed_out=False,
+            timed_out=timed_out,
             error_summary=error_summary,
             wall_duration_ms=duration_ms,
             user_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_utime"),
@@ -250,6 +324,13 @@ class PipelineRunner:
                     "QRP_PIPELINE_ATTEMPT": str(claimed.attempt),
                 }
             )
+            if claimed.trade_date_override is not None:
+                environment["QRP_PIPELINE_TRADE_DATE"] = claimed.trade_date_override.isoformat()
+                environment["QRP_PIPELINE_TARGET_DATE"] = claimed.trade_date_override.isoformat()
+            if claimed.parameter_overrides:
+                environment["QRP_PIPELINE_PARAMETER_OVERRIDES"] = json.dumps(
+                    dict(claimed.parameter_overrides), ensure_ascii=False, sort_keys=True
+                )
             if definition.requires_structured_result:
                 self.runtime_paths.results_dir.mkdir(parents=True, exist_ok=True)
                 result_path = self.runtime_paths.results_dir / f"{claimed.run_id}.json"

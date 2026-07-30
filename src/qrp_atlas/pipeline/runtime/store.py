@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from .models import (
     OverlapPolicy,
@@ -70,6 +72,39 @@ def _timestamp(value: datetime | None) -> str | None:
 
 def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value).astimezone(UTC) if value else None
+
+
+def _encode_parameter_overrides(value: Mapping[str, Any] | None) -> str:
+    if value is None:
+        return "{}"
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise ValueError("parameter_overrides must be a string-keyed mapping")
+    sensitive = [
+        key
+        for key in value
+        if re.search(r"(?:api[_-]?key|token|password|passwd|secret|credential)", key, re.IGNORECASE)
+    ]
+    if sensitive:
+        raise ValueError("parameter_overrides may not contain credential-like keys")
+    try:
+        encoded = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("parameter_overrides must contain JSON-compatible values") from exc
+    if len(encoded) > 100_000:
+        raise ValueError("parameter_overrides exceeds the 100000-character limit")
+    return encoded
+
+
+def _decode_parameter_overrides(value: str | None) -> Mapping[str, Any]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("pipeline run contains invalid parameter_overrides_json") from exc
+    if not isinstance(decoded, dict) or any(not isinstance(key, str) for key in decoded):
+        raise RuntimeError("pipeline run parameter_overrides_json must be an object")
+    return decoded
 
 
 def _resource_scope(resource_name: str) -> tuple[str, str | None] | None:
@@ -168,6 +203,8 @@ class PipelineRuntimeStore:
                     system_cpu_ms INTEGER,
                     peak_rss_kb INTEGER,
                     retry_of_run_id TEXT REFERENCES pipeline_run(run_id),
+                    trade_date_override TEXT,
+                    parameter_overrides_json TEXT NOT NULL DEFAULT '{{}}',
                     created_at TEXT NOT NULL,
                     UNIQUE(pipeline_id, scheduled_at, attempt)
                 );
@@ -229,6 +266,13 @@ class PipelineRuntimeStore:
                     ON pipeline_service_lease(lease_expires_at);
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(pipeline_run)").fetchall()}
+            if "trade_date_override" not in columns:
+                connection.execute("ALTER TABLE pipeline_run ADD COLUMN trade_date_override TEXT")
+            if "parameter_overrides_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE pipeline_run ADD COLUMN parameter_overrides_json TEXT NOT NULL DEFAULT '{}'"
+                )
         finally:
             connection.close()
 
@@ -254,6 +298,8 @@ class PipelineRuntimeStore:
             system_cpu_ms=row["system_cpu_ms"],
             peak_rss_kb=row["peak_rss_kb"],
             retry_of_run_id=row["retry_of_run_id"],
+            trade_date_override=date.fromisoformat(row["trade_date_override"]) if row["trade_date_override"] else None,
+            parameter_overrides=_decode_parameter_overrides(row["parameter_overrides_json"]),
         )
 
     def get_run(self, run_id: str) -> PipelineRun | None:
@@ -330,6 +376,8 @@ class PipelineRuntimeStore:
         trigger_type: str = "SCHEDULED",
         status: PipelineStatus = PipelineStatus.PENDING,
         error_summary: str | None = None,
+        trade_date_override: date | None = None,
+        parameter_overrides: Mapping[str, Any] | None = None,
     ) -> tuple[PipelineRun, bool]:
         """Insert the first attempt once; concurrent scans return the same row."""
 
@@ -345,6 +393,8 @@ class PipelineRuntimeStore:
                 trigger_type=trigger_type,
                 status=status,
                 error_summary=error_summary,
+                trade_date_override=trade_date_override,
+                parameter_overrides=parameter_overrides,
                 created_at=now,
             )
 
@@ -357,15 +407,19 @@ class PipelineRuntimeStore:
         trigger_type: str,
         status: PipelineStatus,
         error_summary: str | None,
+        trade_date_override: date | None,
+        parameter_overrides: Mapping[str, Any] | None,
         created_at: datetime,
     ) -> tuple[PipelineRun, bool]:
         scheduled_text = _timestamp(scheduled_at)
+        parameter_overrides_json = _encode_parameter_overrides(parameter_overrides)
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO pipeline_run (
                 run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
-                timed_out, trigger_type, error_summary, created_at
-            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+                timed_out, trigger_type, error_summary, trade_date_override,
+                parameter_overrides_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)
             """,
             [
                 str(uuid.uuid4()),
@@ -375,6 +429,8 @@ class PipelineRuntimeStore:
                 status.value,
                 trigger_type,
                 error_summary,
+                trade_date_override.isoformat() if trade_date_override is not None else None,
+                parameter_overrides_json,
                 _timestamp(created_at),
             ],
         )
@@ -576,6 +632,8 @@ class PipelineRuntimeStore:
                     trigger_type="SCHEDULED",
                     status=status,
                     error_summary=error_summary,
+                    trade_date_override=None,
+                    parameter_overrides=None,
                     created_at=timestamp,
                 )
                 if inserted:
@@ -917,8 +975,9 @@ class PipelineRuntimeStore:
                 """
                 INSERT INTO pipeline_run (
                     run_id, pipeline_id, definition_version, scheduled_at, status, attempt,
-                    timed_out, trigger_type, retry_of_run_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    timed_out, trigger_type, retry_of_run_id, trade_date_override,
+                    parameter_overrides_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 """,
                 [
                     retry_id,
@@ -929,6 +988,8 @@ class PipelineRuntimeStore:
                     next_attempt,
                     "RETRY",
                     run_id,
+                    previous["trade_date_override"],
+                    previous["parameter_overrides_json"] or "{}",
                     _timestamp(timestamp),
                 ],
             )

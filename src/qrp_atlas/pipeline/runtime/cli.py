@@ -204,6 +204,8 @@ def _print_run(run, *, result: object | None = None, submitted_to_service: bool 
         "peak_rss_kb": run.peak_rss_kb,
         "trigger_type": run.trigger_type,
         "retry_of_run_id": run.retry_of_run_id,
+        "trade_date_override": run.trade_date_override.isoformat() if run.trade_date_override else None,
+        "parameter_overrides": dict(run.parameter_overrides),
     }
     if result is not None:
         payload["result"] = result
@@ -308,11 +310,16 @@ def _apply_definition_environment(
 
 
 def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[str, str]) -> tuple[PipelineDefinition, ...]:
-    if args.definitions is not None or args.contract_selections is not None:
+    if args.definitions is not None:
         definitions = _load_definitions_for_args(args, require_source=True)
         if args.parameter_assignments:
             raise DefinitionValidationError("--set is supported only for source-registered formal Pipelines")
         return _apply_definition_environment(definitions, environment)
+    if args.contract_selections is not None:
+        # Selections still resolve to source-registered Contracts.  Their
+        # deployment-only manifest may choose schedule/enablement, while
+        # controlled manual parameters remain part of the persisted Run.
+        return _load_definitions_for_args(args, require_source=True)
     return _formal_runtime_definitions(environment=environment)
 
 
@@ -582,6 +589,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.status is PipelineStatus.SUCCESS else 1
         if args.command == "run":
             environment = _manual_run_environment(args)
+            parameter_overrides = _parse_parameter_assignments(args.parameter_assignments)
             definitions = _definitions_for_manual_run(args, environment=environment)
             if args.parameter_assignments and (args.definitions is None and args.contract_selections is None):
                 # Source Contract parameters belong to the user-selected
@@ -624,11 +632,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scheduler.refresh_blocked_runs()
                 scheduled_for = (
                     args.scheduled_for
-                    or (
-                        scheduled_instant_for_target_date(definition, args.trade_date)
-                        if args.trade_date is not None
-                        else utc_now()
-                    )
+                    # A manual request is due on submission.  The business
+                    # date is persisted separately and resolved by the
+                    # Contract; it must not make an active service wait for
+                    # the Pipeline's cron occurrence.
+                    or utc_now()
                 )
                 eligibility = scheduler.eligibility(definition, scheduled_for)
                 target, _ = store.create_scheduled_run(
@@ -637,6 +645,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     trigger_type="MANUAL",
                     status=eligibility[0],
                     error_summary=eligibility[1],
+                    trade_date_override=args.trade_date,
+                    parameter_overrides=(
+                        parameter_overrides if definition.pipeline_id == args.pipeline_id else {}
+                    ),
                 )
                 if target.status is PipelineStatus.PENDING:
                     if not service_owns_execution:

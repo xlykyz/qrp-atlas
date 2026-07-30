@@ -11,14 +11,13 @@ import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.pipeline.contract_validation import ContractValidationError, validate_contracts
-from qrp_atlas.pipeline.contracts import PipelineContract, PipelineInvocation
+from qrp_atlas.pipeline.contracts import ExecutionControl, PipelineContract, PipelineInvocation
 from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.registry import PipelineRegistry, default_registry
 
@@ -173,11 +172,6 @@ def make_in_process_contract_executor(
     def execute(claimed: PipelineRun) -> Any:
         process_environment = os.environ.copy()
         process_environment.update(configured_environment)
-        raw_parameters = json.loads(process_environment.get("QRP_PIPELINE_PARAMETER_OVERRIDES", "{}"))
-        if not isinstance(raw_parameters, dict) or any(not isinstance(key, str) for key in raw_parameters):
-            raise ValueError("INVALID_PARAMETER_ASSIGNMENT")
-        trade_date_raw = process_environment.get("QRP_PIPELINE_TRADE_DATE")
-        trade_date = date.fromisoformat(trade_date_raw) if trade_date_raw else None
         settings = AppSettings.load(
             env_file=process_environment.get("QRP_ENV_FILE"),
             environ=process_environment,
@@ -188,9 +182,14 @@ def make_in_process_contract_executor(
             scheduled_for=claimed.scheduled_at,
             attempt=claimed.attempt,
             settings=settings,
-            trade_date_override=trade_date,
-            parameter_overrides=raw_parameters,
+            trade_date_override=claimed.trade_date_override,
+            parameter_overrides=claimed.parameter_overrides,
             audit_context={"runtime": "pipeline_runtime", "execution_mode": "in_process"},
+            execution_control=(
+                claimed.execution_control
+                if isinstance(claimed.execution_control, ExecutionControl)
+                else ExecutionControl()
+            ),
         )
         return execute_pipeline_contract(contract, invocation)
 

@@ -6,17 +6,18 @@ import json
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import duckdb
 import pytest
 
+from qrp_atlas.pipeline.contracts import ContractError
 from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
 from qrp_atlas.pipeline.runtime.models import OverlapPolicy, PipelineDefinition, PipelineStatus
 from qrp_atlas.pipeline.runtime.service import PipelineService
 from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore, RunClaimFailure
-from qrp_atlas.pipeline.runtime.runner import PipelineRuntimePaths
+from qrp_atlas.pipeline.runtime.runner import PipelineRunner, PipelineRuntimePaths
 
 
 def instant(hour: int, minute: int) -> datetime:
@@ -255,6 +256,7 @@ def test_formal_contract_runs_in_serve_process_without_stdout_stderr_files(tmp_p
         connection.execute("CREATE TABLE target (run_id VARCHAR)")
     finally:
         connection.close()
+
     definition = in_process_definition(
         tmp_path,
         "formal_in_process",
@@ -296,6 +298,177 @@ def test_formal_contract_runs_in_serve_process_without_stdout_stderr_files(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM target").fetchone()[0] == 1
     finally:
         connection.close()
+
+
+def test_in_process_deadline_cancels_before_duckdb_write(tmp_path: Path) -> None:
+    database = tmp_path / "deadline.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE target (run_id VARCHAR)")
+    finally:
+        connection.close()
+
+    def execute(run: object) -> _InProcessResult:
+        # This is the cooperative contract pattern: an external wait is
+        # bounded by the invocation deadline and checks cancellation on wake.
+        run.execution_control.wait(threading.Event(), timeout=10)
+        connection = duckdb.connect(str(database))
+        try:
+            connection.execute("INSERT INTO target VALUES (?)", [run.run_id])
+        finally:
+            connection.close()
+        return _InProcessResult(run)
+
+    definition = PipelineDefinition(
+        pipeline_id="deadline_contract",
+        name="deadline_contract",
+        enabled=True,
+        schedule="0 0 1 1 *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=0.05,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(f"duckdb://{database}#target",),
+        definition_version="deadline-v1",
+        in_process_executor=execute,
+    )
+    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = PipelineRuntimeStore(paths.database_path)
+    run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
+    result = PipelineRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
+        run.run_id, definition
+    )
+
+    assert result.status is PipelineStatus.TIMED_OUT
+    assert result.timed_out is True
+    connection = duckdb.connect(str(database), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM target").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_lease_loss_cancels_in_process_contract_before_duckdb_write(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "lease-loss.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE target (run_id VARCHAR)")
+    finally:
+        connection.close()
+
+    def execute(run: object) -> _InProcessResult:
+        try:
+            while True:
+                run.execution_control.wait(threading.Event(), timeout=0.05)
+        except ContractError as exc:
+            assert exc.code == "EXECUTION_CANCELLED"
+        run.execution_control.check()
+        connection = duckdb.connect(str(database))
+        try:
+            connection.execute("INSERT INTO target VALUES (?)", [run.run_id])
+        finally:
+            connection.close()
+        return _InProcessResult(run)
+
+    definition = PipelineDefinition(
+        pipeline_id="lease_loss_contract",
+        name="lease_loss_contract",
+        enabled=True,
+        schedule="0 0 1 1 *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=5,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(f"duckdb://{database}#target",),
+        definition_version="lease-loss-v1",
+        in_process_executor=execute,
+    )
+    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = PipelineRuntimeStore(paths.database_path)
+    run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
+    monkeypatch.setattr(store, "heartbeat", lambda *_args, **_kwargs: False)
+    result = PipelineRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
+        run.run_id, definition
+    )
+
+    assert result.status is PipelineStatus.FAILED
+    assert result.error_summary is not None and "heartbeat failure" in result.error_summary
+    connection = duckdb.connect(str(database), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM target").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_service_uses_persisted_invocation_context_and_retry_inherits_it(tmp_path: Path) -> None:
+    observed: list[tuple[str, date | None, dict[str, object]]] = []
+
+    def execute(run: object) -> _InProcessResult:
+        observed.append((run.pipeline_id, run.trade_date_override, dict(run.parameter_overrides)))
+        status = "FAILED" if len(observed) == 1 else "SUCCESS"
+        return _InProcessResult(run, status=status)
+
+    definition = PipelineDefinition(
+        pipeline_id="context_contract",
+        name="context_contract",
+        enabled=True,
+        schedule="0 0 1 1 *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=5,
+        max_retries=1,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(),
+        definition_version="context-v1",
+        in_process_executor=execute,
+    )
+    paths = PipelineRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = PipelineRuntimeStore(paths.database_path)
+    target_date = date(2026, 7, 24)
+    original, _ = store.create_scheduled_run(
+        definition,
+        scheduled_at=instant(0, 0),
+        trigger_type="MANUAL",
+        trade_date_override=target_date,
+        parameter_overrides={"batch_size": "500"},
+    )
+    runtime = PipelineService(
+        store,
+        paths,
+        (definition,),
+        scheduler_id="context-scheduler",
+        heartbeat_interval_seconds=0.01,
+        lease_seconds=1,
+        stale_after_seconds=2,
+        max_catch_up_minutes=30,
+        poll_interval_seconds=0.01,
+        max_workers=1,
+        service_name="context-service",
+    )
+    runtime.start()
+    try:
+        first = runtime.run_once(now=instant(0, 1))
+        assert first.executed_runs[0].status is PipelineStatus.FAILED
+        retry = store.retry_run(original.run_id, max_retries=definition.max_retries)
+        second = runtime.run_once(now=instant(0, 2))
+        assert second.executed_runs[0].status is PipelineStatus.SUCCESS
+    finally:
+        runtime.stop()
+
+    assert observed == [
+        ("context_contract", target_date, {"batch_size": "500"}),
+        ("context_contract", target_date, {"batch_size": "500"}),
+    ]
+    assert retry.trade_date_override == target_date
+    assert dict(retry.parameter_overrides) == {"batch_size": "500"}
 
 
 def test_same_duckdb_file_different_tables_run_concurrently(tmp_path: Path) -> None:

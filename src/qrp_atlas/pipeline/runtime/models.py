@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Mapping
+from datetime import date
 
 
 class PipelineStatus(StrEnum):
@@ -109,6 +110,9 @@ class PipelineRun:
     system_cpu_ms: int | None = None
     peak_rss_kb: int | None = None
     retry_of_run_id: str | None = None
+    trade_date_override: date | None = None
+    parameter_overrides: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    execution_control: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

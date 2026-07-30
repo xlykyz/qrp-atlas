@@ -242,6 +242,7 @@ class PipelineService:
                         self.paths,
                         heartbeat_interval_seconds=self.heartbeat_interval_seconds,
                         lease_seconds=self.lease_seconds,
+                        cancel_event=self._stop_event,
                     ).run(pending_run.run_id, definition)
                 except RunClaimFailure:
                     # Another permitted runtime may have claimed it between the
