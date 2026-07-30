@@ -24,6 +24,7 @@ from .store import PipelineRuntimeStore
 @dataclass(frozen=True, slots=True)
 class PipelineRuntimePaths:
     runtime_dir: Path
+    result_logs_dir_override: Path | None = None
 
     @property
     def database_path(self) -> Path:
@@ -37,9 +38,18 @@ class PipelineRuntimePaths:
     def results_dir(self) -> Path:
         return self.runtime_dir / "results"
 
+    @property
+    def result_logs_dir(self) -> Path:
+        """Audit-only final result logs; never infer the current directory."""
+
+        return self.result_logs_dir_override or self.runtime_dir / "result-logs"
+
     @classmethod
     def from_settings(cls, settings) -> "PipelineRuntimePaths":
-        return cls(runtime_dir=settings.paths.pipeline_runtime_dir)
+        return cls(
+            runtime_dir=settings.paths.pipeline_runtime_dir,
+            result_logs_dir_override=settings.paths.log_dir / "pipeline",
+        )
 
 
 class PipelineRunner:
@@ -72,6 +82,7 @@ class PipelineRunner:
             definition_version=definition.definition_version,
             overlap_policy=definition.overlap_policy,
             resource_locks=definition.resource_locks,
+            resource_reads=definition.resource_reads,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             lease_seconds=self.lease_seconds,
@@ -211,6 +222,15 @@ class PipelineRunner:
                         )
         except OSError as exc:
             error_summary = f"failed to start process: {type(exc).__name__}: {exc}"
+        except Exception as exc:
+            # An implementation defect or unexpected subprocess/result error
+            # must finalize the claimed record.  Leaving it RUNNING would turn
+            # a local task error into a service-wide stale-recovery problem.
+            if process is not None and process.poll() is None:
+                self._terminate_process_group(process)
+                exit_code = process.wait()
+            error_summary = f"runtime execution error: {type(exc).__name__}: {exc}"
+            status = PipelineStatus.FAILED
         finally:
             stop_heartbeat.set()
             if heartbeater is not None:

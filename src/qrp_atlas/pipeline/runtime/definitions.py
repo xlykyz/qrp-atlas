@@ -75,6 +75,9 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     except ValueError as exc:
         raise DefinitionValidationError("overlap_policy must be FORBID or ALLOW") from exc
     resource_locks = _string_tuple(payload.get("resource_locks", []), "resource_locks")
+    resource_reads = _string_tuple(payload.get("resource_reads", []), "resource_reads")
+    if set(resource_locks) & set(resource_reads):
+        raise DefinitionValidationError("resource_reads must not overlap resource_locks")
     freshness_checks_raw = payload.get("freshness_checks", [])
     if not isinstance(freshness_checks_raw, list) or any(
         not isinstance(item, dict) for item in freshness_checks_raw
@@ -89,6 +92,9 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
     requires_structured_result = payload.get("requires_structured_result", False)
     if not isinstance(requires_structured_result, bool):
         raise DefinitionValidationError("requires_structured_result must be a boolean")
+    manual_execution_allowed = payload.get("manual_execution_allowed", True)
+    if not isinstance(manual_execution_allowed, bool):
+        raise DefinitionValidationError("manual_execution_allowed must be a boolean")
     return PipelineDefinition(
         pipeline_id=pipeline_id,
         name=name,
@@ -102,12 +108,14 @@ def parse_definition(payload: Mapping[str, Any]) -> PipelineDefinition:
         max_retries=max_retries,
         overlap_policy=overlap_policy,
         resource_locks=resource_locks,
+        resource_reads=resource_reads,
         performance_budget=_mapping(payload.get("performance_budget", {}), "performance_budget"),
         freshness_checks=tuple(freshness_checks_raw),
         definition_version=_required_string(payload.get("definition_version", "1"), "definition_version"),
         inherit_environment=inherit_environment,
         environment=environment,
         requires_structured_result=requires_structured_result,
+        manual_execution_allowed=manual_execution_allowed,
     )
 
 

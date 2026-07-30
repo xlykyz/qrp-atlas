@@ -88,8 +88,16 @@ def _validate_contract(contract: PipelineContract, *, known_ids: set[str]) -> li
         errors.append(prefix + "resource_locks must not contain duplicates")
     if any(not item.strip() for item in contract.resource_locks):
         errors.append(prefix + "resource_locks must be non-empty strings")
+    if len(contract.resource_reads) != len(set(contract.resource_reads)):
+        errors.append(prefix + "resource_reads must not contain duplicates")
+    if any(not item.strip() for item in contract.resource_reads):
+        errors.append(prefix + "resource_reads must be non-empty strings")
+    if set(contract.resource_reads) & set(contract.resource_locks):
+        errors.append(prefix + "resource_reads must not overlap resource_locks")
     if contract.execution.max_retries < 0:
         errors.append(prefix + "max_retries must be non-negative")
+    if not isinstance(contract.manual_execution_allowed, bool):
+        errors.append(prefix + "manual_execution_allowed must be a boolean")
 
     input_ids: set[str] = set()
     for item in contract.inputs:

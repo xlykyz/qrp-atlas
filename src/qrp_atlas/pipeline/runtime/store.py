@@ -42,6 +42,18 @@ class SchedulerCursor:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ServiceLease:
+    """One live scheduler service identity stored in the isolated runtime DB."""
+
+    service_name: str
+    owner_id: str
+    started_at: datetime
+    heartbeat_at: datetime
+    lease_expires_at: datetime
+    last_error: str | None
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -149,6 +161,16 @@ class PipelineRuntimeStore:
                 );
                 CREATE INDEX IF NOT EXISTS resource_lock_expiry_idx
                     ON resource_lock(lease_expires_at);
+                CREATE TABLE IF NOT EXISTS resource_read_lease (
+                    resource_name TEXT NOT NULL,
+                    owner_run_id TEXT NOT NULL REFERENCES pipeline_run(run_id),
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    lease_expires_at TEXT NOT NULL,
+                    PRIMARY KEY(resource_name, owner_run_id)
+                );
+                CREATE INDEX IF NOT EXISTS resource_read_lease_expiry_idx
+                    ON resource_read_lease(resource_name, lease_expires_at);
                 CREATE TABLE IF NOT EXISTS scheduler_cursor (
                     scheduler_id TEXT PRIMARY KEY,
                     last_scanned_at TEXT NOT NULL,
@@ -160,6 +182,16 @@ class PipelineRuntimeStore:
                     result_json TEXT NOT NULL,
                     recorded_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS pipeline_service_lease (
+                    service_name TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    lease_expires_at TEXT NOT NULL,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS pipeline_service_lease_expiry_idx
+                    ON pipeline_service_lease(lease_expires_at);
                 """
             )
         finally:
@@ -342,6 +374,137 @@ class PipelineRuntimeStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _service_lease_from_row(row: sqlite3.Row) -> ServiceLease:
+        started_at = _parse_timestamp(row["started_at"])
+        heartbeat_at = _parse_timestamp(row["heartbeat_at"])
+        lease_expires_at = _parse_timestamp(row["lease_expires_at"])
+        if started_at is None or heartbeat_at is None or lease_expires_at is None:
+            raise RuntimeError("pipeline service lease contains an invalid timestamp")
+        return ServiceLease(
+            service_name=row["service_name"],
+            owner_id=row["owner_id"],
+            started_at=started_at,
+            heartbeat_at=heartbeat_at,
+            lease_expires_at=lease_expires_at,
+            last_error=row["last_error"],
+        )
+
+    def get_service_lease(self, service_name: str) -> ServiceLease | None:
+        """Return the live or expired service lease without changing it."""
+
+        self.initialize()
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+            ).fetchone()
+            return self._service_lease_from_row(row) if row is not None else None
+        finally:
+            connection.close()
+
+    def claim_service_lease(
+        self,
+        *,
+        service_name: str,
+        owner_id: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> ServiceLease:
+        """Atomically claim the scheduler-service lease or fail without takeover."""
+
+        if not service_name.strip() or not owner_id.strip():
+            raise ValueError("service_name and owner_id must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("service lease_seconds must be positive")
+        timestamp = now or utc_now()
+        expires_at = timestamp + timedelta(seconds=lease_seconds)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+            ).fetchone()
+            if row is not None:
+                existing = self._service_lease_from_row(row)
+                if existing.lease_expires_at > timestamp and existing.owner_id != owner_id:
+                    raise RunClaimFailure("SCHEDULER_SERVICE_ACTIVE", existing.owner_id)
+                connection.execute(
+                    """
+                    UPDATE pipeline_service_lease
+                    SET owner_id = ?, started_at = ?, heartbeat_at = ?, lease_expires_at = ?, last_error = NULL
+                    WHERE service_name = ?
+                    """,
+                    [
+                        owner_id,
+                        _timestamp(timestamp),
+                        _timestamp(timestamp),
+                        _timestamp(expires_at),
+                        service_name,
+                    ],
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO pipeline_service_lease(
+                        service_name, owner_id, started_at, heartbeat_at, lease_expires_at, last_error
+                    ) VALUES (?, ?, ?, ?, ?, NULL)
+                    """,
+                    [
+                        service_name,
+                        owner_id,
+                        _timestamp(timestamp),
+                        _timestamp(timestamp),
+                        _timestamp(expires_at),
+                    ],
+                )
+            updated = connection.execute(
+                "SELECT * FROM pipeline_service_lease WHERE service_name = ?", [service_name]
+            ).fetchone()
+            if updated is None:
+                raise RuntimeError("service lease disappeared while being claimed")
+            return self._service_lease_from_row(updated)
+
+    def heartbeat_service_lease(
+        self,
+        *,
+        service_name: str,
+        owner_id: str,
+        lease_seconds: int,
+        last_error: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Renew only the owning service's lease; a false return loses leadership."""
+
+        if lease_seconds <= 0:
+            raise ValueError("service lease_seconds must be positive")
+        timestamp = now or utc_now()
+        with self._transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE pipeline_service_lease
+                SET heartbeat_at = ?, lease_expires_at = ?, last_error = ?
+                WHERE service_name = ? AND owner_id = ? AND lease_expires_at > ?
+                """,
+                [
+                    _timestamp(timestamp),
+                    _timestamp(timestamp + timedelta(seconds=lease_seconds)),
+                    last_error,
+                    service_name,
+                    owner_id,
+                    _timestamp(timestamp),
+                ],
+            ).rowcount
+            return updated == 1
+
+    def release_service_lease(self, *, service_name: str, owner_id: str) -> bool:
+        """Release a lease during graceful shutdown without touching another owner."""
+
+        with self._transaction() as connection:
+            deleted = connection.execute(
+                "DELETE FROM pipeline_service_lease WHERE service_name = ? AND owner_id = ?",
+                [service_name, owner_id],
+            ).rowcount
+            return deleted == 1
+
     def commit_scheduler_scan(
         self,
         *,
@@ -438,6 +601,33 @@ class PipelineRuntimeStore:
         finally:
             connection.close()
 
+    def has_active_resource_read_lease(self, resource_name: str, *, now: datetime | None = None) -> bool:
+        """Return whether a live shared reader prevents an exclusive writer."""
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM resource_read_lease WHERE resource_name = ? AND lease_expires_at > ? LIMIT 1",
+                [resource_name, _timestamp(now or utc_now())],
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
+    def has_active_service_lease(self, *, now: datetime | None = None) -> bool:
+        """True when any live scheduler service owns this runtime database."""
+
+        self.initialize()
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM pipeline_service_lease WHERE lease_expires_at > ? LIMIT 1",
+                [_timestamp(now or utc_now())],
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
     def claim_run(
         self,
         run_id: str,
@@ -446,6 +636,7 @@ class PipelineRuntimeStore:
         definition_version: str,
         overlap_policy: OverlapPolicy,
         resource_locks: Iterable[str],
+        resource_reads: Iterable[str] = (),
         stdout_path: Path,
         stderr_path: Path,
         lease_seconds: int,
@@ -464,6 +655,7 @@ class PipelineRuntimeStore:
         timestamp = now or utc_now()
         expires = timestamp + timedelta(seconds=lease_seconds)
         lock_names = tuple(sorted(set(resource_locks)))
+        read_names = tuple(sorted(set(resource_reads) - set(lock_names)))
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
             if row is None:
@@ -486,6 +678,7 @@ class PipelineRuntimeStore:
                 if overlap is not None:
                     raise RunClaimFailure("OVERLAP_FORBIDDEN", overlap["run_id"])
             connection.execute("DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
+            connection.execute("DELETE FROM resource_read_lease WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             if lock_names:
                 placeholders = ", ".join("?" for _ in lock_names)
                 conflict = connection.execute(
@@ -494,6 +687,20 @@ class PipelineRuntimeStore:
                 ).fetchone()
                 if conflict is not None:
                     raise RunClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict["resource_name"])
+                reader_conflict = connection.execute(
+                    f"SELECT resource_name FROM resource_read_lease WHERE resource_name IN ({placeholders}) LIMIT 1",
+                    list(lock_names),
+                ).fetchone()
+                if reader_conflict is not None:
+                    raise RunClaimFailure("RESOURCE_READERS_ACTIVE", reader_conflict["resource_name"])
+            if read_names:
+                placeholders = ", ".join("?" for _ in read_names)
+                writer_conflict = connection.execute(
+                    f"SELECT resource_name FROM resource_lock WHERE resource_name IN ({placeholders}) LIMIT 1",
+                    list(read_names),
+                ).fetchone()
+                if writer_conflict is not None:
+                    raise RunClaimFailure("RESOURCE_WRITER_ACTIVE", writer_conflict["resource_name"])
             assert_status_transition(PipelineStatus.PENDING, PipelineStatus.RUNNING)
             connection.execute(
                 """
@@ -524,6 +731,20 @@ class PipelineRuntimeStore:
                         _timestamp(expires),
                     ],
                 )
+            for resource_name in read_names:
+                connection.execute(
+                    """
+                    INSERT INTO resource_read_lease(resource_name, owner_run_id, acquired_at, heartbeat_at, lease_expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        resource_name,
+                        run_id,
+                        _timestamp(timestamp),
+                        _timestamp(timestamp),
+                        _timestamp(expires),
+                    ],
+                )
             claimed = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
             return self._run_from_row(claimed) if claimed is not None else None
 
@@ -539,6 +760,13 @@ class PipelineRuntimeStore:
             connection.execute(
                 """
                 UPDATE resource_lock SET heartbeat_at = ?, lease_expires_at = ?
+                WHERE owner_run_id = ?
+                """,
+                [_timestamp(timestamp), _timestamp(timestamp + timedelta(seconds=lease_seconds)), run_id],
+            )
+            connection.execute(
+                """
+                UPDATE resource_read_lease SET heartbeat_at = ?, lease_expires_at = ?
                 WHERE owner_run_id = ?
                 """,
                 [_timestamp(timestamp), _timestamp(timestamp + timedelta(seconds=lease_seconds)), run_id],
@@ -596,6 +824,7 @@ class PipelineRuntimeStore:
                 ],
             )
             connection.execute("DELETE FROM resource_lock WHERE owner_run_id = ?", [run_id])
+            connection.execute("DELETE FROM resource_read_lease WHERE owner_run_id = ?", [run_id])
             result = connection.execute("SELECT * FROM pipeline_run WHERE run_id = ?", [run_id]).fetchone()
             if result is None:
                 raise RuntimeError("run disappeared while being finalized")
@@ -693,10 +922,14 @@ class PipelineRuntimeStore:
                     ],
                 )
                 connection.execute("DELETE FROM resource_lock WHERE owner_run_id = ?", [row["run_id"]])
-            deleted = connection.execute(
+                connection.execute("DELETE FROM resource_read_lease WHERE owner_run_id = ?", [row["run_id"]])
+            deleted_writes = connection.execute(
                 "DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)]
             ).rowcount
-            return len(stale), max(deleted, 0)
+            deleted_reads = connection.execute(
+                "DELETE FROM resource_read_lease WHERE lease_expires_at <= ?", [_timestamp(timestamp)]
+            ).rowcount
+            return len(stale), max(deleted_writes, 0) + max(deleted_reads, 0)
 
     def start_stage(
         self,

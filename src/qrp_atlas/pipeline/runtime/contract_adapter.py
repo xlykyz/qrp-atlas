@@ -128,6 +128,7 @@ def contract_runtime_definition(
         max_retries=contract.execution.max_retries,
         overlap_policy=contract.execution.overlap_policy,
         resource_locks=contract.resource_locks,
+        resource_reads=contract.resource_reads,
         performance_budget={
             "normal_budget_seconds": contract.performance.normal_budget_seconds,
             "warning_threshold_seconds": contract.performance.warning_threshold_seconds,
@@ -145,4 +146,5 @@ def contract_runtime_definition(
         inherit_environment=True,
         environment=environment or {},
         requires_structured_result=True,
+        manual_execution_allowed=contract.manual_execution_allowed,
     )

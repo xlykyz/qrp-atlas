@@ -69,12 +69,14 @@ class PipelineDefinition:
     max_retries: int
     overlap_policy: OverlapPolicy
     resource_locks: tuple[str, ...]
+    resource_reads: tuple[str, ...] = ()
     performance_budget: Mapping[str, Any] = field(default_factory=dict)
     freshness_checks: tuple[Mapping[str, Any], ...] = ()
     definition_version: str = "1"
     inherit_environment: bool = False
     environment: Mapping[str, str] = field(default_factory=dict)
     requires_structured_result: bool = False
+    manual_execution_allowed: bool = True
 
 
 @dataclass(frozen=True, slots=True)

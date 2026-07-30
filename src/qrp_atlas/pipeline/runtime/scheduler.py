@@ -52,6 +52,7 @@ class PipelineScheduler:
         heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS,
+        bootstrap_catch_up: bool = False,
     ) -> None:
         if not scheduler_id.strip():
             raise ValueError("scheduler_id must be non-empty")
@@ -69,14 +70,17 @@ class PipelineScheduler:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.lease_seconds = lease_seconds
         self.stale_after_seconds = stale_after_seconds
+        self.bootstrap_catch_up = bootstrap_catch_up
 
     def scan(self, *, now: datetime | None = None) -> SchedulerScanResult:
         """Persist all due minutes since the previous successful scan.
 
-        The first scan intentionally considers only its current UTC minute.
-        Later scans replay ``(cursor, current]``. A bounded catch-up advances
-        only after that bounded interval has been atomically committed, and
-        reports the omitted earlier start explicitly to the caller.
+        A direct first scan intentionally considers only its current UTC
+        minute.  The long-running service enables a bounded bootstrap mode
+        that selects each Definition's latest due occurrence.  Later scans
+        replay ``(cursor, current]``. A bounded catch-up advances only after
+        that bounded interval has been atomically committed, and reports the
+        omitted earlier start explicitly to the caller.
         """
 
         instant = (now or datetime.now(UTC)).astimezone(UTC).replace(second=0, microsecond=0)
@@ -106,6 +110,8 @@ class PipelineScheduler:
                 )
             expected_cursor = cursor.last_scanned_at if cursor is not None else None
             requested_start = instant if expected_cursor is None else expected_cursor + timedelta(minutes=1)
+            if expected_cursor is None and self.bootstrap_catch_up:
+                requested_start = instant - timedelta(minutes=self.max_catch_up_minutes - 1)
             scan_start = requested_start
             catch_up_limited = False
             interval_minutes = int((instant - requested_start).total_seconds() // 60) + 1
@@ -120,6 +126,14 @@ class PipelineScheduler:
                         continue
                     status, reason = self._eligibility(definition, scheduled_at)
                     candidates.append((definition, scheduled_at, status, reason))
+            if expected_cursor is None and self.bootstrap_catch_up:
+                # A fresh runtime has no durable evidence for every missed
+                # high-frequency tick.  Bootstrap the latest due occurrence of
+                # each definition; normal cursor-backed recovery remains exact.
+                latest_candidates: dict[str, tuple[PipelineDefinition, datetime, PipelineStatus, str | None]] = {}
+                for candidate in candidates:
+                    latest_candidates[candidate[0].pipeline_id] = candidate
+                candidates = list(latest_candidates.values())
             created = self.store.commit_scheduler_scan(
                 scheduler_id=self.scheduler_id,
                 expected_last_scanned_at=expected_cursor,
@@ -150,6 +164,11 @@ class PipelineScheduler:
             if status is PipelineStatus.PENDING:
                 self.store.unblock_run(run.run_id)
 
+    def refresh_blocked_runs(self) -> None:
+        """Re-evaluate persisted dependency/lock gates after a task completes."""
+
+        self._refresh_blocked_runs()
+
     def eligibility(self, definition: PipelineDefinition, scheduled_at: datetime) -> tuple[PipelineStatus, str | None]:
         """Expose the runtime's existing dependency and overlap gate for manual runs."""
 
@@ -179,9 +198,17 @@ class PipelineScheduler:
             resource_name
             for resource_name in definition.resource_locks
             if self.store.has_active_resource_lock(resource_name)
+            or self.store.has_active_resource_read_lease(resource_name)
         ]
         if locked:
-            return PipelineStatus.BLOCKED, f"active resource locks: {', '.join(locked)}"
+            return PipelineStatus.BLOCKED, f"active resource access: {', '.join(locked)}"
+        reading_conflicts = [
+            resource_name
+            for resource_name in definition.resource_reads
+            if self.store.has_active_resource_lock(resource_name)
+        ]
+        if reading_conflicts:
+            return PipelineStatus.BLOCKED, f"active resource writers: {', '.join(reading_conflicts)}"
         return PipelineStatus.PENDING, None
 
 
