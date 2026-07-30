@@ -104,6 +104,8 @@
 
 检查必须能回答“为什么当前允许运行”。表、文件和外部 API 不得只写模糊的数据库名称或自然日比较。freshness 检查失败会阻止 executor 运行，并以对应稳定错误码返回失败。
 
+来源完整性必须建立在该来源可证明的事实上，不能通过无业务依赖的表或尚未进入现有生产链的 Pipeline 虚构覆盖集合。当前 `market_daily_update` 的 Tushare `daily(trade_date)` 响应可验证非空、必需字段和目标日期一致性，但没有权威总数或逐证券停复牌语义。因此它不能仅凭 `stock_info + suspend_d` 区分正常停牌缺席与接口部分返回，也不得为此依赖当前尚未调度的 `suspend_d_ingest`。该边界必须在 Contract 中明确；未来只有在接口提供可核验总数/状态，或已有生产链中存在经单独验收的真实上游数据依赖时，才能收紧该 Pipeline 的覆盖检查。
+
 ### 3.4 输出、完成与质量
 
 `OutputContract` 必须定义：
@@ -227,7 +229,7 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-pipeline validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前 `CONTRACT_MODULES` 为空，`validate-contracts` 合法返回 `0`；既有 Pipeline 尚未完成完整合同改造，不能被默认 CLI 发现或进入 QRP 正式调度。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ## 7. 公共测试规则
 
