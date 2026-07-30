@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Mapping
 
 
@@ -77,6 +78,13 @@ class PipelineDefinition:
     environment: Mapping[str, str] = field(default_factory=dict)
     requires_structured_result: bool = False
     manual_execution_allowed: bool = True
+    # Source-registered formal Contracts execute in the owning serve process.
+    # JSON/argv definitions leave this unset and continue through subprocess.
+    in_process_executor: Callable[["PipelineRun"], object] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)

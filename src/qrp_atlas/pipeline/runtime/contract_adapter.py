@@ -7,19 +7,24 @@ selection, enablement, and cron schedule.  It cannot override business semantics
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.pipeline.contract_validation import ContractValidationError, validate_contracts
-from qrp_atlas.pipeline.contracts import PipelineContract
+from qrp_atlas.pipeline.contracts import PipelineContract, PipelineInvocation
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.registry import PipelineRegistry, default_registry
 
 from .cron import CronExpression, CronExpressionError
 from .definitions import DefinitionValidationError
-from .models import PipelineDefinition
+from .models import PipelineDefinition, PipelineRun
 
 
 DEFAULT_PIPELINE_TIMEZONE = "Asia/Shanghai"
@@ -107,7 +112,7 @@ def contract_runtime_definition(
     timezone: str = DEFAULT_PIPELINE_TIMEZONE,
     environment: dict[str, str] | None = None,
 ) -> PipelineDefinition:
-    """Map source-owned semantics onto the existing process runner definition."""
+    """Map source-owned semantics onto an in-process formal runtime definition."""
 
     return PipelineDefinition(
         pipeline_id=contract.pipeline_id,
@@ -147,4 +152,46 @@ def contract_runtime_definition(
         environment=environment or {},
         requires_structured_result=True,
         manual_execution_allowed=contract.manual_execution_allowed,
+        in_process_executor=make_in_process_contract_executor(contract, environment=environment),
     )
+
+
+def make_in_process_contract_executor(
+    contract: PipelineContract,
+    *,
+    environment: dict[str, str] | None = None,
+):
+    """Build the callback used by ``pipeline serve`` for formal Contracts.
+
+    The callback intentionally receives the claimed runtime record rather than
+    opening a second runtime process.  Business code can therefore create its
+    own DuckDB connection while remaining inside the single serving process.
+    """
+
+    configured_environment = dict(environment or {})
+
+    def execute(claimed: PipelineRun) -> Any:
+        process_environment = os.environ.copy()
+        process_environment.update(configured_environment)
+        raw_parameters = json.loads(process_environment.get("QRP_PIPELINE_PARAMETER_OVERRIDES", "{}"))
+        if not isinstance(raw_parameters, dict) or any(not isinstance(key, str) for key in raw_parameters):
+            raise ValueError("INVALID_PARAMETER_ASSIGNMENT")
+        trade_date_raw = process_environment.get("QRP_PIPELINE_TRADE_DATE")
+        trade_date = date.fromisoformat(trade_date_raw) if trade_date_raw else None
+        settings = AppSettings.load(
+            env_file=process_environment.get("QRP_ENV_FILE"),
+            environ=process_environment,
+        )
+        invocation = PipelineInvocation(
+            run_id=claimed.run_id,
+            pipeline_id=claimed.pipeline_id,
+            scheduled_for=claimed.scheduled_at,
+            attempt=claimed.attempt,
+            settings=settings,
+            trade_date_override=trade_date,
+            parameter_overrides=raw_parameters,
+            audit_context={"runtime": "pipeline_runtime", "execution_mode": "in_process"},
+        )
+        return execute_pipeline_contract(contract, invocation)
+
+    return execute

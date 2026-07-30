@@ -139,7 +139,16 @@ def _validate_contract(contract: PipelineContract, *, known_ids: set[str]) -> li
             if not item.unique_key or any(not field.strip() for field in item.unique_key):
                 errors.append(prefix + f"write output {item.output_id} requires a logical unique key")
             expected_lock = MANAGED_WRITER_LOCKS.get(item.physical_resource)
-            if expected_lock is not None and expected_lock not in contract.resource_locks:
+            scoped_lock = (
+                f"duckdb://{expected_lock.removesuffix('_writer')}#{item.object_name}"
+                if expected_lock is not None
+                else None
+            )
+            if (
+                expected_lock is not None
+                and expected_lock not in contract.resource_locks
+                and scoped_lock not in contract.resource_locks
+            ):
                 errors.append(prefix + f"writes {item.physical_resource} and must declare {expected_lock}")
         completion = item.completion
         if not completion.marker.strip() or not completion.error_code.strip() or not callable(completion.checker):

@@ -38,7 +38,7 @@ SQLite 启用 WAL、外键和 busy timeout。定义是 Git 中 JSON manifest，�
 
 Runner 认领在单个 `BEGIN IMMEDIATE` transaction 内完成：确认 run 存在且为 `PENDING`、确认 pipeline id 与 definition version、检查 `FORBID` 的其他 `RUNNING` attempt、检查所有资源锁、插入全部锁、更新目标 run 为 `RUNNING`。因此 Scheduler 的预检查仅用于提前展示 `BLOCKED`，不是并发正确性的唯一保障；`ALLOW` pipeline 可以并发，但相同资源锁仍会阻止认领。
 
-所有主 DuckDB 写任务的未来 definition 必须声明 `quant_db_writer`。资源锁保存在 SQLite，包含 `owner_run_id`、heartbeat 和 lease 到期时间，不能只依赖进程内锁。
+数据库级写任务继续声明 `quant_db_writer` 等受管理锁；需要表级并发时使用 `duckdb://<database>#<object>`，同库不同表可并行、同表读写冲突。资源锁保存在 SQLite，包含 `owner_run_id`、heartbeat 和 lease 到期时间，不能只依赖进程内锁。
 
 每次 Scheduler scan 都会在 cron 扫描前执行 stale recovery：超过阈值的 `RUNNING` 记录变为 `FAILED`，保留 `started_at`、日志路径和已有指标，写入 `stale heartbeat recovery`，删除其资源锁；不会自动创建 retry。过期 lease 也同时回收。该步骤幂等，避免人工 cleanup 被遗漏而永久阻塞后续调度。
 
@@ -50,7 +50,7 @@ stale_after_seconds > lease_seconds > heartbeat_interval_seconds > 0
 
 部署时 Scheduler 和 Runner 必须使用同一组 heartbeat/lease 参数；stale threshold 要保留足够余量，不能设置成会误杀正常长任务的激进值。
 
-Runner 在短周期监督业务进程，而非仅以完整 timeout 等待。heartbeat 返回 `False`、SQLite heartbeat 异常或 heartbeat 线程异常退出都会通过线程安全失败事件通知主 Runner。主 Runner 随即终止完整进程组，记录 `FAILED`（不是 `TIMED_OUT`）和明确 heartbeat failure，保留 stdout/stderr 与可获取指标，随后才释放资源 lease。
+兼容 argv Definition 的 Runner 在短周期监督业务进程，而非仅以完整 timeout 等待。正式 Contract 则在 `serve` 进程的线程 worker 中调用 executor，并由独立 DuckDB connection 执行。heartbeat 返回 `False`、SQLite heartbeat 异常或 heartbeat 线程异常退出都会通过线程安全失败事件通知 Runner；argv 兼容任务会终止完整进程组，正式 Contract 记录受限错误摘要，随后释放资源 lease。
 
 ## 4. Scheduler cursor 与 catch-up
 
@@ -93,7 +93,7 @@ qrp-atlas-pipeline retry RUN_ID --definitions path/to/pipelines.json
 
 `scan` 只创建运行记录。未带 `--run-id` 的 `run-pending` 在没有 `PENDING` run 时输出 `{"status":"IDLE","reason":"NO_PENDING_RUN"}` 并以 exit code 0 退出。显式 `--run-id` 的不存在记录、非 `PENDING` 状态、definition 缺失或版本不匹配，以及 overlap/resource lock 认领失败都会输出结构化的具体原因并以非零退出。
 
-Runner 使用 argv 而非 shell 字符串，分离 stdout/stderr，受控继承环境，timeout 后结束完整进程组，并记录 wall time、子进程 user/system CPU、leader RSS 采样和 exit code。Stage API 可由未来改造后的业务代码提供 `input_rows`、`output_rows` 与 metadata；本轮没有接入旧 Pipeline。
+兼容 Definition 的 Runner 使用 argv 而非 shell 字符串，分离 stdout/stderr，受控继承环境，timeout 后结束完整进程组，并记录 wall time、子进程 user/system CPU、leader RSS 采样和 exit code。正式 Contract 不生成永久 stdout/stderr 文件，只保留结构化结果和 JSONL 审计记录。Stage API 可由业务代码提供 `input_rows`、`output_rows` 与 metadata。
 
 ## 6. systemd 示例与回滚
 

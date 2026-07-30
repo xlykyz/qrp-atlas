@@ -777,6 +777,7 @@ def test_runtime_definition_uses_existing_claim_lock_retry_and_structured_result
     assert definitions["adj_factor_daily"].dependencies == ("market_daily_update",)
     assert all(definition.resource_locks == ("quant_db_writer",) for definition in definitions.values())
     assert all(definition.requires_structured_result for definition in definitions.values())
+    assert all(definition.in_process_executor is not None for definition in definitions.values())
     assert all(definition.max_retries == 1 and definition.overlap_policy.value == "FORBID" for definition in definitions.values())
 
 
@@ -825,6 +826,9 @@ def test_formal_cli_uses_existing_runner_claim_and_persists_a_structured_failure
     assert result is not None
     assert result["status"] == "FAILED"
     assert any(item["code"] == "MARKET_HISTORY_STRUCTURE_MISSING" for item in result["diagnostics"])
+    assert runs[0].stdout_path is None
+    assert runs[0].stderr_path is None
+    assert not (runtime_dir / "logs").exists()
 
 
 def _large_market_frame(rows: int = 5_000) -> pd.DataFrame:

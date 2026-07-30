@@ -25,14 +25,15 @@ Pipeline Run (one Definition execution attempt)
         |
 Task execution
         |
-        +-- argv process, stdout/stderr evidence, structured result when required
+        +-- formal Contract: serve-process thread + independent DuckDB connection
+        +-- compatibility Definition: argv subprocess (stdout/stderr is non-formal diagnostic output)
 ```
 
 - **Contract**：源码拥有的业务语义，包括输入、输出、业务日期解析、幂等性、事务、依赖、读写资源、资源锁和人工执行许可。
-- **Definition**：Runtime 可执行定义，包含 `pipeline_id`、定义版本、启用状态、cron schedule、时区、argv、依赖、`resource_reads` 和 `resource_locks`。它可以来自普通 JSON manifest，或由 Contract 加 deployment selection 适配而来。
+- **Definition**：Runtime 可执行定义，包含 `pipeline_id`、定义版本、启用状态、cron schedule、时区、依赖、`resource_reads` 和 `resource_locks`。普通 JSON Definition 还包含 argv；正式 Contract Definition 绑定进程内 executor，不再通过 argv 子进程执行。
 - **Dependency**：有向无环图中的上游任务。计划按拓扑顺序排列；上游未成功时下游保持 `BLOCKED`，不会被错误执行。
 - **Pipeline Run**：每次尝试的持久化记录。单个 Definition 是当前 Runtime 的最小任务单位，因此一个 Pipeline Run 同时承载该任务的认领、状态和结果摘要；业务代码如需细分阶段，可使用 Stage Run API 记录阶段输入/输出行数。
-- **Task execution**：Runner 以 argv 启动子进程，原子领取 Pipeline Run、获取资源 lease、发送心跳、结束进程组并写入最终状态。
+- **Task execution**：Runner 原子领取 Pipeline Run、获取资源 lease、发送心跳并写入最终状态。正式 Contract 在 `serve` 进程的线程 worker 内调用 executor；普通兼容 Definition 才以 argv 启动子进程。
 
 运行状态为 `PENDING`、`BLOCKED`、`RUNNING`、`SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 和 `SKIPPED`。终态不可回退；重试永远创建新的 attempt，保留失败证据。
 
@@ -152,7 +153,7 @@ qrp-atlas-pipeline plan market_daily_update \
 
 `environment` 只能保存非敏感的固定值。凭据应由批准的运行环境提供，不得放入 Definition 或日志。
 
-`resource_reads` 使用共享 lease：多个纯读任务可以并行。`resource_locks` 使用排他写 lease：写写、写读、读写同一资源都会串行。lease 仲裁在运行状态 SQLite 的单一事务中完成，`serve` 的 worker 数量不会绕过它。
+`resource_reads` 使用共享 lease：多个纯读任务可以并行。`resource_locks` 使用排他写 lease：写写、写读、读写同一资源都会串行。对于同一 DuckDB 的表级声明，使用 `duckdb://<database>#<object>`；同库不同表可以并行，同表读写会串行。已有的 `quant_db_writer`、`system_b_episode_writer` 等名称仍表示整个数据库级排他资源。lease 仲裁在运行状态 SQLite 的单一事务中完成，`serve` 的 worker 数量不会绕过它。
 
 ## 手动操作
 
@@ -227,7 +228,7 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env \
 
 `serve` 是长驻进程。它以短间隔等待、按 cron 扫描、执行所有到期且可领取的任务，并在空闲时不写日志。`Ctrl+C` 和 `SIGTERM` 会请求停止循环；已启动的单个任务会走 Runner 的正常收尾，随后服务释放 lease。
 
-无依赖且读写资源不冲突的任务会在不同 worker 中并发执行；每个 worker 通过独立 Runtime SQLite connection 领取任务，业务 DuckDB connection 由各自 Runner 子进程独立创建。资源冲突任务会保持 `PENDING`，待冲突 lease 释放后由同一服务继续领取。
+无依赖且读写资源不冲突的任务会在不同线程 worker 中并发执行；每个 worker 使用独立 Runtime SQLite connection，正式 Contract executor 在同一 `serve` 进程内创建自己的 DuckDB connection。资源冲突任务会保持 `PENDING`，待冲突 lease 释放后由同一服务继续领取。正式 Contract 禁止自行启动写同一 QRP DuckDB 的子进程。
 
 受控验收可以只跑一个循环：
 
@@ -268,7 +269,7 @@ qrp-atlas-pipeline --env-file /etc/qrp-atlas/runtime.env health
 - 任务摘要、输出 ID 与行数摘要；
 - 失败时的稳定错误类型和经过截断/敏感键脱敏的错误摘要。
 
-日志不记录完整环境变量、Definition 环境值、凭据、输入行、SQL、循环心跳或空闲轮询。子进程 stdout/stderr 是运行证据，位于隔离 runtime 目录；日常审计和查询应使用 JSONL 与 `status --include-result`，而不是把 stdout/stderr 当作正式结果日志。
+日志不记录完整环境变量、Definition 环境值、凭据、输入行、SQL、循环心跳或空闲轮询。正式 Contract 不创建或永久保存 stdout/stderr 文件；成功运行只保留结构化结果与 JSONL 审计记录，失败只保留长度受限且脱敏的错误摘要。普通 argv 兼容入口可以保留隔离 runtime 目录中的 stdout/stderr，但它不是迁移后日常 Pipeline 的正式执行入口。
 
 ## 测试方法
 

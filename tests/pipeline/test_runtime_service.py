@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
@@ -82,6 +84,65 @@ def service(tmp_path: Path, definitions: tuple[PipelineDefinition, ...], *, owne
     )
 
 
+class _InProcessResult:
+    def __init__(self, run: object, *, status: str = "SUCCESS", diagnostics: list[dict[str, object]] | None = None) -> None:
+        self.run = run
+        self.status = status
+        self.diagnostics = diagnostics or []
+
+    def as_dict(self) -> dict[str, object]:
+        run = self.run
+        return {
+            "run_id": run.run_id,
+            "pipeline_id": run.pipeline_id,
+            "status": self.status,
+            "target_window": {"target_date": run.scheduled_at.date().isoformat()},
+            "metrics": {"rows_written": 1},
+            "outputs": [],
+            "diagnostics": self.diagnostics,
+        }
+
+
+def in_process_definition(
+    tmp_path: Path,
+    pipeline_id: str,
+    *,
+    table: str,
+    resource_locks: tuple[str, ...] = (),
+    resource_reads: tuple[str, ...] = (),
+    sleep_seconds: float = 0.0,
+    started: threading.Event | None = None,
+) -> PipelineDefinition:
+    database = tmp_path / "shared.duckdb"
+
+    def execute(run: object) -> _InProcessResult:
+        if started is not None:
+            started.set()
+        time.sleep(sleep_seconds)
+        connection = duckdb.connect(str(database))
+        try:
+            connection.execute(f"INSERT INTO {table} VALUES (?)", [run.run_id])
+        finally:
+            connection.close()
+        return _InProcessResult(run)
+
+    return PipelineDefinition(
+        pipeline_id=pipeline_id,
+        name=pipeline_id,
+        enabled=True,
+        schedule="* * * * *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=10,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=resource_locks,
+        resource_reads=resource_reads,
+        definition_version="in-process-v1",
+        in_process_executor=execute,
+    )
 def test_service_waits_until_target_then_bootstraps_and_does_not_repeat(tmp_path: Path) -> None:
     definition, marker = fixture_definition(tmp_path, "daily", schedule="5 8 * * *")
     first = service(tmp_path, (definition,))
@@ -185,6 +246,155 @@ def test_service_parallelizes_only_resource_independent_tasks(tmp_path: Path) ->
     # The same Runtime and host execute both batches.  A shared writer/read
     # pair must wait for two child durations, while independent tasks overlap.
     assert serialized_elapsed > concurrent_elapsed + 0.20
+
+
+def test_formal_contract_runs_in_serve_process_without_stdout_stderr_files(tmp_path: Path) -> None:
+    database = tmp_path / "shared.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE target (run_id VARCHAR)")
+    finally:
+        connection.close()
+    definition = in_process_definition(
+        tmp_path,
+        "formal_in_process",
+        table="target",
+        resource_locks=(f"duckdb://{database}#target",),
+    )
+    runtime_paths = PipelineRuntimePaths(
+        tmp_path / "runtime",
+        result_logs_dir_override=tmp_path / "audit" / "pipeline",
+    )
+    store = PipelineRuntimeStore(runtime_paths.database_path)
+    run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
+    result = PipelineService(
+        store,
+        runtime_paths,
+        (definition,),
+        scheduler_id="in-process-scheduler",
+        heartbeat_interval_seconds=0.05,
+        lease_seconds=1,
+        stale_after_seconds=2,
+        max_catch_up_minutes=30,
+        poll_interval_seconds=0.05,
+        max_workers=1,
+        service_name="in-process-service",
+    )
+    result.start()
+    try:
+        cycle = result.run_once(now=instant(0, 0))
+    finally:
+        result.stop()
+    assert cycle.executed_runs[0].run_id == run.run_id
+    assert cycle.executed_runs[0].status is PipelineStatus.SUCCESS
+    assert cycle.executed_runs[0].stdout_path is None
+    assert cycle.executed_runs[0].stderr_path is None
+    assert not (runtime_paths.logs_dir).exists()
+    assert store.get_result(run.run_id)["status"] == "SUCCESS"  # type: ignore[index]
+    connection = duckdb.connect(str(database), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM target").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_same_duckdb_file_different_tables_run_concurrently(tmp_path: Path) -> None:
+    database = tmp_path / "shared.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE table_a (run_id VARCHAR)")
+        connection.execute("CREATE TABLE table_b (run_id VARCHAR)")
+    finally:
+        connection.close()
+    table_a = in_process_definition(
+        tmp_path,
+        "table_a_writer",
+        table="table_a",
+        resource_locks=(f"duckdb://{database}#table_a",),
+        sleep_seconds=0.30,
+    )
+    table_b = in_process_definition(
+        tmp_path,
+        "table_b_writer",
+        table="table_b",
+        resource_locks=(f"duckdb://{database}#table_b",),
+        sleep_seconds=0.30,
+    )
+    runtime = service(tmp_path, (table_a, table_b))
+    runtime.start()
+    try:
+        started = time.monotonic()
+        cycle = runtime.run_once(now=instant(0, 0))
+        elapsed = time.monotonic() - started
+    finally:
+        runtime.stop()
+    assert {run.status for run in cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert elapsed < 0.75
+
+
+def test_same_duckdb_table_read_write_conflict_is_serialized(tmp_path: Path) -> None:
+    database = tmp_path / "shared.duckdb"
+    connection = duckdb.connect(str(database))
+    try:
+        connection.execute("CREATE TABLE shared_table (run_id VARCHAR)")
+    finally:
+        connection.close()
+    writer = in_process_definition(
+        tmp_path,
+        "table_writer",
+        table="shared_table",
+        resource_locks=(f"duckdb://{database}#shared_table",),
+        sleep_seconds=0.30,
+    )
+    reader = in_process_definition(
+        tmp_path,
+        "table_reader",
+        table="shared_table",
+        resource_reads=(f"duckdb://{database}#shared_table",),
+        sleep_seconds=0.30,
+    )
+    runtime = service(tmp_path, (writer, reader))
+    runtime.start()
+    try:
+        started = time.monotonic()
+        cycle = runtime.run_once(now=instant(0, 0))
+        elapsed = time.monotonic() - started
+    finally:
+        runtime.stop()
+    assert {run.status for run in cycle.executed_runs} == {PipelineStatus.SUCCESS}
+    assert elapsed > 0.55
+
+
+def test_formal_failure_summary_is_bounded_and_redacted(tmp_path: Path) -> None:
+    def fail(_run: object) -> _InProcessResult:
+        raise RuntimeError("token=super-secret " + "x" * 1_000)
+
+    definition = PipelineDefinition(
+        pipeline_id="formal_failure",
+        name="formal_failure",
+        enabled=True,
+        schedule="* * * * *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=10,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(),
+        in_process_executor=fail,
+    )
+    runtime = service(tmp_path, (definition,))
+    runtime.start()
+    try:
+        cycle = runtime.run_once(now=instant(0, 0))
+    finally:
+        runtime.stop()
+    failed = cycle.executed_runs[0]
+    assert failed.status is PipelineStatus.FAILED
+    assert failed.error_summary is not None and len(failed.error_summary) <= 500
+    assert "super-secret" not in failed.error_summary
+    assert "[REDACTED]" in failed.error_summary
 
 
 def test_cli_submits_to_active_service_without_running_business_process(

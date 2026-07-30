@@ -63,6 +63,17 @@ def test_contract_validator_requires_canonical_lock_for_managed_database() -> No
         validate_contracts((invalid,))
 
 
+def test_contract_validator_accepts_table_scoped_duckdb_lock() -> None:
+    output = replace(CONTRACT_TEMPLATE.outputs[0], physical_resource="quant_db")
+    scoped = replace(
+        CONTRACT_TEMPLATE,
+        outputs=(output,),
+        resource_locks=("duckdb://quant_db#fixture_output",),
+    )
+
+    assert validate_contracts((scoped,)) == (scoped,)
+
+
 def test_input_freshness_failure_prevents_executor(tmp_path: Path) -> None:
     called = False
 

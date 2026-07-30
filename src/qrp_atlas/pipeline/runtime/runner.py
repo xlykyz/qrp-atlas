@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import signal
 import subprocess
 import threading
@@ -73,9 +74,15 @@ class PipelineRunner:
     def run(self, run_id: str, definition: PipelineDefinition) -> PipelineRun:
         """Atomically claim and execute one PENDING record."""
 
-        self.runtime_paths.logs_dir.mkdir(parents=True, exist_ok=True)
-        stdout_path = self.runtime_paths.logs_dir / f"{run_id}.stdout.log"
-        stderr_path = self.runtime_paths.logs_dir / f"{run_id}.stderr.log"
+        stdout_path: Path | None = None
+        stderr_path: Path | None = None
+        if definition.in_process_executor is None:
+            # Legacy argv definitions retain their isolated diagnostic files.
+            # Formal Contracts never enter this branch and never create these
+            # files.
+            self.runtime_paths.logs_dir.mkdir(parents=True, exist_ok=True)
+            stdout_path = self.runtime_paths.logs_dir / f"{run_id}.stdout.log"
+            stderr_path = self.runtime_paths.logs_dir / f"{run_id}.stderr.log"
         claimed = self.store.claim_run(
             run_id,
             pipeline_id=definition.pipeline_id,
@@ -90,6 +97,104 @@ class PipelineRunner:
         return self._execute_claimed(claimed, definition)
 
     def _execute_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
+        if definition.in_process_executor is not None:
+            return self._execute_in_process_claimed(claimed, definition)
+        return self._execute_subprocess_claimed(claimed, definition)
+
+    def _execute_in_process_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
+        """Run a formal Contract in this process while the lease is alive."""
+
+        if claimed.stdout_path is not None or claimed.stderr_path is not None:
+            raise RuntimeError("in-process pipeline run must not have stdout/stderr paths")
+        started = time.monotonic()
+        before_usage = self._process_usage()
+        stop_heartbeat = threading.Event()
+        heartbeat_failed = threading.Event()
+        heartbeat_failure_reason: list[str] = []
+        heartbeat_failure_lock = threading.Lock()
+        peak_rss_kb = [self._sample_rss_kb(os.getpid())]
+
+        def report_heartbeat_failure(reason: str) -> None:
+            with heartbeat_failure_lock:
+                if not heartbeat_failed.is_set():
+                    heartbeat_failure_reason.append(reason)
+                    heartbeat_failed.set()
+
+        def heartbeat_loop() -> None:
+            try:
+                while not stop_heartbeat.wait(self.heartbeat_interval_seconds):
+                    try:
+                        healthy = self.store.heartbeat(claimed.run_id, lease_seconds=self.lease_seconds)
+                    except BaseException as exc:  # Never lose lease-health failures in a daemon thread.
+                        report_heartbeat_failure(f"heartbeat update raised {type(exc).__name__}: {exc}")
+                        return
+                    if not healthy:
+                        report_heartbeat_failure("heartbeat update returned False")
+                        return
+                    peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(os.getpid()))
+            except BaseException as exc:  # pragma: no cover - defensive protection for thread failures.
+                report_heartbeat_failure(f"heartbeat thread raised {type(exc).__name__}: {exc}")
+            finally:
+                if not stop_heartbeat.is_set() and not heartbeat_failed.is_set():
+                    report_heartbeat_failure("heartbeat thread exited unexpectedly")
+
+        heartbeater = threading.Thread(
+            target=heartbeat_loop,
+            name=f"pipeline-heartbeat-{claimed.run_id}",
+            daemon=True,
+        )
+        status = PipelineStatus.FAILED
+        result_payload: Mapping[str, object] | None = None
+        error_summary: str | None = None
+        heartbeater.start()
+        try:
+            result = definition.in_process_executor(claimed)
+            if not hasattr(result, "as_dict"):
+                raise TypeError("formal executor must return a result with as_dict()")
+            payload = result.as_dict()
+            if not isinstance(payload, dict):
+                raise TypeError("formal executor result must serialize to an object")
+            result_payload = payload
+            result_status = payload.get("status")
+            if result_status in {"SUCCESS", "NOOP"}:
+                status = PipelineStatus.SUCCESS
+            elif result_status == "FAILED":
+                status = PipelineStatus.FAILED
+                error_summary = self._result_error_summary(payload)
+            else:
+                status = PipelineStatus.FAILED
+                error_summary = "formal executor returned an invalid result status"
+        except BaseException as exc:
+            status = PipelineStatus.FAILED
+            error_summary = self._safe_error_summary(exc)
+        finally:
+            stop_heartbeat.set()
+            heartbeater.join(timeout=max(1.0, self.heartbeat_interval_seconds * 2))
+            peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(os.getpid()))
+        if heartbeat_failed.is_set():
+            status = PipelineStatus.FAILED
+            error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
+        after_usage = self._process_usage()
+        duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        if result_payload is not None:
+            try:
+                self.store.record_result(claimed.run_id, result_payload)
+            except Exception as exc:
+                status = PipelineStatus.FAILED
+                error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"[:500]
+        return self.store.finish_run(
+            claimed.run_id,
+            status=status,
+            exit_code=0 if status is PipelineStatus.SUCCESS else 1,
+            timed_out=False,
+            error_summary=error_summary,
+            wall_duration_ms=duration_ms,
+            user_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_utime"),
+            system_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_stime"),
+            peak_rss_kb=peak_rss_kb[0] or None,
+        )
+
+    def _execute_subprocess_claimed(self, claimed: PipelineRun, definition: PipelineDefinition) -> PipelineRun:
         if claimed.stdout_path is None or claimed.stderr_path is None:
             raise RuntimeError("claimed pipeline run is missing log paths")
         stdout_path = claimed.stdout_path
@@ -272,6 +377,28 @@ class PipelineRunner:
         return environment
 
     @staticmethod
+    def _safe_error_summary(exc: BaseException) -> str:
+        """Return a bounded, single-line error without traceback or secrets."""
+
+        value = f"{type(exc).__name__}: {exc}".replace("\x00", " ")
+        value = re.sub(r"(?i)(api[_-]?key|token|password|secret)(\s*[:=]\s*)[^\s,;]+", r"\1\2[REDACTED]", value)
+        value = " ".join(value.split())
+        return value[:500]
+
+    @classmethod
+    def _result_error_summary(cls, payload: Mapping[str, object]) -> str:
+        diagnostics = payload.get("diagnostics")
+        if isinstance(diagnostics, list):
+            for diagnostic in diagnostics:
+                if not isinstance(diagnostic, Mapping):
+                    continue
+                code = diagnostic.get("code")
+                message = diagnostic.get("message")
+                if isinstance(code, str) and isinstance(message, str):
+                    return cls._safe_error_summary(RuntimeError(f"{code}: {message}"))
+        return "formal executor returned FAILED"
+
+    @staticmethod
     def _load_structured_result(
         result_path: Path | None,
         *,
@@ -348,6 +475,10 @@ class PipelineRunner:
     @staticmethod
     def _children_usage():
         return resource.getrusage(resource.RUSAGE_CHILDREN) if resource is not None else None
+
+    @staticmethod
+    def _process_usage():
+        return resource.getrusage(resource.RUSAGE_SELF) if resource is not None else None
 
     @staticmethod
     def _usage_delta_ms(before, after, field_name: str) -> int | None:

@@ -72,6 +72,41 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value).astimezone(UTC) if value else None
 
 
+def _resource_scope(resource_name: str) -> tuple[str, str | None] | None:
+    """Return a DuckDB database/object scope for conflict arbitration.
+
+    ``duckdb://<database>#<object>`` is the explicit form.  Existing managed
+    names such as ``quant_db_writer`` remain database-wide resources, so old
+    definitions continue to serialize safely with table-scoped declarations.
+    """
+
+    if resource_name.startswith("duckdb://"):
+        value = resource_name[len("duckdb://") :]
+        database, separator, object_name = value.partition("#")
+        if database and separator and object_name:
+            return database, object_name
+        if database:
+            return database, None
+    if resource_name.endswith("_writer"):
+        database = resource_name[: -len("_writer")]
+        if database:
+            return database, None
+    if resource_name.endswith("_db"):
+        return resource_name, None
+    return None
+
+
+def _resources_conflict(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_scope = _resource_scope(left)
+    right_scope = _resource_scope(right)
+    if left_scope is None or right_scope is None or left_scope[0] != right_scope[0]:
+        return False
+    left_object, right_object = left_scope[1], right_scope[1]
+    return left_object is None or right_object is None or left_object == right_object
+
+
 class PipelineRuntimeStore:
     """Owns a single isolated SQLite runtime database, never a market database."""
 
@@ -593,11 +628,11 @@ class PipelineRuntimeStore:
     def has_active_resource_lock(self, resource_name: str, *, now: datetime | None = None) -> bool:
         connection = self._connect()
         try:
-            row = connection.execute(
-                "SELECT 1 FROM resource_lock WHERE resource_name = ? AND lease_expires_at > ?",
-                [resource_name, _timestamp(now or utc_now())],
-            ).fetchone()
-            return row is not None
+            rows = connection.execute(
+                "SELECT resource_name FROM resource_lock WHERE lease_expires_at > ?",
+                [_timestamp(now or utc_now())],
+            ).fetchall()
+            return any(_resources_conflict(resource_name, row["resource_name"]) for row in rows)
         finally:
             connection.close()
 
@@ -606,11 +641,11 @@ class PipelineRuntimeStore:
 
         connection = self._connect()
         try:
-            row = connection.execute(
-                "SELECT 1 FROM resource_read_lease WHERE resource_name = ? AND lease_expires_at > ? LIMIT 1",
-                [resource_name, _timestamp(now or utc_now())],
-            ).fetchone()
-            return row is not None
+            rows = connection.execute(
+                "SELECT resource_name FROM resource_read_lease WHERE lease_expires_at > ?",
+                [_timestamp(now or utc_now())],
+            ).fetchall()
+            return any(_resources_conflict(resource_name, row["resource_name"]) for row in rows)
         finally:
             connection.close()
 
@@ -637,8 +672,8 @@ class PipelineRuntimeStore:
         overlap_policy: OverlapPolicy,
         resource_locks: Iterable[str],
         resource_reads: Iterable[str] = (),
-        stdout_path: Path,
-        stderr_path: Path,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
         lease_seconds: int,
         now: datetime | None = None,
     ) -> PipelineRun:
@@ -680,27 +715,52 @@ class PipelineRuntimeStore:
             connection.execute("DELETE FROM resource_lock WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             connection.execute("DELETE FROM resource_read_lease WHERE lease_expires_at <= ?", [_timestamp(timestamp)])
             if lock_names:
-                placeholders = ", ".join("?" for _ in lock_names)
-                conflict = connection.execute(
-                    f"SELECT resource_name FROM resource_lock WHERE resource_name IN ({placeholders}) LIMIT 1",
-                    list(lock_names),
-                ).fetchone()
+                active_writers = connection.execute(
+                    "SELECT resource_name FROM resource_lock WHERE lease_expires_at > ?",
+                    [_timestamp(timestamp)],
+                ).fetchall()
+                conflict = next(
+                    (
+                        row["resource_name"]
+                        for requested in lock_names
+                        for row in active_writers
+                        if _resources_conflict(requested, row["resource_name"])
+                    ),
+                    None,
+                )
                 if conflict is not None:
-                    raise RunClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict["resource_name"])
-                reader_conflict = connection.execute(
-                    f"SELECT resource_name FROM resource_read_lease WHERE resource_name IN ({placeholders}) LIMIT 1",
-                    list(lock_names),
-                ).fetchone()
+                    raise RunClaimFailure("RESOURCE_LOCK_UNAVAILABLE", conflict)
+                active_readers = connection.execute(
+                    "SELECT resource_name FROM resource_read_lease WHERE lease_expires_at > ?",
+                    [_timestamp(timestamp)],
+                ).fetchall()
+                reader_conflict = next(
+                    (
+                        row["resource_name"]
+                        for requested in lock_names
+                        for row in active_readers
+                        if _resources_conflict(requested, row["resource_name"])
+                    ),
+                    None,
+                )
                 if reader_conflict is not None:
-                    raise RunClaimFailure("RESOURCE_READERS_ACTIVE", reader_conflict["resource_name"])
+                    raise RunClaimFailure("RESOURCE_READERS_ACTIVE", reader_conflict)
             if read_names:
-                placeholders = ", ".join("?" for _ in read_names)
-                writer_conflict = connection.execute(
-                    f"SELECT resource_name FROM resource_lock WHERE resource_name IN ({placeholders}) LIMIT 1",
-                    list(read_names),
-                ).fetchone()
+                active_writers = connection.execute(
+                    "SELECT resource_name FROM resource_lock WHERE lease_expires_at > ?",
+                    [_timestamp(timestamp)],
+                ).fetchall()
+                writer_conflict = next(
+                    (
+                        row["resource_name"]
+                        for requested in read_names
+                        for row in active_writers
+                        if _resources_conflict(requested, row["resource_name"])
+                    ),
+                    None,
+                )
                 if writer_conflict is not None:
-                    raise RunClaimFailure("RESOURCE_WRITER_ACTIVE", writer_conflict["resource_name"])
+                    raise RunClaimFailure("RESOURCE_WRITER_ACTIVE", writer_conflict)
             assert_status_transition(PipelineStatus.PENDING, PipelineStatus.RUNNING)
             connection.execute(
                 """
@@ -712,8 +772,8 @@ class PipelineRuntimeStore:
                     PipelineStatus.RUNNING.value,
                     _timestamp(timestamp),
                     _timestamp(timestamp),
-                    str(stdout_path),
-                    str(stderr_path),
+                    str(stdout_path) if stdout_path is not None else None,
+                    str(stderr_path) if stderr_path is not None else None,
                     run_id,
                 ],
             )

@@ -24,6 +24,7 @@ from .contract_adapter import (
     contract_runtime_definition,
     definitions_from_contract_selections,
     load_contract_selections,
+    make_in_process_contract_executor,
 )
 from .definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
 from .models import PipelineDefinition, PipelineStatus
@@ -228,7 +229,9 @@ def _load_definitions_for_args(args: argparse.Namespace, *, require_source: bool
     if args.definitions is not None and args.contract_selections is not None:
         raise DefinitionValidationError("choose either --definitions or --contract-selections")
     if args.contract_selections is not None:
-        return definitions_from_contract_selections(load_contract_selections(args.contract_selections))
+        definitions = definitions_from_contract_selections(load_contract_selections(args.contract_selections))
+        environment = {"QRP_ENV_FILE": args.env_file} if args.env_file else {}
+        return _apply_definition_environment(definitions, environment)
     if args.definitions is not None:
         return load_definitions(args.definitions)
     if require_source:
@@ -279,12 +282,37 @@ def _formal_runtime_definitions(*, environment: dict[str, str] | None = None) ->
     )
 
 
+def _apply_definition_environment(
+    definitions: tuple[PipelineDefinition, ...],
+    environment: dict[str, str],
+) -> tuple[PipelineDefinition, ...]:
+    if not environment:
+        return definitions
+    merged: list[PipelineDefinition] = []
+    for item in definitions:
+        merged_environment = {**item.environment, **environment}
+        if item.in_process_executor is not None:
+            contract = default_registry().get(item.pipeline_id)
+            item = replace(
+                item,
+                environment=merged_environment,
+                in_process_executor=make_in_process_contract_executor(
+                    contract,
+                    environment=merged_environment,
+                ),
+            )
+        else:
+            item = replace(item, environment=merged_environment)
+        merged.append(item)
+    return tuple(merged)
+
+
 def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[str, str]) -> tuple[PipelineDefinition, ...]:
     if args.definitions is not None or args.contract_selections is not None:
         definitions = _load_definitions_for_args(args, require_source=True)
         if args.parameter_assignments:
             raise DefinitionValidationError("--set is supported only for source-registered formal Pipelines")
-        return tuple(replace(item, environment={**item.environment, **environment}) for item in definitions)
+        return _apply_definition_environment(definitions, environment)
     return _formal_runtime_definitions(environment=environment)
 
 
