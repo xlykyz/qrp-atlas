@@ -33,7 +33,7 @@
 
 共注册 32 条，排除 29 个已核查候选项。15 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
 
-当前源码默认 catalog 中的六条已验收市场数据 Contract 是 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`。本轮只统一 Contract 门禁和运行语义，不改写这六条业务定义；它们写入 `quant.db` 时均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
+当前源码默认 catalog 中的九条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）以及三条 CNINFO 采集 Contract（`cninfo_main_update`、`cninfo_incremental_noon` 和 `cninfo_incremental_afternoon`）。CNINFO 合同化保留三条历史身份和 Hermes 调度事实，但不改写六条市场数据业务定义；所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
 `task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。研究报告的实际业务入口是仓库内确定性 Python Pipeline；它们当前缺少可移植的运行时日期参数包装，因此未建立 Shadow Definition，而不是因为其业务计算需要 LLM。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
