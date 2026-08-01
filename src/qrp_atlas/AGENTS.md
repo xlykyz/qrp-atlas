@@ -66,6 +66,21 @@ frontend → api
 
 `orchestration/` 是业务无关的顶级 Job Runtime。它不得导入 `pipeline`、`indicators`、`strategies`、`backtest` 或 `api`，也不得理解 DuckDB 表、市场数据源、交易日期或业务质量规则。Pipeline Contract 的业务语义保留在 `pipeline/`，由 `pipeline/job_adapter.py` 将 `PipelineContract.pipeline_id` 映射为 `JobDefinition.job_id`。正式入口是 `qrp-atlas-jobs`；通用运行库使用 `job_runtime.sqlite3` 和 `job_result`，不得重新引入 `pipeline/runtime`。
 
+正式 `PipelineContract` 通过 `in_process_executor` 在 `qrp-atlas-jobs serve` 进程的线程 worker 内执行；只有普通兼容 Definition 可以通过 argv 子进程执行。正式 executor 不得自行启动写同一 QRP DuckDB 的子进程。
+
+正式 `PipelineContract` 的 `resource_reads` 和 `manual_execution_allowed` 是一等字段：前者声明共享只读资源，`duckdb://<database>#<object>` 表级资源只能用于读取；后者控制 `run`/人工依赖提交，部署 selection 不得覆盖。写入同一 DuckDB 文件必须使用其 canonical 数据库级 writer lock，例如 `quant_db_writer`。通用 Orchestration 锁引擎仍可为兼容 JSON Definition 提供表级资源锁，但该兼容能力不改变正式 Contract 的生产写锁规则。
+
+职责必须保持单一：Orchestration 负责 dependency、claim、resource lease、heartbeat、deadline/timeout、retry、恢复和最终 Job 状态；`pipeline.execution.execute_pipeline_contract` 负责目标日期解析、参数校验、输入结构、freshness、业务 executor、completion、质量检查和 `PipelineResult`。不得在任一侧复制另一侧的生命周期。
+
+`PipelineInvocation.execution_control` 必须以同一实例传入 `PipelineRunContext.execution_control`。正式 executor 和检查器必须通过 `check()` 响应取消/到期，并使用 `bounded_timeout()` 限制外部等待；不得在业务层重新创建、替换或绕过该控制器。`PipelineResult` 是业务结果，`JobResult` 是 Orchestration 的 durable 结果记录；每个 `SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 或 `SKIPPED` 终态 JobRun 恰好有一条 `JobResult`。没有业务载荷的 timeout、cancel、skip、stale recovery 或 Runner 异常路径使用 `result_type=orchestration`、`source=orchestration`、终态错误元数据和 `business_result=null`，不得伪造业务成功。
+
+正式 Pipeline 的取消和 deadline 是协作式协议：
+
+- 必须将同一个 `ExecutionControl` 从 `PipelineInvocation` 传入 `PipelineRunContext`，不得在业务 executor 中替换或丢弃；
+- 外部网络、provider retry/backoff 和其他阻塞等待必须使用 `execution_control.bounded_timeout()` 或等价的受控等待，不能超过当前执行 deadline；
+- 输入/freshness/completion/质量检查、外部 I/O 前后以及进入或继续 DuckDB 写事务前必须调用 `execution_control.check()`；
+- Python worker 线程不会被强制终止，因此禁止不可取消的无限阻塞、忽略取消状态或在取消后开始新的写事务。
+
 禁止的典型依赖：
 
 ```text
@@ -340,7 +355,7 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 - 日期排序、分组键、缺失值、重复行和非有限价格必须显式处理；
 - 任何可能影响 PIT 正确性的实现都必须避免未来数据泄漏；
 - 数据库字段与 contracts 不一致时，优先修复上游契约或生产链路；
-- 结果文件、任务文件和声明式版本写入必须考虑并发、原子性和崩溃恢复；
+- 兼容 Definition 的结果文件、任务文件和声明式版本写入必须考虑并发、原子性和崩溃恢复；正式 Contract 的终态结构化结果以 runtime SQLite `job_result` 为准；
 - owner 过滤应在服务或存储边界强制执行，不能只依赖前端隐藏。
 
 ## 测试要求
@@ -348,7 +363,8 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 每项行为变更都应有与其风险匹配的测试。
 
 - contracts：字段、schema、主键、可空性、映射和时间语义；
-- pipeline：外部映射、标准化、PIT 修订、非法输入和入库边界；
+- orchestration：Definition/DAG 校验、认领、lease、heartbeat、并发与资源冲突、进程内执行、timeout/cancellation、retry、恢复、结果审计和业务反向依赖；
+- pipeline：外部映射、标准化、PIT 修订、正式 Contract 生命周期、ExecutionControl 传播、非法输入和入库边界；
 - indicators：单/多资产、排序、缺失值、窗口、输出和无未来泄漏；
 - strategies：定义、参数、注册表、版本、决策和状态转换；
 - backtest engine：成交时点、现实约束、成本、持仓、skipped、收益和回归；

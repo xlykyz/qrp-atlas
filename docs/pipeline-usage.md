@@ -34,6 +34,11 @@ Task execution
 - **Dependency**：有向无环图中的上游任务。计划按拓扑顺序排列；上游未成功时下游保持 `BLOCKED`，不会被错误执行。
 - **Job Run**：每次尝试的持久化记录。单个 Definition 是当前 Orchestration 的最小任务单位，因此一个 Job Run 同时承载该任务的认领、状态和结果摘要；业务代码如需细分阶段，可使用 Stage Run API 记录阶段输入/输出行数。
 - **Task execution**：Runner 原子领取 Job Run、获取资源 lease、发送心跳并写入最终状态。正式 Contract 在 `serve` 进程的线程 worker 内调用 executor；普通兼容 Definition 才以 argv 启动子进程。
+- **PipelineResult / JobResult**：`PipelineResult` 是正式 Contract 的业务结果，状态为 `SUCCESS`、`FAILED` 或 `NOOP`；`JobResult` 是 Orchestration 按 `run_id` 持久化的最终结果记录。每个 `SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 或 `SKIPPED` 的终态 Job Run 都恰好有一条 `JobResult`。
+
+timeout、cancel、skip、stale recovery 或 Runner 异常没有业务载荷时，Orchestration 合成 `result_type=orchestration`、`source=orchestration`、终态状态、错误元数据和 `business_result=null` 的结果；timeout/cancel 即使 executor 曾返回载荷也不伪造业务成功。正常业务结果仍保留为 `PipelineResult` JSON。两者均可通过 `status --include-result` 或 `latest --include-result` 查询。
+
+正式 Contract 的 `PipelineInvocation.execution_control` 与 `PipelineRunContext.execution_control` 必须是同一个 `ExecutionControl` 实例。executor、检查器和外部 I/O 必须共享它，通过 `check()` 响应取消/到期，通过 `bounded_timeout()` 限制等待；不得在业务层重新创建控制器或绕过它。
 
 运行状态为 `PENDING`、`BLOCKED`、`RUNNING`、`SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 和 `SKIPPED`。终态不可回退；重试永远创建新的 attempt，保留失败证据。
 
@@ -76,7 +81,7 @@ Runtime 会拒绝将最终结果日志写到源码仓库、当前工作目录回
 
 1. 新建或修改 `PipelineContract`，声明稳定 `pipeline_id`、版本、输入、输出、依赖、读写资源、幂等性、事务和性能限制。
 2. 用 `TargetDatePolicy` 实现业务日期解析。市场日、休市日和显式目标日期均由该策略决定，调度器不猜测交易日逻辑。
-3. 在 Contract 中声明 `resource_reads`（共享只读资源）和 `resource_locks`（排他写资源）；同一资源不能同时出现。业务 executor 不得自行再启动写同一 DuckDB 的子进程。
+3. 在 Contract 中声明 `resource_reads`（共享只读资源）和 `resource_locks`（排他写资源）；同一资源不能同时出现。正式 Contract 写同一 DuckDB 文件必须使用其 canonical 数据库级 writer lock，表级 `duckdb://<database>#<object>` 只允许出现在 `resource_reads`。业务 executor 不得自行再启动写同一 DuckDB 的子进程。
 4. 在 Contract 中声明 `manual_execution_allowed`；默认允许人工执行。需要禁止时设为 `False`。
 5. 将 Contract 加入 `contract_catalog`，并运行 `validate-contracts`。
 6. 为目标环境创建 deployment selection。它只能选择 Pipeline、开关自动执行和 schedule，不能携带数据库路径、动态日期、argv、依赖、锁或失败处理规则。
@@ -153,9 +158,13 @@ qrp-atlas-jobs plan market_daily_update \
 
 `environment` 只能保存非敏感的固定值。凭据应由批准的运行环境提供，不得放入 Definition 或日志。
 
-`resource_reads` 使用共享 lease：多个纯读任务可以并行。`resource_locks` 使用排他写 lease：写写、写读、读写同一资源都会串行。对于同一 DuckDB 的表级声明，使用 `duckdb://<database>#<object>`；同库不同表可以并行，同表读写会串行。已有的 `quant_db_writer`、`system_b_episode_writer` 等名称仍表示整个数据库级排他资源。lease 仲裁在运行状态 SQLite 的单一事务中完成，`serve` 的 worker 数量不会绕过它。
+`resource_reads` 使用共享 lease：多个纯读任务可以并行。正式 Contract 的 `resource_locks` 只用于数据库级写入排他 lease；`quant_db_writer`、`system_b_episode_writer` 等名称表示整个物理数据库。表级 `duckdb://<database>#<object>` 只能作为正式 Contract 的读取声明。通用 Orchestration 仍为兼容 JSON Definition 支持表级 `resource_locks`，同库不同表可并行、同表读写会串行；这不改变正式 Contract 的生产写锁规则。lease 仲裁在运行状态 SQLite 的单一事务中完成，`serve` 的 worker 数量不会绕过它。
+
+通用 Contract 门禁要求声明的错误码及运行时检查/诊断错误码匹配 `ERROR_CODE_PATTERN = ^[A-Z][A-Z0-9_]*$`，但不维护错误码注册中心。结构、事务、幂等、原子性、分页完整性、来源完整性、freshness 业务含义和真实性能基线仍由各 Pipeline 专项测试与证据证明。
 
 ## 手动操作
+
+`manual_execution_allowed` 是 Contract 的一等运行字段。值为 `False` 时，`run` 及包含该 Contract 的 `--with-dependencies` 人工提交会被拒绝；部署 selection 不能覆盖它。值为 `True` 只表示允许提交人工 Run，目标日期、参数、依赖、资源 lease 和所有业务检查仍由正式生命周期执行。
 
 先校验和查看配置：
 
@@ -262,7 +271,7 @@ qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env health
 - 服务首次启动时，会在 `--max-catch-up-minutes` 窗口中为每个 Definition 选择最近一次到期点，补偿“目标时间已过但没有运行记录”的情况。
 - 已有 scheduler cursor 时，重启会精确扫描 cursor 与当前时刻之间遗漏的 cron 分钟；已存在或已成功的同一 `job_id`、业务时刻和定义版本不会重复创建有效日常运行。
 - `RUNNING` 记录的心跳超时会被标记为 `FAILED`，资源 lease 被回收。它不会自动重试，必须由人工 `retry`。
-- 子进程退出异常、超时、心跳失败或 Runner 内部执行异常会落到对应 Job Run 的最终失败状态，单个任务失败不会终止其他独立任务。
+- 兼容 argv Definition 的子进程退出异常、超时、心跳失败或 Runner 内部执行异常会落到对应 Job Run 的最终状态，单个任务失败不会终止其他独立任务；正式 Contract 在 `serve` 线程 worker 内执行，不使用子进程结果文件 IPC。
 - 正式 Contract 使用协作式 deadline/cancellation：外部等待使用 `ExecutionControl.bounded_timeout()`，执行阶段和 DuckDB 写事务前调用 `execution_control.check()`。到期状态为 `TIMED_OUT`；租约/心跳丢失会取消当前执行并禁止进入新的写事务。Python 线程不会被强制杀死，因此 Contract 不得忽略这些检查或把不可取消的无限阻塞调用放进正式 executor。
 - 普通扫描/计划局部异常被记录到服务 lease，并进入下一轮；状态库不可用、审计日志不可用或服务所有权丢失属于致命错误，`serve` 会明确退出而不是伪装健康。
 - 无任务时服务以 `--poll-interval-seconds` 等待，不忙轮询，也不写“没有任务”的日志。
@@ -278,6 +287,8 @@ qrp-atlas-jobs --env-file /etc/qrp-atlas/runtime.env health
 - 最终状态和毫秒耗时；
 - 任务摘要、输出 ID 与行数摘要；
 - 失败时的稳定错误类型和经过截断/敏感键脱敏的错误摘要。
+
+JSONL 是审计日志，不替代 runtime SQLite 的 `JobResult`。每个终态 Job Run 的唯一结构化结果都在 `job_result` 中；兼容 argv Definition 的临时结果文件读取后删除，正式 Contract 不创建该 IPC 文件。
 
 日志不记录完整环境变量、Definition 环境值、凭据、输入行、SQL、循环心跳或空闲轮询。正式 Contract 不创建或永久保存 stdout/stderr 文件；成功运行只保留结构化结果与 JSONL 审计记录，失败只保留长度受限且脱敏的错误摘要。普通 argv 兼容入口可以保留隔离 runtime 目录中的 stdout/stderr，但它不是迁移后日常 Pipeline 的正式执行入口。
 

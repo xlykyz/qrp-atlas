@@ -29,6 +29,7 @@ from qrp_atlas.pipeline.market_data_contracts import (
 from qrp_atlas.pipeline.job_adapter import ContractDeploymentSelection, contract_runtime_definition
 from qrp_atlas.jobs_cli import main as pipeline_cli
 from qrp_atlas.orchestration.store import JobRuntimeStore
+from qrp_atlas.pipeline.registry import default_registry
 from qrp_atlas.pipeline.testing import ContractTestHarness, assert_contract_result_matches_context
 
 
@@ -219,6 +220,8 @@ def _eastmoney_urlopen(responses: dict[tuple[str, int], dict | Exception]):
 
 def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> None:
     validate_contracts(MARKET_DATA_CONTRACTS)
+    registered = default_registry().all()
+    validate_contracts(registered)
     assert {contract.pipeline_id for contract in MARKET_DATA_CONTRACTS} == {
         "market_daily_update",
         "adj_factor_daily",
@@ -226,6 +229,9 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         "index_daily_update",
         "zt_dt_pool_daily",
         "suspend_d_ingest",
+    }
+    assert {contract.pipeline_id for contract in registered} == {
+        contract.pipeline_id for contract in MARKET_DATA_CONTRACTS
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert MARKET_DAILY_UPDATE.dependencies == ()

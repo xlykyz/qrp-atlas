@@ -14,7 +14,7 @@ import pytest
 
 from qrp_atlas.pipeline.contracts import ContractError
 from qrp_atlas.jobs_cli import main as pipeline_cli
-from qrp_atlas.orchestration.models import OverlapPolicy, JobDefinition, JobStatus
+from qrp_atlas.orchestration.models import OverlapPolicy, JobDefinition, JobExecutionResult, JobStatus
 from qrp_atlas.orchestration.service import JobService
 from qrp_atlas.orchestration.store import JobRuntimeStore, JobClaimFailure
 from qrp_atlas.orchestration.runner import JobRunner, JobRuntimePaths
@@ -344,11 +344,113 @@ def test_in_process_deadline_cancels_before_duckdb_write(tmp_path: Path) -> None
 
     assert result.status is JobStatus.TIMED_OUT
     assert result.timed_out is True
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "TIMED_OUT"
+    assert payload["business_result"] is None
     connection = duckdb.connect(str(database), read_only=True)
     try:
         assert connection.execute("SELECT COUNT(*) FROM target").fetchone()[0] == 0
     finally:
         connection.close()
+
+
+def test_in_process_cancellation_persists_orchestration_result(tmp_path: Path) -> None:
+    def execute(run: object) -> _InProcessResult:
+        run.execution_control.wait(threading.Event(), timeout=1)
+        return _InProcessResult(run)
+
+    definition = JobDefinition(
+        job_id="cancelled_contract",
+        name="cancelled_contract",
+        enabled=True,
+        schedule="0 0 1 1 *",
+        timezone="Asia/Shanghai",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=5,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(),
+        definition_version="cancelled-v1",
+        in_process_executor=execute,
+    )
+    paths = JobRuntimePaths(tmp_path / "runtime", result_logs_dir_override=tmp_path / "audit")
+    store = JobRuntimeStore(paths.database_path)
+    run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    result = JobRunner(
+        store,
+        paths,
+        heartbeat_interval_seconds=0.01,
+        lease_seconds=1,
+        cancel_event=cancel_event,
+    ).run(run.run_id, definition)
+
+    assert result.status is JobStatus.CANCELLED
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "CANCELLED"
+    assert payload["error_code"] == "ORCHESTRATION_CANCELLED"
+    assert payload["business_result"] is None
+
+
+@pytest.mark.parametrize(
+    "executor_status",
+    [
+        JobStatus.PENDING,
+        JobStatus.BLOCKED,
+        JobStatus.RUNNING,
+        JobStatus.TIMED_OUT,
+        JobStatus.CANCELLED,
+        JobStatus.SKIPPED,
+    ],
+)
+def test_in_process_executor_cannot_claim_orchestration_terminal_status(
+    tmp_path: Path,
+    executor_status: JobStatus,
+) -> None:
+    def execute(_run: object) -> JobExecutionResult:
+        return JobExecutionResult(
+            status=executor_status,
+            payload={"status": "SUCCESS", "business_payload": "must not survive"},
+        )
+
+    definition = JobDefinition(
+        job_id=f"invalid-executor-status-{executor_status.value.lower()}",
+        name="invalid executor status",
+        enabled=True,
+        schedule="0 0 1 1 *",
+        timezone="UTC",
+        command=(),
+        working_directory=None,
+        dependencies=(),
+        timeout_seconds=5,
+        max_retries=0,
+        overlap_policy=OverlapPolicy.ALLOW,
+        resource_locks=(),
+        definition_version="invalid-status-v1",
+        in_process_executor=execute,
+    )
+    paths = JobRuntimePaths(tmp_path / "runtime")
+    store = JobRuntimeStore(paths.database_path)
+    run, _ = store.create_scheduled_run(definition, scheduled_at=instant(0, 0))
+
+    result = JobRunner(store, paths, heartbeat_interval_seconds=0.01, lease_seconds=1).run(
+        run.run_id, definition
+    )
+
+    assert result.status is JobStatus.FAILED
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["business_result"] is None
 
 
 def test_lease_loss_cancels_in_process_contract_before_duckdb_write(tmp_path: Path, monkeypatch) -> None:

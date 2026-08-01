@@ -210,9 +210,21 @@ class JobRunner:
         try:
             result = definition.in_process_executor(executor_run)
             if isinstance(result, JobExecutionResult):
-                result_payload = result.payload
-                status = result.status
-                error_summary = result.error_summary
+                if result.status is JobStatus.SUCCESS:
+                    result_payload = result.payload
+                    status = JobStatus.SUCCESS
+                    error_summary = result.error_summary
+                elif result.status is JobStatus.FAILED:
+                    result_payload = result.payload
+                    status = JobStatus.FAILED
+                    error_summary = result.error_summary
+                else:
+                    result_payload = None
+                    status = JobStatus.FAILED
+                    status_name = (
+                        result.status.value if isinstance(result.status, JobStatus) else repr(result.status)
+                    )
+                    error_summary = f"ORCHESTRATION_INVALID_EXECUTOR_STATUS: {status_name}"
             else:
                 # Compatibility for existing in-process fixtures and simple
                 # adapters that expose the historical structured-result shape.
@@ -221,16 +233,18 @@ class JobRunner:
                 payload = result.as_dict()
                 if not isinstance(payload, dict):
                     raise TypeError("in-process Job result must serialize to an object")
-                result_payload = payload
                 result_status = payload.get("status")
                 if result_status in {"SUCCESS", "NOOP"}:
+                    result_payload = payload
                     status = JobStatus.SUCCESS
                 elif result_status == "FAILED":
+                    result_payload = payload
                     status = JobStatus.FAILED
                     error_summary = self._result_error_summary(payload)
                 else:
+                    result_payload = None
                     status = JobStatus.FAILED
-                    error_summary = "in-process Job executor returned an invalid result status"
+                    error_summary = "ORCHESTRATION_INVALID_EXECUTOR_STATUS: in-process result payload"
         except BaseException as exc:
             status = JobStatus.FAILED
             error_summary = self._safe_error_summary(exc)
@@ -253,16 +267,11 @@ class JobRunner:
             status = JobStatus.FAILED
             error_summary = f"heartbeat failure: {heartbeat_failure_reason[0]}"
             timed_out = False
-        if timed_out or control.cancel_event.is_set():
+            result_payload = None
+        if status in {JobStatus.TIMED_OUT, JobStatus.CANCELLED}:
             result_payload = None
         after_usage = self._process_usage()
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
-        if result_payload is not None:
-            try:
-                self.store.record_result(claimed.run_id, result_payload)
-            except Exception as exc:
-                status = JobStatus.FAILED
-                error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"[:500]
         return self.store.finish_run(
             claimed.run_id,
             status=status,
@@ -273,6 +282,7 @@ class JobRunner:
             user_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_utime"),
             system_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_stime"),
             peak_rss_kb=peak_rss_kb[0] or None,
+            result_payload=result_payload,
         )
 
     def _execute_subprocess_claimed(self, claimed: JobRun, definition: JobDefinition) -> JobRun:
@@ -428,12 +438,21 @@ class JobRunner:
                     result_status = result_payload["status"]
                     if status is JobStatus.SUCCESS and result_status not in {"SUCCESS", "NOOP"}:
                         status = JobStatus.FAILED
-                        error_summary = f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime=SUCCESS result={result_status}"
+                        if result_status == "FAILED":
+                            error_summary = (
+                                f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime=SUCCESS result={result_status}"
+                            )
+                        else:
+                            result_payload = None
+                            error_summary = (
+                                f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime=SUCCESS result={result_status}"
+                            )
                     elif status is not JobStatus.SUCCESS and result_status != "FAILED":
                         error_summary = (
                             error_summary
                             or f"STRUCTURED_RESULT_STATUS_MISMATCH: runtime={status.value} result={result_status}"
                         )
+                        result_payload = None
         except OSError as exc:
             error_summary = f"failed to start process: {type(exc).__name__}: {exc}"
         except Exception as exc:
@@ -453,12 +472,6 @@ class JobRunner:
                 peak_rss_kb[0] = max(peak_rss_kb[0], self._sample_rss_kb(process.pid))
         after_usage = self._children_usage()
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
-        if result_payload is not None:
-            try:
-                self.store.record_result(claimed.run_id, result_payload)
-            except Exception as exc:
-                status = JobStatus.FAILED
-                error_summary = f"failed to persist structured result: {type(exc).__name__}: {exc}"
         if definition.requires_structured_result:
             self._remove_transient_result(result_path)
         return self.store.finish_run(
@@ -471,6 +484,7 @@ class JobRunner:
             user_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_utime"),
             system_cpu_ms=self._usage_delta_ms(before_usage, after_usage, "ru_stime"),
             peak_rss_kb=peak_rss_kb[0] or None,
+            result_payload=result_payload,
         )
 
     def _environment(self, definition: JobDefinition) -> Mapping[str, str]:

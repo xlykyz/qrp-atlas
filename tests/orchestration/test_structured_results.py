@@ -88,7 +88,12 @@ def test_structured_result_missing_invalid_or_mismatched_fails_closed(
 
     assert result.status is JobStatus.FAILED
     assert expected_error in (result.error_summary or "")
-    assert store.get_result(result.run_id) is None
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["business_result"] is None
+    assert expected_error in str(payload["error_summary"])
     assert not (paths.results_dir / f"{result.run_id}.json").exists()
 
 
@@ -102,20 +107,35 @@ def test_exit_zero_with_failed_structured_result_fails_and_persists_evidence(tmp
     assert not (paths.results_dir / f"{result.run_id}.json").exists()
 
 
-def test_structured_result_persistence_failure_fails_the_run(tmp_path: Path, monkeypatch) -> None:
+def test_failed_subprocess_discards_success_payload_and_synthesizes_result(tmp_path: Path) -> None:
+    script = result_writer("SUCCESS")[-1] + "\nraise SystemExit(7)\n"
+    store, paths, result = run_item(
+        tmp_path,
+        definition(tmp_path, command=(sys.executable, "-c", script)),
+    )
+
+    assert result.status is JobStatus.FAILED
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["business_result"] is None
+    assert not (paths.results_dir / f"{result.run_id}.json").exists()
+
+
+def test_terminal_transition_persists_structured_result(tmp_path: Path) -> None:
     item = definition(tmp_path, command=result_writer("SUCCESS"))
     paths = JobRuntimePaths(tmp_path / "runtime")
     store = JobRuntimeStore(paths.database_path)
     run, _ = store.create_scheduled_run(item, scheduled_at=instant())
 
-    def fail_persistence(_run_id: str, _payload: object) -> None:
-        raise OSError("fixture persistence failure")
-
-    monkeypatch.setattr(store, "record_result", fail_persistence)
     result = JobRunner(store, paths, heartbeat_interval_seconds=0.05, lease_seconds=1).run(run.run_id, item)
 
-    assert result.status is JobStatus.FAILED
-    assert "failed to persist structured result" in (result.error_summary or "")
+    assert result.status is JobStatus.SUCCESS
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["status"] == "SUCCESS"
+    assert payload.get("result_type") != "orchestration"
     assert not (paths.results_dir / f"{result.run_id}.json").exists()
 
 
@@ -131,5 +151,9 @@ def test_legacy_definition_does_not_require_or_persist_structured_result(tmp_pat
     )
 
     assert result.status is JobStatus.SUCCESS
-    assert store.get_result(result.run_id) is None
+    payload = store.get_result(result.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "SUCCESS"
+    assert payload["business_result"] is None
     assert not paths.results_dir.exists()

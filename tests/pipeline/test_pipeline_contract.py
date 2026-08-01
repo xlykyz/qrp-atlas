@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -10,26 +11,35 @@ from pathlib import Path
 import pytest
 
 from qrp_atlas.config.settings import AppSettings
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.examples.contract_template import CONTRACT_TEMPLATE_EXAMPLE as CONTRACT_TEMPLATE
 from qrp_atlas.pipeline.contract_validation import ContractValidationError, validate_contracts
 from qrp_atlas.pipeline.contracts import (
     BusinessExecution,
     CheckResult,
+    ContractError,
+    DiagnosticLevel,
+    InputKind,
     InputContract,
     OutputResult,
     ParameterContract,
     ParameterType,
+    PipelineDiagnostic,
+    PipelineInvocation,
     PipelineMetrics,
     PipelineKind,
     ResultStatus,
 )
 from qrp_atlas.pipeline.registry import PipelineRegistry
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.jobs_cli import main as pipeline_cli
 from qrp_atlas.pipeline.job_adapter import (
     ContractDeploymentSelection,
     definitions_from_contract_selections,
     load_contract_selections,
+    make_in_process_contract_executor,
 )
+from qrp_atlas.orchestration.models import JobRun, JobStatus
 from qrp_atlas.orchestration.store import JobRuntimeStore
 from qrp_atlas.pipeline.testing import ContractTestHarness, assert_contract_result_matches_context
 
@@ -44,6 +54,32 @@ def settings(tmp_path: Path) -> AppSettings:
     )
 
 
+def assert_failed_result_is_json_safe(result) -> None:
+    assert result.status is ResultStatus.FAILED
+    json.dumps(result.as_dict(), allow_nan=False)
+
+
+def claimed_run(*, job_id: str, execution_control: object = None) -> JobRun:
+    return JobRun(
+        run_id="pipeline-contract-test-run",
+        job_id=job_id,
+        definition_version="test",
+        scheduled_at=datetime(2026, 7, 29, tzinfo=UTC),
+        started_at=None,
+        finished_at=None,
+        status=JobStatus.RUNNING,
+        attempt=1,
+        exit_code=None,
+        timed_out=False,
+        trigger_type="manual",
+        stdout_path=None,
+        stderr_path=None,
+        error_summary=None,
+        heartbeat_at=None,
+        execution_control=execution_control,
+    )
+
+
 def test_template_contract_executes_without_io(tmp_path: Path) -> None:
     result = ContractTestHarness(CONTRACT_TEMPLATE, settings(tmp_path)).run(trade_date=date(2026, 7, 29))
 
@@ -55,6 +91,104 @@ def test_template_contract_executes_without_io(tmp_path: Path) -> None:
     assert not (tmp_path / "data").exists()
 
 
+def test_execution_control_is_passed_unchanged_to_run_context(tmp_path: Path) -> None:
+    observed: list[ExecutionControl] = []
+
+    def executor(context) -> BusinessExecution:
+        observed.append(context.execution_control)
+        return BusinessExecution.noop("TEST_NOOP")
+
+    contract = replace(CONTRACT_TEMPLATE, executor=executor)
+    validate_contracts((contract,))
+    control = ExecutionControl()
+    result = execute_pipeline_contract(
+        contract,
+        PipelineInvocation(
+            run_id="execution-control-test",
+            pipeline_id=contract.pipeline_id,
+            scheduled_for=datetime(2026, 7, 29, tzinfo=UTC),
+            attempt=1,
+            settings=settings(tmp_path),
+            execution_control=control,
+        ),
+    )
+
+    assert result.status is ResultStatus.NOOP
+    assert observed == [control]
+
+
+@pytest.mark.parametrize("status", (ResultStatus.SUCCESS, ResultStatus.FAILED))
+def test_runtime_rejects_noop_reason_for_success_and_failed_results(
+    tmp_path: Path,
+    status: ResultStatus,
+) -> None:
+    def executor(_context) -> BusinessExecution:
+        if status is ResultStatus.SUCCESS:
+            return BusinessExecution(
+                status=status,
+                metrics=PipelineMetrics(rows_written=1),
+                outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+                noop_reason="invalid reason",
+            )
+        return BusinessExecution(status=status, noop_reason="invalid reason")
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.noop_reason is None
+    assert result.diagnostics[-1].code == "NOOP_REASON_FORBIDDEN"
+
+
+def test_runtime_rejects_noop_without_a_non_empty_reason(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution(status=ResultStatus.NOOP, noop_reason="  ")
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.noop_reason is None
+    assert result.diagnostics[-1].code == "NOOP_REASON_REQUIRED"
+
+
+@pytest.mark.parametrize("invalid_control", (None, object()))
+def test_in_process_executor_rejects_missing_or_wrong_execution_control(
+    invalid_control: object,
+) -> None:
+    executor = make_in_process_contract_executor(CONTRACT_TEMPLATE)
+
+    with pytest.raises(TypeError, match="ExecutionControl"):
+        executor(claimed_run(job_id=CONTRACT_TEMPLATE.pipeline_id, execution_control=invalid_control))
+
+
+def test_in_process_executor_preserves_runner_execution_control_identity(tmp_path: Path) -> None:
+    observed: list[ExecutionControl] = []
+
+    def executor(context) -> BusinessExecution:
+        observed.append(context.execution_control)
+        return BusinessExecution.noop("TEST_NOOP")
+
+    contract = replace(CONTRACT_TEMPLATE, executor=executor)
+    control = ExecutionControl()
+    in_process_executor = make_in_process_contract_executor(
+        contract,
+        environment={
+            "QRP_HOME": str(tmp_path / "home"),
+            "QRP_DATA_DIR": str(tmp_path / "data"),
+        },
+    )
+
+    result = in_process_executor(claimed_run(job_id=contract.pipeline_id, execution_control=control))
+
+    assert result.status is JobStatus.SUCCESS
+    assert observed == [control]
+
+
 def test_contract_validator_requires_canonical_lock_for_managed_database() -> None:
     output = replace(CONTRACT_TEMPLATE.outputs[0], physical_resource="quant_db")
     invalid = replace(CONTRACT_TEMPLATE, outputs=(output,))
@@ -63,7 +197,7 @@ def test_contract_validator_requires_canonical_lock_for_managed_database() -> No
         validate_contracts((invalid,))
 
 
-def test_contract_validator_accepts_table_scoped_duckdb_lock() -> None:
+def test_contract_validator_rejects_table_scoped_duckdb_lock() -> None:
     output = replace(CONTRACT_TEMPLATE.outputs[0], physical_resource="quant_db")
     scoped = replace(
         CONTRACT_TEMPLATE,
@@ -71,7 +205,416 @@ def test_contract_validator_accepts_table_scoped_duckdb_lock() -> None:
         resource_locks=("duckdb://quant_db#fixture_output",),
     )
 
-    assert validate_contracts((scoped,)) == (scoped,)
+    with pytest.raises(ContractValidationError, match="database-wide writer lock"):
+        validate_contracts((scoped,))
+
+
+def test_contract_validator_accepts_scoped_duckdb_reads_and_validates_manual_execution_flag() -> None:
+    contract = replace(
+        CONTRACT_TEMPLATE,
+        resource_reads=("duckdb://quant_db#fixture_input",),
+        manual_execution_allowed=False,
+    )
+
+    assert validate_contracts((contract,)) == (contract,)
+    assert contract.describe()["resource_reads"] == ["duckdb://quant_db#fixture_input"]
+    assert contract.describe()["manual_execution_allowed"] is False
+
+
+def test_contract_validator_rejects_malformed_duckdb_read_and_manual_flag() -> None:
+    malformed_read = replace(CONTRACT_TEMPLATE, resource_reads=("duckdb://quant_db",))
+    with pytest.raises(ContractValidationError, match="malformed DuckDB resource"):
+        validate_contracts((malformed_read,))
+
+    malformed_flag = replace(CONTRACT_TEMPLATE, manual_execution_allowed=1)
+    with pytest.raises(ContractValidationError, match="manual_execution_allowed"):
+        validate_contracts((malformed_flag,))
+
+
+def test_contract_validator_rejects_malformed_declared_error_code() -> None:
+    input_contract = replace(CONTRACT_TEMPLATE.inputs[0], missing_error_code="input missing")
+    invalid = replace(CONTRACT_TEMPLATE, inputs=(input_contract,))
+
+    with pytest.raises(ContractValidationError, match="ERROR_CODE_PATTERN"):
+        validate_contracts((invalid,))
+
+
+@pytest.mark.parametrize("upstream_pipeline_id", ("", "   ", "Bad-ID"))
+def test_contract_validator_rejects_invalid_upstream_pipeline_id(upstream_pipeline_id: str) -> None:
+    input_contract = replace(
+        CONTRACT_TEMPLATE.inputs[0],
+        upstream_pipeline_id=upstream_pipeline_id,
+    )
+    invalid = replace(CONTRACT_TEMPLATE, inputs=(input_contract,))
+
+    with pytest.raises(ContractValidationError, match="stable pipeline identifier"):
+        validate_contracts((invalid,))
+
+
+def test_contract_validator_accepts_valid_upstream_pipeline_id_with_dependency() -> None:
+    upstream = replace(CONTRACT_TEMPLATE, pipeline_id="upstream_pipeline")
+    downstream_input = replace(
+        CONTRACT_TEMPLATE.inputs[0],
+        kind=InputKind.UPSTREAM_PIPELINE,
+        upstream_pipeline_id="upstream_pipeline",
+    )
+    downstream = replace(
+        CONTRACT_TEMPLATE,
+        pipeline_id="downstream_pipeline",
+        inputs=(downstream_input,),
+        dependencies=("upstream_pipeline",),
+    )
+
+    assert validate_contracts((upstream, downstream)) == (upstream, downstream)
+
+
+@pytest.mark.parametrize(
+    ("performance_update", "message"),
+    (
+        ({"warning_threshold_seconds": "30"}, "warning_threshold_seconds"),
+        ({"normal_budget_seconds": "60"}, "normal budget"),
+        ({"hard_timeout_seconds": "120"}, "performance timeout"),
+        ({"warning_threshold_seconds": math.nan}, "warning_threshold_seconds"),
+        ({"normal_budget_seconds": math.inf}, "normal budget"),
+        ({"hard_timeout_seconds": -math.inf}, "performance timeout"),
+    ),
+)
+def test_contract_validator_aggregates_invalid_performance_values(
+    performance_update: dict[str, object],
+    message: str,
+) -> None:
+    invalid = replace(
+        CONTRACT_TEMPLATE,
+        performance=replace(CONTRACT_TEMPLATE.performance, **performance_update),
+    )
+
+    with pytest.raises(ContractValidationError, match=message):
+        validate_contracts((invalid,))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("warning_threshold_seconds", "normal_budget_seconds", "hard_timeout_seconds"),
+)
+def test_contract_validator_rejects_huge_performance_values(field_name: str) -> None:
+    huge_value = 10**10000
+    invalid = replace(
+        CONTRACT_TEMPLATE,
+        performance=replace(CONTRACT_TEMPLATE.performance, **{field_name: huge_value}),
+    )
+
+    with pytest.raises(ContractValidationError):
+        validate_contracts((invalid,))
+
+
+@pytest.mark.parametrize("field_name", ("parameters", "inputs", "outputs"))
+def test_contract_validator_requires_tuple_collections(field_name: str) -> None:
+    invalid = replace(CONTRACT_TEMPLATE, **{field_name: []})
+
+    with pytest.raises(ContractValidationError):
+        validate_contracts((invalid,))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        object(),
+        replace(CONTRACT_TEMPLATE, parameters=(None,)),
+        replace(CONTRACT_TEMPLATE, inputs=(None,)),
+        replace(CONTRACT_TEMPLATE, outputs=(None,)),
+        replace(CONTRACT_TEMPLATE, inputs=(replace(CONTRACT_TEMPLATE.inputs[0], freshness=None),)),
+        replace(CONTRACT_TEMPLATE, outputs=(replace(CONTRACT_TEMPLATE.outputs[0], completion=None),)),
+    ),
+)
+def test_contract_validator_rejects_invalid_nested_contract_objects(invalid: object) -> None:
+    with pytest.raises(ContractValidationError):
+        validate_contracts((invalid,))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        replace(CONTRACT_TEMPLATE, kind="ATOMIC"),
+        replace(
+            CONTRACT_TEMPLATE,
+            parameters=(
+                ParameterContract(
+                    name="batch_size",
+                    parameter_type="INTEGER",
+                    description="Fixture batch size",
+                ),
+            ),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            parameters=(
+                ParameterContract(
+                    name="batch_size",
+                    parameter_type=ParameterType.INTEGER,
+                    description="Fixture batch size",
+                    required=1,
+                ),
+            ),
+        ),
+        replace(CONTRACT_TEMPLATE, inputs=(replace(CONTRACT_TEMPLATE.inputs[0], kind="TABLE"),)),
+        replace(
+            CONTRACT_TEMPLATE,
+            inputs=(
+                replace(
+                    CONTRACT_TEMPLATE.inputs[0],
+                    required_fields=["trade_date"],
+                ),
+            ),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            inputs=(
+                replace(
+                    CONTRACT_TEMPLATE.inputs[0],
+                    freshness=replace(
+                        CONTRACT_TEMPLATE.inputs[0].freshness,
+                        non_trading_day_policy="REJECT",
+                    ),
+                ),
+            ),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            outputs=(replace(CONTRACT_TEMPLATE.outputs[0], write_mode="UPSERT"),),
+        ),
+        replace(CONTRACT_TEMPLATE, outputs=(replace(CONTRACT_TEMPLATE.outputs[0], allow_empty=1),)),
+        replace(
+            CONTRACT_TEMPLATE,
+            outputs=(replace(CONTRACT_TEMPLATE.outputs[0], unique_key=["trade_date"]),),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            outputs=(
+                replace(
+                    CONTRACT_TEMPLATE.outputs[0],
+                    quality_checks=[CONTRACT_TEMPLATE.outputs[0].completion.checker],
+                ),
+            ),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            transaction=replace(CONTRACT_TEMPLATE.transaction, mode="READ_ONLY"),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            execution=replace(CONTRACT_TEMPLATE.execution, overlap_policy="FORBID"),
+        ),
+        replace(
+            CONTRACT_TEMPLATE,
+            idempotency=replace(CONTRACT_TEMPLATE.idempotency, uses_staging=1),
+        ),
+    ),
+)
+def test_contract_validator_rejects_invalid_mechanical_field_types(invalid: object) -> None:
+    with pytest.raises(ContractValidationError):
+        validate_contracts((invalid,))
+
+
+def test_runtime_rejects_malformed_check_error_code(tmp_path: Path) -> None:
+    def malformed(_context) -> CheckResult:
+        return CheckResult.failure("fixture_input_structure", "not-valid", "malformed")
+
+    input_contract = replace(CONTRACT_TEMPLATE.inputs[0], structure_check=malformed)
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, inputs=(input_contract,)),
+        settings(tmp_path),
+    ).run()
+
+    assert result.status is ResultStatus.FAILED
+    assert result.diagnostics[-1].code == "INVALID_ERROR_CODE"
+
+
+def test_runtime_rejects_unhashable_check_error_code_without_native_exception(tmp_path: Path) -> None:
+    def malformed(_context) -> CheckResult:
+        raise ContractError([], "malformed error code")
+
+    input_contract = replace(CONTRACT_TEMPLATE.inputs[0], structure_check=malformed)
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, inputs=(input_contract,)),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_ERROR_CODE"
+
+
+def test_runtime_rejects_non_finite_metric(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(
+                rows_written=1,
+                stage_durations_seconds={"load": math.nan},
+            ),
+            outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+            diagnostics=(
+                PipelineDiagnostic(
+                    code="bad-code",
+                    level=DiagnosticLevel.WARNING,
+                    message="malformed diagnostic",
+                ),
+            ),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_PIPELINE_METRICS"
+    assert all(diagnostic.code != "bad-code" for diagnostic in result.diagnostics)
+
+
+@pytest.mark.parametrize("metric_field", ("rows_read", "database_write_seconds"))
+def test_runtime_rejects_huge_metrics_as_strict_json_invalid(
+    tmp_path: Path,
+    metric_field: str,
+) -> None:
+    huge_value = 10**10000
+
+    def executor(_context) -> BusinessExecution:
+        metrics = PipelineMetrics(
+            rows_written=1,
+            **{metric_field: huge_value},
+        )
+        return BusinessExecution.success(
+            metrics=metrics,
+            outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_PIPELINE_METRICS"
+
+
+def test_runtime_rejects_huge_stage_duration_as_strict_json_invalid(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(
+                rows_written=1,
+                stage_durations_seconds={"load": 10**10000},
+            ),
+            outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_PIPELINE_METRICS"
+
+
+def test_runtime_rejects_huge_output_rows_as_strict_json_invalid(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(),
+            outputs=(OutputResult("fixture_output", 10**10000, "tmp_path / contract-template", True),),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_OUTPUT_METRICS"
+
+
+def test_runtime_rejects_malformed_business_diagnostic_code(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(rows_written=1),
+            outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+            diagnostics=(
+                PipelineDiagnostic(
+                    code="bad-code",
+                    level=DiagnosticLevel.WARNING,
+                    message="malformed diagnostic",
+                ),
+            ),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.diagnostics[-1].code == "INVALID_ERROR_CODE"
+    assert all(diagnostic.code != "bad-code" for diagnostic in result.diagnostics)
+
+
+def test_runtime_discards_malformed_output_detail_before_result_serialization(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(rows_written=1),
+            outputs=(
+                OutputResult(
+                    "fixture_output",
+                    1,
+                    "tmp_path / contract-template",
+                    True,
+                    detail={"invalid": math.inf},
+                ),
+            ),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.outputs == ()
+
+
+def test_runtime_discards_malformed_diagnostic_detail_before_result_serialization(tmp_path: Path) -> None:
+    def executor(_context) -> BusinessExecution:
+        return BusinessExecution.success(
+            metrics=PipelineMetrics(rows_written=1),
+            outputs=(OutputResult("fixture_output", 1, "tmp_path / contract-template", True),),
+            diagnostics=(
+                PipelineDiagnostic(
+                    code="BUSINESS_NOTE",
+                    level=DiagnosticLevel.WARNING,
+                    message="malformed diagnostic detail",
+                    detail={"invalid": math.nan},
+                ),
+            ),
+        )
+
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, executor=executor),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.outputs == ()
+
+
+def test_runtime_replaces_malformed_check_observed_before_result_serialization(tmp_path: Path) -> None:
+    def malformed(_context) -> CheckResult:
+        return CheckResult.success("fixture_input_structure", invalid=math.nan)
+
+    input_contract = replace(CONTRACT_TEMPLATE.inputs[0], structure_check=malformed)
+    result = ContractTestHarness(
+        replace(CONTRACT_TEMPLATE, inputs=(input_contract,)),
+        settings(tmp_path),
+    ).run()
+
+    assert_failed_result_is_json_safe(result)
+    assert result.input_checks[0].error_code == "INVALID_CHECK_RESULT"
 
 
 def test_input_freshness_failure_prevents_executor(tmp_path: Path) -> None:

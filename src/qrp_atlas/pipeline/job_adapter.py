@@ -171,6 +171,9 @@ def make_in_process_contract_executor(
     configured_environment = dict(environment or {})
 
     def execute(claimed: JobRun) -> Any:
+        if not isinstance(claimed.execution_control, ExecutionControl):
+            raise TypeError("claimed JobRun must carry the runner-provided ExecutionControl")
+        execution_control = claimed.execution_control
         process_environment = os.environ.copy()
         process_environment.update(configured_environment)
         settings = AppSettings.load(
@@ -186,11 +189,7 @@ def make_in_process_contract_executor(
             trade_date_override=claimed.trade_date_override,
             parameter_overrides=claimed.parameter_overrides,
             audit_context={"runtime": "job_runtime", "execution_mode": "in_process"},
-            execution_control=(
-                claimed.execution_control
-                if isinstance(claimed.execution_control, ExecutionControl)
-                else ExecutionControl()
-            ),
+            execution_control=execution_control,
         )
         result = execute_pipeline_contract(contract, invocation)
         payload = result.as_dict()

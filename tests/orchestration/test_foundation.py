@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import threading
 import time
@@ -343,6 +344,425 @@ def test_cleanup_marks_zombie_running_run_failed(tmp_path: Path, store: JobRunti
     recovered = store.get_run(run.run_id)
     assert recovered is not None and recovered.status is JobStatus.FAILED
     assert "stale heartbeat" in (recovered.error_summary or "")
+    payload = store.get_result(run.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["error_code"] == "ORCHESTRATION_STALE_RUN"
+    assert payload["business_result"] is None
+
+
+def test_every_terminal_run_has_exactly_one_queryable_result(tmp_path: Path, store: JobRuntimeStore) -> None:
+    terminal_statuses = (
+        JobStatus.SUCCESS,
+        JobStatus.FAILED,
+        JobStatus.TIMED_OUT,
+        JobStatus.CANCELLED,
+        JobStatus.SKIPPED,
+    )
+    run_ids: list[str] = []
+
+    for index, status in enumerate(terminal_statuses):
+        item = definition(tmp_path, f"terminal-{status.value.lower()}")
+        run, _ = store.create_scheduled_run(
+            item,
+            scheduled_at=instant(4, index),
+            status=JobStatus.SKIPPED if status is JobStatus.SKIPPED else JobStatus.PENDING,
+            error_summary="fixture terminal outcome",
+        )
+        if status is not JobStatus.SKIPPED:
+            store.claim_run(
+                run.run_id,
+                job_id=item.job_id,
+                definition_version=item.definition_version,
+                overlap_policy=item.overlap_policy,
+                resource_locks=(),
+                stdout_path=tmp_path / f"{status.value}.out",
+                stderr_path=tmp_path / f"{status.value}.err",
+                lease_seconds=30,
+                now=instant(4, index),
+            )
+            run = store.finish_run(
+                run.run_id,
+                status=status,
+                exit_code=0 if status is JobStatus.SUCCESS else 1,
+                timed_out=status is JobStatus.TIMED_OUT,
+                error_summary="fixture terminal outcome",
+                wall_duration_ms=1,
+                user_cpu_ms=0,
+                system_cpu_ms=0,
+                peak_rss_kb=1,
+                result_payload=(
+                    {"status": "SUCCESS", "business_payload": "must not survive"}
+                    if status in {JobStatus.TIMED_OUT, JobStatus.CANCELLED}
+                    else None
+                ),
+                now=instant(4, index) + timedelta(seconds=1),
+            )
+        assert run.status is status
+        assert run.finished_at is not None
+        run_ids.append(run.run_id)
+
+    connection = sqlite3.connect(store.database_path)
+    try:
+        counts = connection.execute(
+            "SELECT run_id, COUNT(*) FROM job_result GROUP BY run_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert {run_id for run_id, count in counts if count == 1} == set(run_ids)
+    assert all(count == 1 for _, count in counts)
+    for run_id in run_ids:
+        payload = store.get_result(run_id)
+        assert payload is not None
+        assert payload["result_type"] == "orchestration"
+        assert payload["terminal_status"] in {status.value for status in terminal_statuses}
+        assert payload["business_result"] is None
+
+
+def test_initialize_backfills_terminal_result_from_older_runtime(tmp_path: Path, store: JobRuntimeStore) -> None:
+    item = definition(tmp_path, "migrated")
+    run, _ = store.create_scheduled_run(item, scheduled_at=instant(5))
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "migrated.out",
+        stderr_path=tmp_path / "migrated.err",
+        lease_seconds=30,
+        now=instant(5),
+    )
+    store.finish_run(
+        run.run_id,
+        status=JobStatus.FAILED,
+        exit_code=1,
+        timed_out=False,
+        error_summary="legacy failure",
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        now=instant(5, 1),
+    )
+    connection = sqlite3.connect(store.database_path)
+    try:
+        connection.execute("DELETE FROM job_result WHERE run_id = ?", [run.run_id])
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert store.get_result(run.run_id) is None
+    store.initialize()
+    payload = store.get_result(run.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["error_code"] == "ORCHESTRATION_MIGRATED_TERMINAL"
+
+
+def _create_historical_terminal_run(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+    status: JobStatus,
+):
+    item = definition(tmp_path, f"historical-{status.value.lower()}")
+    run, _ = store.create_scheduled_run(
+        item,
+        scheduled_at=instant(10),
+        status=JobStatus.SKIPPED if status is JobStatus.SKIPPED else JobStatus.PENDING,
+        error_summary="historical terminal",
+    )
+    if status is JobStatus.SKIPPED:
+        return run
+
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "historical-terminal.out",
+        stderr_path=tmp_path / "historical-terminal.err",
+        lease_seconds=30,
+        now=instant(10),
+    )
+    return store.finish_run(
+        run.run_id,
+        status=status,
+        exit_code=1,
+        timed_out=status is JobStatus.TIMED_OUT,
+        error_summary="historical terminal",
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        now=instant(10, 1),
+    )
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [JobStatus.TIMED_OUT, JobStatus.CANCELLED, JobStatus.SKIPPED],
+)
+@pytest.mark.parametrize(
+    ("corruption", "value"),
+    [
+        ("missing_terminal_status", None),
+        ("run_id", "wrong-run-id"),
+        ("source", "legacy-runtime"),
+        ("status", "FAILED"),
+    ],
+)
+def test_initialize_repairs_noncanonical_terminal_orchestration_result(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+    terminal_status: JobStatus,
+    corruption: str,
+    value: str | None,
+) -> None:
+    run = _create_historical_terminal_run(tmp_path, store, terminal_status)
+    payload = dict(store.get_result(run.run_id) or {})
+    if corruption == "missing_terminal_status":
+        del payload["terminal_status"]
+    else:
+        payload[corruption] = value
+
+    connection = sqlite3.connect(store.database_path)
+    try:
+        connection.execute(
+            "UPDATE job_result SET result_json = ? WHERE run_id = ?",
+            [json.dumps(payload), run.run_id],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store.initialize()
+    repaired = store.get_result(run.run_id)
+    assert repaired is not None
+    assert repaired["result_type"] == "orchestration"
+    assert repaired["source"] == "orchestration"
+    assert repaired["run_id"] == run.run_id
+    assert repaired["status"] == terminal_status.value
+    assert repaired["terminal_status"] == terminal_status.value
+    assert repaired["business_result"] is None
+    assert repaired["error_code"] == "ORCHESTRATION_MIGRATED_TERMINAL"
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [JobStatus.TIMED_OUT, JobStatus.CANCELLED, JobStatus.SKIPPED],
+)
+def test_initialize_preserves_canonical_terminal_orchestration_result(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+    terminal_status: JobStatus,
+) -> None:
+    run = _create_historical_terminal_run(tmp_path, store, terminal_status)
+    expected = dict(store.get_result(run.run_id) or {})
+    expected["historical_marker"] = "preserve"
+
+    connection = sqlite3.connect(store.database_path)
+    try:
+        connection.execute(
+            "UPDATE job_result SET result_json = ? WHERE run_id = ?",
+            [json.dumps(expected), run.run_id],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store.initialize()
+    assert store.get_result(run.run_id) == expected
+
+
+@pytest.mark.parametrize(
+    ("requested_status", "result_payload", "expected_code"),
+    [
+        (JobStatus.SUCCESS, {"status": "FAILED"}, "ORCHESTRATION_RESULT_STATUS_MISMATCH"),
+        (JobStatus.FAILED, {"status": "SUCCESS"}, "ORCHESTRATION_RESULT_STATUS_MISMATCH"),
+        (
+            JobStatus.SUCCESS,
+            {"status": "SUCCESS", "not_json": object()},
+            "ORCHESTRATION_RESULT_INVALID",
+        ),
+    ],
+)
+def test_finish_run_closes_direct_payload_mismatch_or_serialization_failure(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+    requested_status: JobStatus,
+    result_payload: dict[str, object],
+    expected_code: str,
+) -> None:
+    item = definition(tmp_path, "direct-result-boundary")
+    run, _ = store.create_scheduled_run(item, scheduled_at=instant(6))
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "direct.out",
+        stderr_path=tmp_path / "direct.err",
+        lease_seconds=30,
+        now=instant(6),
+    )
+
+    finished = store.finish_run(
+        run.run_id,
+        status=requested_status,
+        exit_code=0 if requested_status is JobStatus.SUCCESS else 1,
+        timed_out=False,
+        error_summary=None,
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        result_payload=result_payload,
+        now=instant(6, 1),
+    )
+
+    assert finished.status is JobStatus.FAILED
+    payload = store.get_result(finished.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "FAILED"
+    assert payload["error_code"] == expected_code
+    assert payload["business_result"] is None
+
+
+def test_finish_run_never_reuses_nonterminal_prewrite_as_terminal_evidence(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+) -> None:
+    item = definition(tmp_path, "prewrite-boundary")
+    run, _ = store.create_scheduled_run(item, scheduled_at=instant(7))
+    store.record_result(run.run_id, {"status": "SUCCESS", "prewrite": True})
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "prewrite.out",
+        stderr_path=tmp_path / "prewrite.err",
+        lease_seconds=30,
+        now=instant(7),
+    )
+
+    finished = store.finish_run(
+        run.run_id,
+        status=JobStatus.SUCCESS,
+        exit_code=0,
+        timed_out=False,
+        error_summary=None,
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        now=instant(7, 1),
+    )
+
+    assert finished.status is JobStatus.SUCCESS
+    payload = store.get_result(finished.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "SUCCESS"
+    assert payload["error_code"] == "ORCHESTRATION_RESULT_MISSING"
+    assert payload["business_result"] is None
+
+
+@pytest.mark.parametrize(
+    "raw_result",
+    ["not-json", "null", '{"status": "FAILED"}', '{"status": []}'],
+)
+def test_initialize_repairs_historical_malformed_or_mismatched_result(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+    raw_result: str,
+) -> None:
+    item = definition(tmp_path, "historical-invalid")
+    run, _ = store.create_scheduled_run(item, scheduled_at=instant(8))
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "historical.out",
+        stderr_path=tmp_path / "historical.err",
+        lease_seconds=30,
+        now=instant(8),
+    )
+    store.finish_run(
+        run.run_id,
+        status=JobStatus.SUCCESS,
+        exit_code=0,
+        timed_out=False,
+        error_summary=None,
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        result_payload={"status": "SUCCESS", "business": "valid before corruption"},
+        now=instant(8, 1),
+    )
+    connection = sqlite3.connect(store.database_path)
+    try:
+        connection.execute(
+            "UPDATE job_result SET result_json = ? WHERE run_id = ?",
+            [raw_result, run.run_id],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store.initialize()
+    payload = store.get_result(run.run_id)
+    assert payload is not None
+    assert payload["result_type"] == "orchestration"
+    assert payload["status"] == "SUCCESS"
+    assert payload["error_code"] == "ORCHESTRATION_MIGRATED_TERMINAL"
+    assert payload["business_result"] is None
+
+
+def test_initialize_preserves_matching_historical_business_result(
+    tmp_path: Path,
+    store: JobRuntimeStore,
+) -> None:
+    item = definition(tmp_path, "historical-valid")
+    run, _ = store.create_scheduled_run(item, scheduled_at=instant(9))
+    store.claim_run(
+        run.run_id,
+        job_id=item.job_id,
+        definition_version=item.definition_version,
+        overlap_policy=item.overlap_policy,
+        resource_locks=(),
+        stdout_path=tmp_path / "historical-valid.out",
+        stderr_path=tmp_path / "historical-valid.err",
+        lease_seconds=30,
+        now=instant(9),
+    )
+    expected = {"status": "SUCCESS", "business": "preserve"}
+    store.finish_run(
+        run.run_id,
+        status=JobStatus.SUCCESS,
+        exit_code=0,
+        timed_out=False,
+        error_summary=None,
+        wall_duration_ms=1,
+        user_cpu_ms=0,
+        system_cpu_ms=0,
+        peak_rss_kb=1,
+        result_payload=expected,
+        now=instant(9, 1),
+    )
+
+    store.initialize()
+    assert store.get_result(run.run_id) == expected
 
 
 def test_runner_success_nonzero_timeout_heartbeat_and_retry(tmp_path: Path, store: JobRuntimeStore) -> None:
@@ -380,6 +800,12 @@ def test_runner_success_nonzero_timeout_heartbeat_and_retry(tmp_path: Path, stor
     timed_result = runner.run(timed_run.run_id, timed)
     assert timed_result is not None and timed_result.status is JobStatus.TIMED_OUT
     assert timed_result.timed_out is True
+    timeout_payload = store.get_result(timed_result.run_id)
+    assert timeout_payload is not None
+    assert timeout_payload["result_type"] == "orchestration"
+    assert timeout_payload["status"] == "TIMED_OUT"
+    assert timeout_payload["error_code"] == "ORCHESTRATION_TIMEOUT"
+    assert timeout_payload["business_result"] is None
 
     beating = definition(
         tmp_path,

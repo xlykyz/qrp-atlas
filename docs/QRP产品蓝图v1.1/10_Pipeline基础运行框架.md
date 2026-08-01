@@ -31,13 +31,13 @@ SQLite 启用 WAL、外键和 busy timeout。定义是 Git 中 JSON manifest，�
 
 允许的状态为：`PENDING`、`BLOCKED`、`RUNNING`、`SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED`、`SKIPPED`。
 
-`PENDING` 可变为 `BLOCKED`/`RUNNING`/取消；`RUNNING` 只能完成为成功、失败、超时或取消；终态不原地重写。重试会创建新 attempt，保留原 run 的日志、退出码和错误。`FORBID` Job 的多个 attempt 可以同时处于 `PENDING`，但最终只能有一个进入 `RUNNING`。
+`PENDING` 可变为 `BLOCKED`/`RUNNING`/取消/跳过；`BLOCKED` 可恢复为 `PENDING` 或进入取消/跳过；`RUNNING` 只能完成为成功、失败、超时或取消；终态不原地重写。重试会创建新 attempt，保留原 run 的日志、退出码和错误。`FORBID` Job 的多个 attempt 可以同时处于 `PENDING`，但最终只能有一个进入 `RUNNING`。`SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 和 `SKIPPED` 每一个终态都必须恰好对应一条 durable `JobResult`。
 
 Runner 认领在单个 `BEGIN IMMEDIATE` transaction 内完成：确认 run 存在且为 `PENDING`、确认 Job id 与 definition version、检查 `FORBID` 的其他 `RUNNING` attempt、检查所有资源锁、插入全部锁、更新目标 run 为 `RUNNING`。因此 Scheduler 的预检查仅用于提前展示 `BLOCKED`，不是并发正确性的唯一保障；`ALLOW` Job 可以并发，但相同资源锁仍会阻止认领。
 
-数据库级写任务继续声明 `quant_db_writer` 等受管理锁；需要表级并发时使用 `duckdb://<database>#<object>`，同库不同表可并行、同表读写冲突。资源锁保存在 SQLite，包含 `owner_run_id`、heartbeat 和 lease 到期时间，不能只依赖进程内锁。
+正式 Contract 写入同一 DuckDB 文件时必须声明该文件的 canonical 数据库级 writer lock，例如 `quant_db_writer`；`duckdb://<database>#<object>` 表级资源只允许作为正式 Contract 的 `resource_reads` 读取声明。通用 Orchestration 仍为兼容 JSON Definition 支持表级资源锁，同库不同表可并行、同表读写冲突；该兼容能力不改变正式 Contract 的整库写锁规则，也不需要重构通用锁引擎。资源锁保存在 SQLite，包含 `owner_run_id`、heartbeat 和 lease 到期时间，不能只依赖进程内锁。
 
-每次 Scheduler scan 都会在 cron 扫描前执行 stale recovery：超过阈值的 `RUNNING` 记录变为 `FAILED`，保留 `started_at`、日志路径和已有指标，写入 `stale heartbeat recovery`，删除其资源锁；不会自动创建 retry。过期 lease 也同时回收。该步骤幂等，避免人工 cleanup 被遗漏而永久阻塞后续调度。
+每次 Scheduler scan 都会在 cron 扫描前执行 stale recovery：超过阈值的 `RUNNING` 记录变为 `FAILED`，保留 `started_at`、日志路径和已有指标，写入 `stale heartbeat recovery`，在同一事务中补写编排合成的 `JobResult` 并删除其资源锁；不会自动创建 retry。过期 lease 也同时回收。该步骤幂等，避免人工 cleanup 被遗漏而永久阻塞后续调度。
 
 默认配置为 heartbeat 5 秒、lease 30 秒、stale threshold 180 秒，且命令会强制：
 
@@ -47,7 +47,7 @@ stale_after_seconds > lease_seconds > heartbeat_interval_seconds > 0
 
 部署时 Scheduler 和 Runner 必须使用同一组 heartbeat/lease 参数；stale threshold 要保留足够余量，不能设置成会误杀正常长任务的激进值。
 
-兼容 argv Definition 的 Runner 在短周期监督业务进程，而非仅以完整 timeout 等待。正式 Contract 则在 `serve` 进程的线程 worker 中调用 executor，并由独立 DuckDB connection 执行。heartbeat 返回 `False`、SQLite heartbeat 异常或 heartbeat 线程异常退出都会通过线程安全失败事件通知 Runner；argv 兼容任务会终止完整进程组，正式 Contract 记录受限错误摘要，随后释放资源 lease。
+兼容 argv Definition 的 Runner 在短周期监督业务进程，而非仅以完整 timeout 等待。正式 Contract 则在 `serve` 进程的线程 worker 中调用 executor，并由独立 DuckDB connection 执行。heartbeat 返回 `False`、SQLite heartbeat 异常或 heartbeat 线程异常退出都会通过线程安全失败事件通知 Runner；argv 兼容任务会终止完整进程组，正式 Contract 记录受限错误摘要，随后在终态事务中写入业务或编排 `JobResult` 并释放资源 lease。timeout/cancel 不保留业务成功载荷。
 
 ## 4. Scheduler cursor 与 catch-up
 

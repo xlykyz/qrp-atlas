@@ -122,6 +122,100 @@ def _bounded_error_summary(value: str | None) -> str | None:
     return normalized[:500]
 
 
+_TERMINAL_STATUSES = frozenset(
+    {
+        JobStatus.SUCCESS,
+        JobStatus.FAILED,
+        JobStatus.TIMED_OUT,
+        JobStatus.CANCELLED,
+        JobStatus.SKIPPED,
+    }
+)
+
+_DEFAULT_RESULT_CODES = {
+    JobStatus.SUCCESS: "ORCHESTRATION_RESULT_MISSING",
+    JobStatus.FAILED: "ORCHESTRATION_FAILURE",
+    JobStatus.TIMED_OUT: "ORCHESTRATION_TIMEOUT",
+    JobStatus.CANCELLED: "ORCHESTRATION_CANCELLED",
+    JobStatus.SKIPPED: "ORCHESTRATION_SKIPPED",
+}
+
+_SUCCESS_RESULT_STATUSES = frozenset({"SUCCESS", "NOOP"})
+
+
+def _reject_nonstandard_json(value: str) -> object:
+    raise ValueError(f"non-standard JSON constant {value}")
+
+
+def _validate_explicit_result_payload(
+    status: JobStatus,
+    payload: Mapping[str, object],
+) -> tuple[bool, str | None, str | None]:
+    """Validate the small status contract required at terminal persistence."""
+
+    if status not in {JobStatus.SUCCESS, JobStatus.FAILED}:
+        return True, None, None
+    try:
+        payload_status = payload.get("status")
+    except Exception:
+        return False, "ORCHESTRATION_RESULT_INVALID: payload status is unreadable", "ORCHESTRATION_RESULT_INVALID"
+    allowed = _SUCCESS_RESULT_STATUSES if status is JobStatus.SUCCESS else frozenset({"FAILED"})
+    if not isinstance(payload_status, str) or payload_status not in allowed:
+        actual = payload_status if isinstance(payload_status, str) else "<missing>"
+        return (
+            False,
+            f"ORCHESTRATION_RESULT_STATUS_MISMATCH: runtime={status.value} result={actual}",
+            "ORCHESTRATION_RESULT_STATUS_MISMATCH",
+        )
+    try:
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return (
+            False,
+            "ORCHESTRATION_RESULT_INVALID: payload is not JSON serializable",
+            "ORCHESTRATION_RESULT_INVALID",
+        )
+    return True, None, None
+
+
+def _orchestration_result_payload(
+    run_id: str,
+    status: JobStatus,
+    *,
+    error_summary: str | None,
+    result_code: str | None = None,
+) -> dict[str, object]:
+    """Build a durable result for a terminal run without business payload."""
+
+    return {
+        "schema_version": 1,
+        "result_type": "orchestration",
+        "source": "orchestration",
+        "run_id": run_id,
+        "status": status.value,
+        "terminal_status": status.value,
+        "error_code": result_code or _DEFAULT_RESULT_CODES[status],
+        "error_summary": _bounded_error_summary(error_summary),
+        "business_result": None,
+    }
+
+
+def _is_canonical_terminal_orchestration_result(
+    run_id: str,
+    status: JobStatus,
+    payload: Mapping[str, object],
+) -> bool:
+    return (
+        payload.get("result_type") == "orchestration"
+        and payload.get("source") == "orchestration"
+        and payload.get("run_id") == run_id
+        and payload.get("status") == status.value
+        and payload.get("terminal_status") == status.value
+        and "business_result" in payload
+        and payload["business_result"] is None
+    )
+
+
 def _resource_scope(resource_name: str) -> tuple[str, str | None] | None:
     """Return a DuckDB database/object scope for conflict arbitration.
 
@@ -295,8 +389,97 @@ class JobRuntimeStore:
                 WHERE trade_date_override IS NOT NULL
                 """
             )
+            self._backfill_terminal_results(connection)
         finally:
             connection.close()
+
+    @staticmethod
+    def _backfill_terminal_results(connection: sqlite3.Connection) -> None:
+        """Repair terminal rows from older local runtime databases once."""
+
+        rows = connection.execute(
+            """
+            SELECT job_run.run_id, job_run.status, job_run.error_summary,
+                   job_run.finished_at, job_run.created_at,
+                   job_result.result_json, job_result.recorded_at
+            FROM job_run
+            LEFT JOIN job_result ON job_result.run_id = job_run.run_id
+            WHERE job_run.status IN (?, ?, ?, ?, ?)
+            """,
+            [status.value for status in _TERMINAL_STATUSES],
+        ).fetchall()
+        for row in rows:
+            status = JobStatus(row["status"])
+            raw_result = row["result_json"]
+            valid_result = False
+            if raw_result is not None:
+                try:
+                    parsed = json.loads(raw_result, parse_constant=_reject_nonstandard_json)
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    if status in {JobStatus.TIMED_OUT, JobStatus.CANCELLED, JobStatus.SKIPPED}:
+                        valid_result = _is_canonical_terminal_orchestration_result(
+                            row["run_id"],
+                            status,
+                            parsed,
+                        )
+                    else:
+                        valid_result, _, _ = _validate_explicit_result_payload(status, parsed)
+            if valid_result:
+                continue
+            recorded_at = row["recorded_at"] or row["finished_at"] or row["created_at"]
+            payload = _orchestration_result_payload(
+                row["run_id"],
+                status,
+                error_summary=row["error_summary"],
+                result_code="ORCHESTRATION_MIGRATED_TERMINAL",
+            )
+            connection.execute(
+                """
+                INSERT INTO job_result(run_id, result_json, recorded_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    recorded_at = excluded.recorded_at
+                """,
+                [
+                    row["run_id"],
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    recorded_at,
+                ],
+            )
+
+    @staticmethod
+    def _persist_result(
+        connection: sqlite3.Connection,
+        run_id: str,
+        payload: Mapping[str, object],
+        *,
+        recorded_at: datetime | str,
+        replace: bool,
+    ) -> None:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        recorded_text = _timestamp(recorded_at) if isinstance(recorded_at, datetime) else recorded_at
+        if replace:
+            connection.execute(
+                """
+                INSERT INTO job_result(run_id, result_json, recorded_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    recorded_at = excluded.recorded_at
+                """,
+                [run_id, serialized, recorded_text],
+            )
+        else:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO job_result(run_id, result_json, recorded_at)
+                VALUES (?, ?, ?)
+                """,
+                [run_id, serialized, recorded_text],
+            )
 
     def _run_from_row(self, row: sqlite3.Row) -> JobRun:
         return JobRun(
@@ -333,19 +516,28 @@ class JobRuntimeStore:
             connection.close()
 
     def record_result(self, run_id: str, payload: Mapping[str, object], *, now: datetime | None = None) -> None:
-        """Persist a structured Job result payload with the existing run evidence."""
+        """Persist a structured result before terminal transition.
+
+        Terminal results are immutable.  ``finish_run`` owns the atomic
+        terminal write and is the only path that may synthesize or replace a
+        result for a terminal outcome.
+        """
 
         timestamp = now or utc_now()
-        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
         with self._transaction() as connection:
-            exists = connection.execute("SELECT 1 FROM job_run WHERE run_id = ?", [run_id]).fetchone()
-            if exists is None:
+            row = connection.execute("SELECT status FROM job_run WHERE run_id = ?", [run_id]).fetchone()
+            if row is None:
                 raise KeyError(f"unknown Job run {run_id}")
+            if JobStatus(row["status"]) in _TERMINAL_STATUSES:
+                raise ValueError(f"cannot replace terminal Job result for {run_id}")
             connection.execute(
                 """
                 INSERT INTO job_result(run_id, result_json, recorded_at)
                 VALUES (?, ?, ?)
-                ON CONFLICT(run_id) DO UPDATE SET result_json = excluded.result_json, recorded_at = excluded.recorded_at
+                ON CONFLICT(run_id) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    recorded_at = excluded.recorded_at
                 """,
                 [run_id, serialized, _timestamp(timestamp)],
             )
@@ -440,8 +632,8 @@ class JobRuntimeStore:
             INSERT OR IGNORE INTO job_run (
                 run_id, job_id, definition_version, scheduled_at, status, attempt,
                 timed_out, trigger_type, error_summary, trade_date_override,
-                parameter_overrides_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?)
+                parameter_overrides_json, created_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(uuid.uuid4()),
@@ -454,6 +646,7 @@ class JobRuntimeStore:
                 trade_date_override.isoformat() if trade_date_override is not None else None,
                 parameter_overrides_json,
                 _timestamp(created_at),
+                _timestamp(created_at) if status is JobStatus.SKIPPED else None,
             ],
         )
         if cursor.rowcount == 1 or trade_date_override is None:
@@ -474,7 +667,20 @@ class JobRuntimeStore:
             ).fetchone()
         if row is None:
             raise RuntimeError("failed to create or retrieve scheduled run")
-        return self._run_from_row(row), cursor.rowcount == 1
+        run = self._run_from_row(row)
+        if run.status is JobStatus.SKIPPED:
+            self._persist_result(
+                connection,
+                run.run_id,
+                _orchestration_result_payload(
+                    run.run_id,
+                    run.status,
+                    error_summary=run.error_summary,
+                ),
+                recorded_at=created_at,
+                replace=False,
+            )
+        return run, cursor.rowcount == 1
 
     def get_scheduler_cursor(self, scheduler_id: str) -> JobSchedulerCursor | None:
         self.initialize()
@@ -937,14 +1143,11 @@ class JobRuntimeStore:
         user_cpu_ms: int | None,
         system_cpu_ms: int | None,
         peak_rss_kb: int | None,
+        result_payload: Mapping[str, object] | None = None,
+        result_code: str | None = None,
         now: datetime | None = None,
     ) -> JobRun:
-        if status not in {
-            JobStatus.SUCCESS,
-            JobStatus.FAILED,
-            JobStatus.TIMED_OUT,
-            JobStatus.CANCELLED,
-        }:
+        if status not in _TERMINAL_STATUSES:
             raise ValueError("finish_run requires a terminal execution status")
         timestamp = now or utc_now()
         with self._transaction() as connection:
@@ -952,7 +1155,28 @@ class JobRuntimeStore:
             if row is None:
                 raise KeyError(f"unknown Job run {run_id}")
             current = JobStatus(row["status"])
-            assert_status_transition(current, status)
+            effective_status = status
+            effective_error_summary = error_summary
+            effective_result_code = result_code
+            if status in {JobStatus.TIMED_OUT, JobStatus.CANCELLED, JobStatus.SKIPPED}:
+                result_payload = None
+            elif result_payload is not None:
+                valid_payload, payload_error, payload_error_code = _validate_explicit_result_payload(
+                    status, result_payload
+                )
+                if not valid_payload:
+                    effective_status = JobStatus.FAILED
+                    effective_result_code = payload_error_code
+                    effective_error_summary = (
+                        payload_error
+                        if effective_error_summary is None
+                        else f"{effective_error_summary}; {payload_error}"
+                    )
+                    result_payload = None
+            assert_status_transition(current, effective_status)
+            effective_exit_code = exit_code
+            if effective_status is not JobStatus.SUCCESS and status is JobStatus.SUCCESS and exit_code == 0:
+                effective_exit_code = 1
             connection.execute(
                 """
                 UPDATE job_run
@@ -962,12 +1186,12 @@ class JobRuntimeStore:
                 WHERE run_id = ?
                 """,
                 [
-                    status.value,
+                    effective_status.value,
                     _timestamp(timestamp),
                     _timestamp(timestamp),
-                    exit_code,
+                    effective_exit_code,
                     int(timed_out),
-                    _bounded_error_summary(error_summary),
+                    _bounded_error_summary(effective_error_summary),
                     wall_duration_ms,
                     user_cpu_ms,
                     system_cpu_ms,
@@ -977,6 +1201,47 @@ class JobRuntimeStore:
             )
             connection.execute("DELETE FROM resource_lock WHERE owner_run_id = ?", [run_id])
             connection.execute("DELETE FROM resource_read_lease WHERE owner_run_id = ?", [run_id])
+
+            # A timeout, cancellation, or skip is an orchestration outcome,
+            # even if an executor produced a payload before the terminal
+            # decision.  Other terminal states retain a real payload when
+            # supplied, and synthesize one when the caller supplied no valid
+            # explicit business result.  A prewritten result is never reused.
+            if effective_status in {JobStatus.TIMED_OUT, JobStatus.CANCELLED, JobStatus.SKIPPED}:
+                terminal_payload = _orchestration_result_payload(
+                    run_id,
+                    effective_status,
+                    error_summary=effective_error_summary,
+                    result_code=effective_result_code,
+                )
+                self._persist_result(
+                    connection,
+                    run_id,
+                    terminal_payload,
+                    recorded_at=timestamp,
+                    replace=True,
+                )
+            elif result_payload is not None:
+                self._persist_result(
+                    connection,
+                    run_id,
+                    result_payload,
+                    recorded_at=timestamp,
+                    replace=True,
+                )
+            else:
+                self._persist_result(
+                    connection,
+                    run_id,
+                    _orchestration_result_payload(
+                        run_id,
+                        effective_status,
+                        error_summary=effective_error_summary,
+                        result_code=effective_result_code,
+                    ),
+                    recorded_at=timestamp,
+                    replace=True,
+                )
             result = connection.execute("SELECT * FROM job_run WHERE run_id = ?", [run_id]).fetchone()
             if result is None:
                 raise RuntimeError("run disappeared while being finalized")
@@ -1066,15 +1331,30 @@ class JobRuntimeStore:
                 connection.execute(
                     """
                     UPDATE job_run
-                    SET status = ?, finished_at = ?, error_summary = ?
+                    SET status = ?, finished_at = ?, heartbeat_at = ?, exit_code = ?,
+                        timed_out = 0, error_summary = ?
                     WHERE run_id = ?
                     """,
                     [
                         JobStatus.FAILED.value,
                         _timestamp(timestamp),
+                        _timestamp(timestamp),
+                        1,
                         "stale heartbeat recovery",
                         row["run_id"],
                     ],
+                )
+                self._persist_result(
+                    connection,
+                    row["run_id"],
+                    _orchestration_result_payload(
+                        row["run_id"],
+                        JobStatus.FAILED,
+                        error_summary="stale heartbeat recovery",
+                        result_code="ORCHESTRATION_STALE_RUN",
+                    ),
+                    recorded_at=timestamp,
+                    replace=True,
                 )
                 connection.execute("DELETE FROM resource_lock WHERE owner_run_id = ?", [row["run_id"]])
                 connection.execute("DELETE FROM resource_read_lease WHERE owner_run_id = ?", [row["run_id"]])
