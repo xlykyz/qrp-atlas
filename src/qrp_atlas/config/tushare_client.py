@@ -25,25 +25,49 @@ def _configured_call(
     interval_seconds: float,
     max_retries: int,
     retry_backoff_seconds: float,
+    execution_control=None,
 ) -> F:
     """Apply process-local pacing and bounded retries to one client method."""
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any):
         global _last_call_time
+        if execution_control is not None:
+            execution_control.check()
         elapsed = time.monotonic() - _last_call_time
         if elapsed < interval_seconds:
-            time.sleep(interval_seconds - elapsed)
+            delay = interval_seconds - elapsed
+            if execution_control is not None:
+                delay = execution_control.bounded_timeout(delay) or 0.0
+            if delay > 0:
+                time.sleep(delay)
+                if execution_control is not None:
+                    execution_control.check()
         attempt = 0
         while True:
             _last_call_time = time.monotonic()
+            if execution_control is not None:
+                execution_control.check()
+                owner = getattr(func, "__self__", None)
+                remaining = execution_control.remaining_seconds()
+                if owner is not None and remaining is not None and hasattr(owner, "_DataApi__timeout"):
+                    owner._DataApi__timeout = min(float(owner._DataApi__timeout), remaining)
             try:
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                if execution_control is not None:
+                    execution_control.check()
+                return result
             except Exception:
                 if attempt >= max_retries:
                     raise
                 attempt += 1
-                time.sleep(retry_backoff_seconds * attempt)
+                delay = retry_backoff_seconds * attempt
+                if execution_control is not None:
+                    delay = execution_control.bounded_timeout(delay) or 0.0
+                if delay > 0:
+                    time.sleep(delay)
+                if execution_control is not None:
+                    execution_control.check()
 
     return wrapper  # type: ignore[return-value]
 
@@ -52,6 +76,7 @@ def get_tushare_pro(
     token: str | None = None,
     *,
     settings: AppSettings | None = None,
+    execution_control=None,
 ):
     """Return a configured Tushare Pro client.
 
@@ -82,6 +107,7 @@ def get_tushare_pro(
                     interval_seconds=external.tushare_request_interval_seconds,
                     max_retries=external.tushare_max_retries,
                     retry_backoff_seconds=external.tushare_retry_backoff_seconds,
+                    execution_control=execution_control,
                 ),
             )
     return pro

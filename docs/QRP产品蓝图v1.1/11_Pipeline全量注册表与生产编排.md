@@ -4,7 +4,7 @@
 
 本文是 QRP Atlas v1.1 的全量 Pipeline 注册基线。它不改变当前生产调度：Hermes 仍是全部 14 个现行 Job 的唯一调度权威；本轮没有启用 QRP Definition、安装 systemd、创建运行记录、执行生产任务或写入生产数据库。
 
-机器可读真值是 [pipeline-registry.json](../../deploy/pipeline/pipeline-registry.json)。它为每项记录身份、当前状态、调度、确定性 argv（可证明时）、输入输出、完成标记、幂等语义、数据依赖、锁、超时、重试、新鲜度与性能预算。未知事实以 `UNRESOLVED` 或 `null` 保存，不以猜测补齐。
+机器可读真值是 [pipeline-registry.json](../../deploy/pipeline/pipeline-registry.json)。它为每项记录身份、当前状态、调度、确定性 argv（可证明时）、输入输出、完成标记、幂等语义、数据依赖、锁、超时、重试、新鲜度与性能预算。这里的 argv 仅描述历史/兼容 Definition 能力；正式 Pipeline Contract 由 `qrp-atlas-jobs serve` 的线程 worker 进程内执行。对正式 Contract，源码 `PipelineContract` 仍是业务语义唯一事实来源，注册表只记录全量盘点和迁移状态，不得覆盖源码规则。未知事实以 `UNRESOLVED` 或 `null` 保存，不以猜测补齐。
 
 禁用的可执行候选定义位于 [pipeline-definitions.shadow.json](../../deploy/pipeline/pipeline-definitions.shadow.json)。该文件不是默认生产定义，所有条目均为 `enabled: false`，且没有被 scan 或 runner 使用。
 
@@ -32,6 +32,8 @@
 | `DEFERRED` | 0 | 无 |
 
 共注册 32 条，排除 29 个已核查候选项。15 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
+
+当前源码默认 catalog 中的六条已验收市场数据 Contract 是 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`。本轮只统一 Contract 门禁和运行语义，不改写这六条业务定义；它们写入 `quant.db` 时均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
 `task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。研究报告的实际业务入口是仓库内确定性 Python Pipeline；它们当前缺少可移植的运行时日期参数包装，因此未建立 Shadow Definition，而不是因为其业务计算需要 LLM。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
@@ -99,17 +101,19 @@ flowchart LR
 
 | 物理 DuckDB | 写入条目 | 排他锁 | 说明 |
 | --- | --- | --- |
-| `quant.db` | 所有现行市场、CNINFO、研究、指数、ZT/DT、daily-basic、IRM、System B state、各手动入库任务 | `quant_db_writer` | 同一物理文件只有一个写锁；读者不取锁 |
+| `quant.db` | 所有现行市场、CNINFO、研究、指数、ZT/DT、daily-basic、IRM、System B state、各手动入库任务 | `quant_db_writer` | 正式 Contract 的同库写入统一使用整库 writer lock；`resource_reads` 可声明表级读取，读者不取写锁 |
 | `system_b_episode.duckdb` | `system_b_episode_rebuild` | `system_b_episode_writer` | 独立于 `quant.db`，可与其写入并发但受数据依赖控制 |
 | `system_b_pools.duckdb` | HEIGHT、CAPACITY、RECOGNITION | `system_b_pools_writer` | 三个 pool 是独立 Pipeline，但不能并发写同一输出文件 |
 
 锁用于资源冲突，schedule 只表达业务时点。当前 Hermes 不使用这些 QRP 锁，因此 Shadow 仍不可作为并行生产接入。
 
+正式 Contract 的表级 DuckDB 资源只能出现在 `resource_reads`，不能作为写锁满足生产写入要求。通用 Orchestration 锁引擎仍支持兼容 JSON Definition 的表级 `resource_locks`，用于维持兼容行为；这不改变正式 Contract 的数据库级写锁规则，本轮也不重构该通用引擎。
+
 ## 6. Shadow Definitions
 
 | Pipeline | Definition 原因 | 不纳入的原因 |
 | --- | --- | --- |
-| `market_daily_update`、`adj_factor_daily`、`zt_dt_pool_daily`、`daily_basic_update`、`index_daily_update`、`irm_qa_incremental` | 已证明为无参数、确定性 argv，且 cron 已知 | 全部 disabled；未测 timeout/性能预算保留空值 |
+| `market_daily_update`、`adj_factor_daily`、`zt_dt_pool_daily`、`daily_basic_update`、`index_daily_update`、`irm_qa_incremental` | 历史上已证明为无参数、确定性 argv 的兼容 Definition | 全部 disabled；不是正式 Contract 入口，未测 timeout/性能预算保留空值 |
 | CNINFO 和研究报告 | 无 | 当前 shell 负责动态日期参数；Foundation 尚无经批准的参数模板/仓库 wrapper |
 | System B state、episode、pools | 无 | CLI 需要 trade date、路径或范围；尚未定义生产配置和验收时点 |
 | Agent summary/health | 无 | Agent prompt 不是确定性 CLI，且不应成为数据任务成功条件 |
@@ -150,7 +154,7 @@ System B readiness 的五张真实输入表为 `stock_info`、`trading_calendar`
 
 ## 10. 正式迁移前验收清单
 
-- [ ] Definition argv、部署工作目录、运行时日期/配置传递经 staging 验证。
+- [ ] 兼容 Definition 的 argv、部署工作目录、运行时日期/配置传递经 staging 验证；正式 Contract 已确认由 `serve` 线程 worker 进程内执行。
 - [ ] 每条写任务的真实输出数据库和锁与注册表一致。
 - [ ] 对同交易日重跑、失败重跑、依赖失败、overlap 和 lease 回收完成演练。
 - [ ] timeout、retry、freshness 与性能预算以实测数据确定。

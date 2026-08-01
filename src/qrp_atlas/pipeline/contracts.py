@@ -12,7 +12,8 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from qrp_atlas.pipeline.runtime.models import OverlapPolicy
+from qrp_atlas.orchestration.execution_control import ExecutionControl
+from qrp_atlas.orchestration.models import OverlapPolicy
 
 if TYPE_CHECKING:
     from qrp_atlas.config.settings import AppSettings
@@ -125,6 +126,7 @@ class PipelineInvocation:
     parameter_overrides: Mapping[str, Any] = field(default_factory=dict)
     trade_date_override: date | None = None
     audit_context: Mapping[str, str] = field(default_factory=dict)
+    execution_control: ExecutionControl = field(default_factory=ExecutionControl)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,7 @@ class PipelineRunContext:
     parameter_overrides: Mapping[str, Any]
     target_window: TargetWindow
     audit_context: Mapping[str, str]
+    execution_control: ExecutionControl = field(default_factory=ExecutionControl)
 
 
 TargetDateResolver = Callable[[PipelineInvocation], TargetWindow]
@@ -425,6 +428,8 @@ class PipelineContract:
     transaction: TransactionContract
     execution: ExecutionPolicy
     performance: PerformanceBudget
+    manual_execution_allowed: bool = True
+    resource_reads: tuple[str, ...] = ()
 
     def describe(self) -> dict[str, Any]:
         """Return a machine-readable, secret-free view of the source contract."""
@@ -496,6 +501,7 @@ class PipelineContract:
             ],
             "dependencies": list(self.dependencies),
             "resource_locks": list(self.resource_locks),
+            "resource_reads": list(self.resource_reads),
             "idempotency": {
                 "idempotency_key": self.idempotency.idempotency_key,
                 "repeat_run_semantics": self.idempotency.repeat_run_semantics,
@@ -513,6 +519,7 @@ class PipelineContract:
                 "overlap_policy": self.execution.overlap_policy.value,
                 "max_retries": self.execution.max_retries,
             },
+            "manual_execution_allowed": self.manual_execution_allowed,
             "performance": {
                 "normal_budget_seconds": self.performance.normal_budget_seconds,
                 "warning_threshold_seconds": self.performance.warning_threshold_seconds,

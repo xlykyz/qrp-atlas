@@ -10,6 +10,8 @@ qrp-atlas（QRP）是一个面向个人 A 股交易研究的量化平台：以�
 
 完整架构说明见 [`docs/核心架构v1.0/QRP_v1.0_核心架构文档.md`](docs/核心架构v1.0/QRP_v1.0_核心架构文档.md)。v1.0 产品终点、任务与验收记录见 [`docs/QRP产品蓝图v1.0/`](docs/QRP产品蓝图v1.0/)。
 
+Pipeline 的注册、手动运行、后台服务、恢复、状态查询和审计日志使用说明见 [`docs/pipeline-usage.md`](docs/pipeline-usage.md)。
+
 ## 核心工作流
 
 ```text
@@ -97,6 +99,7 @@ v1.0 已经形成以下真实产品闭环：
 qrp-atlas/
 ├── src/qrp_atlas/
 │   ├── contracts/              # 标准字段、schema、映射、约定与校验
+│   ├── orchestration/          # 通用 Job 编排、调度、资源 lease 与结果审计
 │   ├── pipeline/               # 外部数据采集、标准化、PIT 回补与入库
 │   ├── indicators/             # 指标、特征、因子与客观状态
 │   ├── strategies/             # 策略定义、注册、校验与实现

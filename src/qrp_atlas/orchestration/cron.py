@@ -1,4 +1,4 @@
-"""Small, dependency-free cron matcher for the first Pipeline scheduler."""
+"""Small, dependency-free cron matcher for the Job scheduler."""
 
 from __future__ import annotations
 

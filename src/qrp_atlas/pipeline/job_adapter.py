@@ -7,19 +7,24 @@ selection, enablement, and cron schedule.  It cannot override business semantics
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.pipeline.contract_validation import ContractValidationError, validate_contracts
-from qrp_atlas.pipeline.contracts import PipelineContract
+from qrp_atlas.pipeline.contracts import PipelineContract, PipelineInvocation
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.registry import PipelineRegistry, default_registry
 
-from .cron import CronExpression, CronExpressionError
-from .definitions import DefinitionValidationError
-from .models import PipelineDefinition
+from qrp_atlas.orchestration.cron import CronExpression, CronExpressionError
+from qrp_atlas.orchestration.definitions import DefinitionValidationError
+from qrp_atlas.orchestration.execution_control import ExecutionControl
+from qrp_atlas.orchestration.models import JobDefinition, JobExecutionResult, JobRun, JobStatus
 
 
 DEFAULT_PIPELINE_TIMEZONE = "Asia/Shanghai"
@@ -78,7 +83,7 @@ def definitions_from_contract_selections(
     *,
     registry: PipelineRegistry | None = None,
     timezone: str = DEFAULT_PIPELINE_TIMEZONE,
-) -> tuple[PipelineDefinition, ...]:
+) -> tuple[JobDefinition, ...]:
     """Create existing runtime definitions without accepting business overrides."""
 
     try:
@@ -90,7 +95,7 @@ def definitions_from_contract_selections(
         validate_contracts(effective_registry.all())
     except ContractValidationError as exc:
         raise DefinitionValidationError(str(exc)) from exc
-    definitions: list[PipelineDefinition] = []
+    definitions: list[JobDefinition] = []
     for selection in selections:
         try:
             contract = effective_registry.get(selection.pipeline_id)
@@ -106,11 +111,11 @@ def contract_runtime_definition(
     *,
     timezone: str = DEFAULT_PIPELINE_TIMEZONE,
     environment: dict[str, str] | None = None,
-) -> PipelineDefinition:
-    """Map source-owned semantics onto the existing process runner definition."""
+) -> JobDefinition:
+    """Map source-owned semantics onto an in-process formal runtime definition."""
 
-    return PipelineDefinition(
-        pipeline_id=contract.pipeline_id,
+    return JobDefinition(
+        job_id=contract.pipeline_id,
         name=contract.name,
         enabled=selection.enabled,
         schedule=selection.schedule,
@@ -118,7 +123,7 @@ def contract_runtime_definition(
         command=(
             sys.executable,
             "-m",
-            "qrp_atlas.pipeline.runtime",
+            "qrp_atlas.jobs_cli",
             "execute-contract",
             contract.pipeline_id,
         ),
@@ -128,6 +133,7 @@ def contract_runtime_definition(
         max_retries=contract.execution.max_retries,
         overlap_policy=contract.execution.overlap_policy,
         resource_locks=contract.resource_locks,
+        resource_reads=contract.resource_reads,
         performance_budget={
             "normal_budget_seconds": contract.performance.normal_budget_seconds,
             "warning_threshold_seconds": contract.performance.warning_threshold_seconds,
@@ -145,4 +151,68 @@ def contract_runtime_definition(
         inherit_environment=True,
         environment=environment or {},
         requires_structured_result=True,
+        manual_execution_allowed=contract.manual_execution_allowed,
+        in_process_executor=make_in_process_contract_executor(contract, environment=environment),
     )
+
+
+def make_in_process_contract_executor(
+    contract: PipelineContract,
+    *,
+    environment: dict[str, str] | None = None,
+):
+    """Build the callback used by ``pipeline serve`` for formal Contracts.
+
+    The callback intentionally receives the claimed runtime record rather than
+    opening a second runtime process.  Business code can therefore create its
+    own DuckDB connection while remaining inside the single serving process.
+    """
+
+    configured_environment = dict(environment or {})
+
+    def execute(claimed: JobRun) -> Any:
+        if not isinstance(claimed.execution_control, ExecutionControl):
+            raise TypeError("claimed JobRun must carry the runner-provided ExecutionControl")
+        execution_control = claimed.execution_control
+        process_environment = os.environ.copy()
+        process_environment.update(configured_environment)
+        settings = AppSettings.load(
+            env_file=process_environment.get("QRP_ENV_FILE"),
+            environ=process_environment,
+        )
+        invocation = PipelineInvocation(
+            run_id=claimed.run_id,
+            pipeline_id=claimed.job_id,
+            scheduled_for=claimed.scheduled_at,
+            attempt=claimed.attempt,
+            settings=settings,
+            trade_date_override=claimed.trade_date_override,
+            parameter_overrides=claimed.parameter_overrides,
+            audit_context={"runtime": "job_runtime", "execution_mode": "in_process"},
+            execution_control=execution_control,
+        )
+        result = execute_pipeline_contract(contract, invocation)
+        payload = result.as_dict()
+        error_summary = None
+        if result.status.value == "FAILED":
+            diagnostics = payload.get("diagnostics")
+            if isinstance(diagnostics, list):
+                for diagnostic in diagnostics:
+                    if isinstance(diagnostic, dict):
+                        code = diagnostic.get("code")
+                        message = diagnostic.get("message")
+                        if isinstance(code, str) and isinstance(message, str):
+                            error_summary = f"{code}: {message}"[:500]
+                            break
+            error_summary = error_summary or "Pipeline Contract returned FAILED"
+        return JobExecutionResult(
+            status=(
+                JobStatus.SUCCESS
+                if result.status.value in {"SUCCESS", "NOOP"}
+                else JobStatus.FAILED
+            ),
+            payload=payload,
+            error_summary=error_summary,
+        )
+
+    return execute

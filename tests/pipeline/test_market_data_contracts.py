@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -14,8 +14,10 @@ import pytest
 
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import init_database
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.contract_validation import validate_contracts
 from qrp_atlas.pipeline.contracts import CheckResult, CompletionContract, PipelineInvocation, ResultStatus
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.market_data_contracts import (
     ADJ_FACTOR_DAILY,
     DAILY_BASIC_UPDATE,
@@ -26,9 +28,10 @@ from qrp_atlas.pipeline.market_data_contracts import (
     SUSPEND_D_INGEST,
     ZT_DT_POOL_DAILY,
 )
-from qrp_atlas.pipeline.runtime.contract_adapter import ContractDeploymentSelection, contract_runtime_definition
-from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore
+from qrp_atlas.pipeline.job_adapter import ContractDeploymentSelection, contract_runtime_definition
+from qrp_atlas.jobs_cli import main as pipeline_cli
+from qrp_atlas.orchestration.store import JobRuntimeStore
+from qrp_atlas.pipeline.registry import default_registry
 from qrp_atlas.pipeline.testing import ContractTestHarness, assert_contract_result_matches_context
 
 
@@ -168,6 +171,22 @@ def run(contract, item: AppSettings, *, dependencies=()):
     return ContractTestHarness(contract, item, dependency_contracts=available).run(trade_date=TARGET)
 
 
+def run_suspend_with_control(item: AppSettings, control: ExecutionControl):
+    return execute_pipeline_contract(
+        SUSPEND_D_INGEST,
+        PipelineInvocation(
+            run_id="suspend-d-execution-control-test",
+            pipeline_id=SUSPEND_D_INGEST.pipeline_id,
+            scheduled_for=datetime(2026, 7, 29, 8, 30, tzinfo=UTC),
+            attempt=1,
+            settings=item,
+            trade_date_override=TARGET,
+            audit_context={"test": "true"},
+            execution_control=control,
+        ),
+    )
+
+
 def diagnostics(result) -> set[str]:
     return {diagnostic.code for diagnostic in result.diagnostics}
 
@@ -219,6 +238,8 @@ def _eastmoney_urlopen(responses: dict[tuple[str, int], dict | Exception]):
 
 def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> None:
     validate_contracts(MARKET_DATA_CONTRACTS)
+    registered = default_registry().all()
+    validate_contracts(registered)
     assert {contract.pipeline_id for contract in MARKET_DATA_CONTRACTS} == {
         "market_daily_update",
         "adj_factor_daily",
@@ -226,6 +247,9 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         "index_daily_update",
         "zt_dt_pool_daily",
         "suspend_d_ingest",
+    }
+    assert {contract.pipeline_id for contract in registered} == {
+        contract.pipeline_id for contract in MARKET_DATA_CONTRACTS
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert MARKET_DAILY_UPDATE.dependencies == ()
@@ -656,6 +680,7 @@ def test_suspend_d_empty_is_an_explicit_complete_snapshot(tmp_path: Path, monkey
         )
     finally:
         connection.close()
+
     client = FakeTushare()
     client.suspend_frame = pd.DataFrame()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
@@ -668,6 +693,114 @@ def test_suspend_d_empty_is_an_explicit_complete_snapshot(tmp_path: Path, monkey
     connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
     try:
         assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_suspend_d_passes_the_invocation_execution_control_to_tushare(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    client = FakeTushare()
+    control = ExecutionControl()
+    observed: list[ExecutionControl | None] = []
+
+    def get_client(**kwargs):
+        observed.append(kwargs.get("execution_control"))
+        return client
+
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", get_client)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert observed == [control]
+
+
+@pytest.mark.parametrize("stop_mode", ("cancel", "deadline"))
+def test_suspend_d_stops_before_client_creation_when_control_is_not_active(
+    tmp_path: Path,
+    monkeypatch,
+    stop_mode: str,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    control = ExecutionControl()
+    if stop_mode == "cancel":
+        control.cancel("test cancellation")
+    else:
+        control.deadline = datetime.now(UTC) - timedelta(seconds=1)
+    client_calls: list[dict] = []
+
+    def get_client(**kwargs):
+        client_calls.append(kwargs)
+        return FakeTushare()
+
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", get_client)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.FAILED
+    assert not client_calls
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stop_mode", ("cancel", "deadline"))
+def test_suspend_d_checks_control_after_response_before_duckdb_write(
+    tmp_path: Path,
+    monkeypatch,
+    stop_mode: str,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute(
+            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
+            [TARGET, "000001.SZ", "S"],
+        )
+    finally:
+        connection.close()
+
+    control = ExecutionControl()
+    client = FakeTushare()
+
+    def suspend_d(**_kwargs):
+        if stop_mode == "cancel":
+            control.cancel("provider response cancellation")
+        else:
+            control.deadline = datetime.now(UTC) - timedelta(seconds=1)
+        return client.suspend_frame.copy()
+
+    client.suspend_d = suspend_d
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.market_data_contracts.get_tushare_pro",
+        lambda **kwargs: client,
+    )
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    write_calls: list[object] = []
+    original_replace = subject._replace_target_date
+
+    def tracked_replace(*args, **kwargs):
+        write_calls.append(object())
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(subject, "_replace_target_date", tracked_replace)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.FAILED
+    assert not write_calls
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 1
     finally:
         connection.close()
 
@@ -777,6 +910,7 @@ def test_runtime_definition_uses_existing_claim_lock_retry_and_structured_result
     assert definitions["adj_factor_daily"].dependencies == ("market_daily_update",)
     assert all(definition.resource_locks == ("quant_db_writer",) for definition in definitions.values())
     assert all(definition.requires_structured_result for definition in definitions.values())
+    assert all(definition.in_process_executor is not None for definition in definitions.values())
     assert all(definition.max_retries == 1 and definition.overlap_policy.value == "FORBID" for definition in definitions.values())
 
 
@@ -817,14 +951,17 @@ def test_formal_cli_uses_existing_runner_claim_and_persists_a_structured_failure
     )
 
     assert code == 1
-    store = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3")
-    runs = store.list_runs(pipeline_id="market_daily_update")
+    store = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3")
+    runs = store.list_runs(job_id="market_daily_update")
     assert len(runs) == 1
     assert runs[0].status.value == "FAILED"
     result = store.get_result(runs[0].run_id)
     assert result is not None
     assert result["status"] == "FAILED"
     assert any(item["code"] == "MARKET_HISTORY_STRUCTURE_MISSING" for item in result["diagnostics"])
+    assert runs[0].stdout_path is None
+    assert runs[0].stderr_path is None
+    assert not (runtime_dir / "logs").exists()
 
 
 def _large_market_frame(rows: int = 5_000) -> pd.DataFrame:

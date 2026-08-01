@@ -8,6 +8,7 @@ there is no second scheduler or a shell based orchestration layer here.
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import time
 import urllib.request
@@ -64,7 +65,7 @@ from .daily_basic.clean import clean_daily_basic
 from .daily_update.clean import clean_daily_snapshot
 from .daily_update.enrich import enrich_daily_snapshot
 from .registry import register_pipeline
-from .runtime.models import OverlapPolicy
+from qrp_atlas.orchestration.models import OverlapPolicy
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -87,6 +88,7 @@ def _target_date(context: PipelineRunContext) -> date:
 
 
 def _connect(context: PipelineRunContext, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    context.execution_control.check()
     return duckdb.connect(str(context.settings.paths.duckdb_path), read_only=read_only)
 
 
@@ -166,6 +168,7 @@ def _calendar_freshness(context: PipelineRunContext) -> CheckResult:
 
 
 def _resolve_market_target_date(invocation) -> TargetWindow:
+    invocation.execution_control.check()
     local = invocation.scheduled_for.astimezone(CHINA_TZ)
     cutoff_date = local.date() if local.time() >= DATA_AVAILABLE_AFTER else local.date() - timedelta(days=1)
     try:
@@ -187,6 +190,7 @@ def _resolve_market_target_date(invocation) -> TargetWindow:
             ).fetchone()
         finally:
             connection.close()
+        invocation.execution_control.check()
     except ContractError:
         raise
     except Exception as exc:
@@ -197,6 +201,7 @@ def _resolve_market_target_date(invocation) -> TargetWindow:
 
 
 def _valid_explicit_market_date(target_date: date, invocation) -> bool:
+    invocation.execution_control.check()
     try:
         connection = duckdb.connect(str(invocation.settings.paths.duckdb_path), read_only=True)
         try:
@@ -208,6 +213,7 @@ def _valid_explicit_market_date(target_date: date, invocation) -> bool:
             connection.close()
     except Exception:
         return False
+    invocation.execution_control.check()
     return row is not None and row[0] is True
 
 
@@ -393,6 +399,7 @@ def _replace_target_date(
     started = time.monotonic()
     connection = _connect(context)
     try:
+        context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         connection.execute(f"DELETE FROM {table.name} WHERE trade_date = ?", [target])
         if not prepared.empty:
@@ -414,6 +421,7 @@ def _upsert_frame(context: PipelineRunContext, table, frame: pd.DataFrame) -> tu
     started = time.monotonic()
     connection = _connect(context)
     try:
+        context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         if not prepared.empty:
             columns = [column for column in table.column_names() if column != CREATED_AT]
@@ -448,6 +456,7 @@ def _replace_zt_dt_target(
     started = time.monotonic()
     connection = _connect(context)
     try:
+        context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         connection.execute("DELETE FROM zt_pool WHERE trade_date = ?", [target])
         connection.execute("DELETE FROM dt_pool WHERE trade_date = ?", [target])
@@ -648,8 +657,10 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
     target = _target_date(context)
     started = time.monotonic()
     try:
-        client = get_tushare_pro(settings=context.settings)
+        context.execution_control.check()
+        client = get_tushare_pro(settings=context.settings, execution_control=context.execution_control)
         raw = client.daily(trade_date=target.strftime("%Y%m%d"))
+        context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("MARKET_DAILY_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"), "MARKET_DAILY_API_PARTIAL")
@@ -674,6 +685,7 @@ def execute_market_daily_update(context: PipelineRunContext) -> BusinessExecutio
             _ensure_target_rows(enriched, target, "MARKET_DAILY_ENRICH_EMPTY")
             prepared = _prepare_frame(enriched, DAILY_MARKET_SNAPSHOT)
             write_started = time.monotonic()
+            context.execution_control.check()
             connection.execute("BEGIN TRANSACTION")
             try:
                 connection.execute("DELETE FROM daily_market_snapshot WHERE trade_date = ?", [target])
@@ -719,8 +731,12 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
     target = _target_date(context)
     started = time.monotonic()
     try:
+        context.execution_control.check()
         expected = _expected_market_output_tickers(context, target, error_code="DAILY_BASIC_COVERAGE_UNAVAILABLE")
-        raw = get_tushare_pro(settings=context.settings).daily_basic(trade_date=target.strftime("%Y%m%d"))
+        raw = get_tushare_pro(
+            settings=context.settings, execution_control=context.execution_control
+        ).daily_basic(trade_date=target.strftime("%Y%m%d"))
+        context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("DAILY_BASIC_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "close"), "DAILY_BASIC_API_PARTIAL")
@@ -763,6 +779,7 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
     target = _target_date(context)
     started = time.monotonic()
     try:
+        context.execution_control.check()
         connection = _connect(context, read_only=True)
         try:
             expected = {
@@ -790,7 +807,10 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
             )
         finally:
             connection.close()
-        raw = get_tushare_pro(settings=context.settings).adj_factor(trade_date=target.strftime("%Y%m%d"))
+        raw = get_tushare_pro(
+            settings=context.settings, execution_control=context.execution_control
+        ).adj_factor(trade_date=target.strftime("%Y%m%d"))
+        context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("ADJ_FACTOR_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "adj_factor"), "ADJ_FACTOR_API_PARTIAL")
@@ -843,7 +863,9 @@ def execute_index_daily_update(context: PipelineRunContext) -> BusinessExecution
     frames: list[pd.DataFrame] = []
     try:
         for index_code, index_name in INDEX_SERIES:
+            context.execution_control.check()
             raw = ak.stock_zh_index_daily(symbol=index_code)
+            context.execution_control.check()
             if raw is None or raw.empty:
                 raise ContractError("INDEX_DAILY_API_EMPTY", index_code)
             _required_columns(raw, ("date", "open", "high", "low", "close", "volume"), "INDEX_DAILY_API_PARTIAL")
@@ -908,13 +930,14 @@ def _fetch_eastmoney_pool_page(
     *,
     sort: str,
     page_index: int,
+    timeout_seconds: float = 15.0,
 ) -> tuple[list[dict[str, Any]], int]:
     parameters = (
         f"ut={_EASTMONEY_UT}&dpt={_EASTMONEY_DPT}&Pageindex={page_index}&pagesize={_EASTMONEY_PAGE_SIZE}"
         f"&sort={sort}&date={target.strftime('%Y%m%d')}"
     )
     request = urllib.request.Request(f"{_EASTMONEY_BASE}/{endpoint}?{parameters}", headers=_EASTMONEY_HEADERS)
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         raw = response.read().decode("utf-8")
     if raw.startswith("jQuery"):
         raw = raw[raw.index("{") : raw.rindex("}") + 1]
@@ -941,10 +964,29 @@ def _fetch_eastmoney_pool_page(
     return data["pool"], total
 
 
-def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> tuple[list[dict[str, Any]], int]:
+def _fetch_eastmoney_pool(
+    endpoint: str,
+    target: date,
+    *,
+    sort: str,
+    execution_control=None,
+) -> tuple[list[dict[str, Any]], int]:
     """Fetch every reported page and prove the response matches its total."""
 
-    records, total = _fetch_eastmoney_pool_page(endpoint, target, sort=sort, page_index=0)
+    if execution_control is not None:
+        execution_control.check()
+        timeout_seconds = execution_control.bounded_timeout(15.0)
+        if timeout_seconds is None:
+            timeout_seconds = 15.0
+    else:
+        timeout_seconds = 15.0
+    records, total = _fetch_eastmoney_pool_page(
+        endpoint,
+        target,
+        sort=sort,
+        page_index=0,
+        timeout_seconds=timeout_seconds,
+    )
     requests = 1
     if total == 0:
         if records:
@@ -956,7 +998,20 @@ def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> tuple[li
     all_records = list(records)
     page_index = 1
     while len(all_records) < total:
-        page, page_total = _fetch_eastmoney_pool_page(endpoint, target, sort=sort, page_index=page_index)
+        if execution_control is not None:
+            execution_control.check()
+            timeout_seconds = execution_control.bounded_timeout(15.0)
+            if timeout_seconds is None:
+                timeout_seconds = 15.0
+        page, page_total = _fetch_eastmoney_pool_page(
+            endpoint,
+            target,
+            sort=sort,
+            page_index=page_index,
+            timeout_seconds=timeout_seconds,
+        )
+        if execution_control is not None:
+            execution_control.check()
         requests += 1
         if page_total != total:
             raise ContractError(
@@ -977,6 +1032,23 @@ def _fetch_eastmoney_pool(endpoint: str, target: date, *, sort: str) -> tuple[li
             f"reported total {total} does not match {len(all_records)} returned records",
         )
     return all_records, requests
+
+
+def _fetch_eastmoney_pool_for_context(
+    endpoint: str,
+    target: date,
+    *,
+    sort: str,
+    execution_control,
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep the small fetch seam fixture-friendly while passing cancellation."""
+
+    fetch = _fetch_eastmoney_pool
+    if "execution_control" in inspect.signature(fetch).parameters:
+        return fetch(endpoint, target, sort=sort, execution_control=execution_control)
+    # Test providers and legacy adapters may expose the original three-argument
+    # seam.  They still run in the normal outer control checks.
+    return fetch(endpoint, target, sort=sort)
 
 
 def _pool_price(value: Any) -> float | None:
@@ -1053,8 +1125,15 @@ def execute_zt_dt_pool_daily(context: PipelineRunContext) -> BusinessExecution:
     target = _target_date(context)
     started = time.monotonic()
     try:
-        zt_records, zt_requests = _fetch_eastmoney_pool("getTopicZTPool", target, sort="fbt:asc")
-        dt_records, dt_requests = _fetch_eastmoney_pool("getTopicDTPool", target, sort="fund:asc")
+        context.execution_control.check()
+        zt_records, zt_requests = _fetch_eastmoney_pool_for_context(
+            "getTopicZTPool", target, sort="fbt:asc", execution_control=context.execution_control
+        )
+        context.execution_control.check()
+        dt_records, dt_requests = _fetch_eastmoney_pool_for_context(
+            "getTopicDTPool", target, sort="fund:asc", execution_control=context.execution_control
+        )
+        context.execution_control.check()
         zt = _zt_frame(zt_records, target)
         dt = _dt_frame(dt_records, target)
         _validate_pool_rows(zt, "zt_pool")
@@ -1103,10 +1182,15 @@ def execute_suspend_d_ingest(context: PipelineRunContext) -> BusinessExecution:
     target = _target_date(context)
     started = time.monotonic()
     try:
-        raw = get_tushare_pro(settings=context.settings).suspend_d(
+        context.execution_control.check()
+        raw = get_tushare_pro(
+            settings=context.settings,
+            execution_control=context.execution_control,
+        ).suspend_d(
             start_date=target.strftime("%Y%m%d"),
             end_date=target.strftime("%Y%m%d"),
         )
+        context.execution_control.check()
         if raw is None:
             raise ContractError("SUSPEND_D_API_FAILED", "suspend_d returned None")
         if raw.empty:

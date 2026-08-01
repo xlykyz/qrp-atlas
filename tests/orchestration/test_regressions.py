@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from qrp_atlas.pipeline.runtime.cli import main as pipeline_cli
-from qrp_atlas.pipeline.runtime.definitions import DefinitionValidationError, load_definitions
-from qrp_atlas.pipeline.runtime.models import OverlapPolicy, PipelineDefinition, PipelineStatus
-from qrp_atlas.pipeline.runtime.runner import PipelineRunner, PipelineRuntimePaths
-from qrp_atlas.pipeline.runtime.scheduler import PipelineScheduler
-from qrp_atlas.pipeline.runtime.store import PipelineRuntimeStore, RunClaimFailure
+from qrp_atlas.jobs_cli import main as pipeline_cli
+from qrp_atlas.orchestration.definitions import DefinitionValidationError, load_definitions
+from qrp_atlas.orchestration.models import OverlapPolicy, JobDefinition, JobStatus
+from qrp_atlas.orchestration.runner import JobRunner, JobRuntimePaths
+from qrp_atlas.orchestration.scheduler import JobScheduler
+from qrp_atlas.orchestration.store import JobRuntimeStore, JobClaimFailure
 
 
 def instant(hour: int = 0, minute: int = 0) -> datetime:
@@ -26,7 +26,7 @@ def instant(hour: int = 0, minute: int = 0) -> datetime:
 
 def definition(
     tmp_path: Path,
-    pipeline_id: str = "example",
+    job_id: str = "example",
     *,
     schedule: str = "* * * * *",
     timezone: str = "UTC",
@@ -36,10 +36,10 @@ def definition(
     command: tuple[str, ...] | None = None,
     timeout_seconds: int | None = 5,
     definition_version: str = "test-v1",
-) -> PipelineDefinition:
-    return PipelineDefinition(
-        pipeline_id=pipeline_id,
-        name=pipeline_id,
+) -> JobDefinition:
+    return JobDefinition(
+        job_id=job_id,
+        name=job_id,
         enabled=True,
         schedule=schedule,
         timezone=timezone,
@@ -54,16 +54,16 @@ def definition(
     )
 
 
-def create_store(tmp_path: Path) -> PipelineRuntimeStore:
-    store = PipelineRuntimeStore(tmp_path / "runtime" / "pipeline.sqlite3")
+def create_store(tmp_path: Path) -> JobRuntimeStore:
+    store = JobRuntimeStore(tmp_path / "runtime" / "pipeline.sqlite3")
     store.initialize()
     return store
 
 
-def claim(store: PipelineRuntimeStore, run_id: str, item: PipelineDefinition, tmp_path: Path) -> object:
+def claim(store: JobRuntimeStore, run_id: str, item: JobDefinition, tmp_path: Path) -> object:
     return store.claim_run(
         run_id,
-        pipeline_id=item.pipeline_id,
+        job_id=item.job_id,
         definition_version=item.definition_version,
         overlap_policy=item.overlap_policy,
         resource_locks=item.resource_locks,
@@ -73,12 +73,12 @@ def claim(store: PipelineRuntimeStore, run_id: str, item: PipelineDefinition, tm
     )
 
 
-def manifest_payload(items: list[PipelineDefinition]) -> dict[str, object]:
+def manifest_payload(items: list[JobDefinition]) -> dict[str, object]:
     return {
         "schema_version": 1,
         "definitions": [
             {
-                "pipeline_id": item.pipeline_id,
+                "job_id": item.job_id,
                 "name": item.name,
                 "enabled": item.enabled,
                 "schedule": item.schedule,
@@ -99,7 +99,7 @@ def manifest_payload(items: list[PipelineDefinition]) -> dict[str, object]:
     }
 
 
-def write_manifest(path: Path, items: list[PipelineDefinition]) -> None:
+def write_manifest(path: Path, items: list[JobDefinition]) -> None:
     path.write_text(json.dumps(manifest_payload(items)), encoding="utf-8")
 
 
@@ -111,7 +111,7 @@ def test_run_pending_cli_idle_and_explicit_rejections(tmp_path: Path, capsys) ->
     prefix = ["--runtime-dir", str(runtime_dir)]
     assert pipeline_cli(prefix + ["run-pending", "--definitions", str(manifest)]) == 0
     assert json.loads(capsys.readouterr().out) == {"reason": "NO_PENDING_RUN", "status": "IDLE"}
-    assert PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3").list_runs() == []
+    assert JobRuntimeStore(runtime_dir / "job_runtime.sqlite3").list_runs() == []
     assert pipeline_cli(prefix + ["init"]) == 0
     capsys.readouterr()
 
@@ -121,19 +121,19 @@ def test_run_pending_cli_idle_and_explicit_rejections(tmp_path: Path, capsys) ->
     assert pipeline_cli(prefix + ["run-pending", "--definitions", str(manifest), "--run-id", "missing"]) != 0
     assert "RUN_NOT_FOUND" in capsys.readouterr().err
 
-    blocked, _ = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3").create_scheduled_run(
+    blocked, _ = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3").create_scheduled_run(
         item,
         scheduled_at=instant(),
-        status=PipelineStatus.BLOCKED,
+        status=JobStatus.BLOCKED,
     )
     assert pipeline_cli(prefix + ["run-pending", "--definitions", str(manifest), "--run-id", blocked.run_id]) != 0
     assert "RUN_NOT_PENDING" in capsys.readouterr().err
 
-    running, _ = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3").create_scheduled_run(
+    running, _ = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3").create_scheduled_run(
         item,
         scheduled_at=instant(0, 1),
     )
-    store = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3")
+    store = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3")
     claim(store, running.run_id, item, tmp_path)
     assert pipeline_cli(prefix + ["run-pending", "--definitions", str(manifest), "--run-id", running.run_id]) != 0
     assert "RUN_NOT_PENDING" in capsys.readouterr().err
@@ -165,7 +165,7 @@ def test_run_pending_cli_reports_success_failure_and_timeout(tmp_path: Path, cap
     prefix = ["--runtime-dir", str(runtime_dir)]
     assert pipeline_cli(prefix + ["init"]) == 0
     capsys.readouterr()
-    store = PipelineRuntimeStore(runtime_dir / "pipeline_runtime.sqlite3")
+    store = JobRuntimeStore(runtime_dir / "job_runtime.sqlite3")
     success_run, _ = store.create_scheduled_run(successful, scheduled_at=instant())
     failure_run, _ = store.create_scheduled_run(failing, scheduled_at=instant(0, 1))
     timeout_run, _ = store.create_scheduled_run(timed_out, scheduled_at=instant(0, 2))
@@ -196,14 +196,14 @@ def test_definition_cycles_fail_closed_without_scheduler_writes(
     manifest = tmp_path / "cyclic.json"
     write_manifest(
         manifest,
-        [definition(tmp_path, pipeline_id, dependencies=dependencies) for pipeline_id, dependencies in dependency_map.items()],
+        [definition(tmp_path, job_id, dependencies=dependencies) for job_id, dependencies in dependency_map.items()],
     )
     with pytest.raises(DefinitionValidationError, match=cycle):
         load_definitions(manifest)
     runtime_dir = tmp_path / "runtime"
     assert pipeline_cli(["--runtime-dir", str(runtime_dir), "scan", "--definitions", str(manifest)]) != 0
     assert "pipeline dependency cycle detected" in capsys.readouterr().err
-    assert not (runtime_dir / "pipeline_runtime.sqlite3").exists()
+    assert not (runtime_dir / "job_runtime.sqlite3").exists()
 
 
 def test_definition_legal_disconnected_dags(tmp_path: Path) -> None:
@@ -217,13 +217,13 @@ def test_definition_legal_disconnected_dags(tmp_path: Path) -> None:
             definition(tmp_path, "D", dependencies=("C",)),
         ],
     )
-    assert {item.pipeline_id for item in load_definitions(manifest)} == {"A", "B", "C", "D"}
+    assert {item.job_id for item in load_definitions(manifest)} == {"A", "B", "C", "D"}
 
 
 def test_scheduler_cursor_catches_up_and_bounds_history(tmp_path: Path) -> None:
     store = create_store(tmp_path)
     item = definition(tmp_path, "every-five", schedule="*/5 * * * *", overlap_policy=OverlapPolicy.ALLOW)
-    scheduler = PipelineScheduler(store, (item,))
+    scheduler = JobScheduler(store, (item,))
     first = scheduler.scan(now=instant())
     assert len(first) == 1
     assert first.requested_start_at == instant()
@@ -237,7 +237,7 @@ def test_scheduler_cursor_catches_up_and_bounds_history(tmp_path: Path) -> None:
     assert len(scheduler.scan(now=instant(0, 20))) == 0
 
     limited_store = create_store(tmp_path / "limited")
-    limited = PipelineScheduler(
+    limited = JobScheduler(
         limited_store,
         (definition(tmp_path, "every-minute", overlap_policy=OverlapPolicy.ALLOW),),
         max_catch_up_minutes=5,
@@ -254,12 +254,12 @@ def test_scheduler_cursor_catches_up_and_bounds_history(tmp_path: Path) -> None:
 def test_scheduler_cursor_no_match_error_and_timezones(tmp_path: Path, monkeypatch) -> None:
     store = create_store(tmp_path)
     no_match = definition(tmp_path, "no-match", schedule="0 1 * * *", overlap_policy=OverlapPolicy.ALLOW)
-    scheduler = PipelineScheduler(store, (no_match,))
+    scheduler = JobScheduler(store, (no_match,))
     scheduler.scan(now=instant())
     assert len(scheduler.scan(now=instant(0, 20))) == 0
 
     failing_store = create_store(tmp_path / "failing")
-    failing = PipelineScheduler(failing_store, (definition(tmp_path, "failing"),))
+    failing = JobScheduler(failing_store, (definition(tmp_path, "failing"),))
     monkeypatch.setattr(failing_store, "commit_scheduler_scan", lambda **_: (_ for _ in ()).throw(RuntimeError("boom")))
     with pytest.raises(RuntimeError, match="boom"):
         failing.scan(now=instant())
@@ -273,11 +273,11 @@ def test_scheduler_cursor_no_match_error_and_timezones(tmp_path: Path, monkeypat
         timezone="America/New_York",
         overlap_policy=OverlapPolicy.ALLOW,
     )
-    dst_scheduler = PipelineScheduler(dst_store, (dst,), max_catch_up_minutes=120)
+    dst_scheduler = JobScheduler(dst_store, (dst,), max_catch_up_minutes=120)
     first = dst_scheduler.scan(now=datetime(2026, 11, 1, 5, 30, tzinfo=UTC))
     second = dst_scheduler.scan(now=datetime(2026, 11, 1, 6, 30, tzinfo=UTC))
     assert len(first) == len(second) == 1
-    scheduled = dst_store.list_runs(pipeline_id="dst", limit=10)
+    scheduled = dst_store.list_runs(job_id="dst", limit=10)
     assert len(scheduled) == 2
     assert len({run.scheduled_at for run in scheduled}) == 2
     assert all(run.scheduled_at.tzinfo is not None for run in scheduled)
@@ -285,15 +285,15 @@ def test_scheduler_cursor_no_match_error_and_timezones(tmp_path: Path, monkeypat
 
 def test_concurrent_schedulers_commit_one_cursor_interval(tmp_path: Path) -> None:
     store = create_store(tmp_path)
-    other_connection = PipelineRuntimeStore(store.database_path)
+    other_connection = JobRuntimeStore(store.database_path)
     item = definition(tmp_path, "concurrent", overlap_policy=OverlapPolicy.ALLOW)
     barrier = threading.Barrier(2)
     failures: list[BaseException] = []
 
-    def scan(connection: PipelineRuntimeStore) -> None:
+    def scan(connection: JobRuntimeStore) -> None:
         try:
             barrier.wait()
-            PipelineScheduler(connection, (item,)).scan(now=instant())
+            JobScheduler(connection, (item,)).scan(now=instant())
         except BaseException as exc:  # pragma: no cover - asserted below
             failures.append(exc)
 
@@ -303,7 +303,7 @@ def test_concurrent_schedulers_commit_one_cursor_interval(tmp_path: Path) -> Non
     for thread in threads:
         thread.join()
     assert failures == []
-    assert len(store.list_runs(pipeline_id="concurrent")) == 1
+    assert len(store.list_runs(job_id="concurrent")) == 1
     assert store.get_scheduler_cursor("default").last_scanned_at == instant()  # type: ignore[union-attr]
 
 
@@ -313,7 +313,7 @@ def test_scheduler_scan_recovers_stale_runs_and_expired_leases(tmp_path: Path) -
     stale, _ = store.create_scheduled_run(item, scheduled_at=instant())
     store.claim_run(
         stale.run_id,
-        pipeline_id=item.pipeline_id,
+        job_id=item.job_id,
         definition_version=item.definition_version,
         overlap_policy=item.overlap_policy,
         resource_locks=item.resource_locks,
@@ -326,7 +326,7 @@ def test_scheduler_scan_recovers_stale_runs_and_expired_leases(tmp_path: Path) -
     fresh_run, _ = store.create_scheduled_run(fresh, scheduled_at=instant())
     store.claim_run(
         fresh_run.run_id,
-        pipeline_id=fresh.pipeline_id,
+        job_id=fresh.job_id,
         definition_version=fresh.definition_version,
         overlap_policy=fresh.overlap_policy,
         resource_locks=fresh.resource_locks,
@@ -336,7 +336,7 @@ def test_scheduler_scan_recovers_stale_runs_and_expired_leases(tmp_path: Path) -
         now=instant(),
     )
     assert store.heartbeat(fresh_run.run_id, lease_seconds=30, now=instant() + timedelta(seconds=40))
-    scheduler = PipelineScheduler(
+    scheduler = JobScheduler(
         store,
         (item, fresh),
         heartbeat_interval_seconds=5,
@@ -346,30 +346,30 @@ def test_scheduler_scan_recovers_stale_runs_and_expired_leases(tmp_path: Path) -
     result = scheduler.scan(now=instant(0, 1))
     assert result.stale_runs_recovered == 1
     recovered = store.get_run(stale.run_id)
-    assert recovered is not None and recovered.status is PipelineStatus.FAILED
+    assert recovered is not None and recovered.status is JobStatus.FAILED
     assert recovered.error_summary == "stale heartbeat recovery"
     assert not store.has_active_resource_lock("quant_db_writer", now=instant(0, 1))
-    assert store.get_run(fresh_run.run_id).status is PipelineStatus.RUNNING  # type: ignore[union-attr]
+    assert store.get_run(fresh_run.run_id).status is JobStatus.RUNNING  # type: ignore[union-attr]
     assert store.has_active_resource_lock("fresh_lock", now=instant(0, 1))
-    assert any(run.pipeline_id == item.pipeline_id and run.status is PipelineStatus.PENDING for run in result)
+    assert any(run.job_id == item.job_id and run.status is JobStatus.PENDING for run in result)
     repeat = scheduler.scan(now=instant(0, 1))
     assert repeat.stale_runs_recovered == 0
 
 
 def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path: Path) -> None:
     same_store = create_store(tmp_path / "same")
-    same_connection = PipelineRuntimeStore(same_store.database_path)
+    same_connection = JobRuntimeStore(same_store.database_path)
     same = definition(tmp_path, "same")
     same_run, _ = same_store.create_scheduled_run(same, scheduled_at=instant())
     barrier = threading.Barrier(2)
     results: list[str] = []
 
-    def concurrent_claim(connection: PipelineRuntimeStore, run_id: str, item: PipelineDefinition) -> None:
+    def concurrent_claim(connection: JobRuntimeStore, run_id: str, item: JobDefinition) -> None:
         try:
             barrier.wait()
             claim(connection, run_id, item, tmp_path)
             results.append("SUCCESS")
-        except RunClaimFailure as exc:
+        except JobClaimFailure as exc:
             results.append(exc.code)
 
     threads = [
@@ -383,7 +383,7 @@ def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path:
     assert sorted(results) == ["RUN_NOT_PENDING", "SUCCESS"]
 
     store = create_store(tmp_path)
-    second_connection = PipelineRuntimeStore(store.database_path)
+    second_connection = JobRuntimeStore(store.database_path)
     forbid = definition(tmp_path, "forbid")
     first, _ = store.create_scheduled_run(forbid, scheduled_at=instant())
     second, _ = store.create_scheduled_run(forbid, scheduled_at=instant(0, 1))
@@ -401,7 +401,7 @@ def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path:
     assert sorted(results) == ["OVERLAP_FORBIDDEN", "SUCCESS"]
 
     allow_store = create_store(tmp_path / "allow")
-    allow_connection = PipelineRuntimeStore(allow_store.database_path)
+    allow_connection = JobRuntimeStore(allow_store.database_path)
     allow = definition(tmp_path, "allow", overlap_policy=OverlapPolicy.ALLOW)
     allow_a, _ = allow_store.create_scheduled_run(allow, scheduled_at=instant())
     allow_b, _ = allow_store.create_scheduled_run(allow, scheduled_at=instant(0, 1))
@@ -418,7 +418,7 @@ def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path:
     assert results == ["SUCCESS", "SUCCESS"]
 
     locked_store = create_store(tmp_path / "locked")
-    locked_connection = PipelineRuntimeStore(locked_store.database_path)
+    locked_connection = JobRuntimeStore(locked_store.database_path)
     locked = definition(
         tmp_path,
         "locked",
@@ -440,13 +440,13 @@ def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path:
     assert sorted(results) == ["RESOURCE_LOCK_UNAVAILABLE", "SUCCESS"]
 
     retry_store = create_store(tmp_path / "retry")
-    retry_connection = PipelineRuntimeStore(retry_store.database_path)
+    retry_connection = JobRuntimeStore(retry_store.database_path)
     retry_definition = definition(tmp_path, "retry")
     failed, _ = retry_store.create_scheduled_run(retry_definition, scheduled_at=instant())
     claim(retry_store, failed.run_id, retry_definition, tmp_path)
     retry_store.finish_run(
         failed.run_id,
-        status=PipelineStatus.FAILED,
+        status=JobStatus.FAILED,
         exit_code=1,
         timed_out=False,
         error_summary="fixture failure",
@@ -458,7 +458,7 @@ def test_atomic_claim_enforces_overlap_locks_and_retries_under_threads(tmp_path:
     retry = retry_store.retry_run(failed.run_id)
     other, _ = retry_store.create_scheduled_run(retry_definition, scheduled_at=instant(0, 1))
     claim(retry_store, other.run_id, retry_definition, tmp_path)
-    with pytest.raises(RunClaimFailure, match="OVERLAP_FORBIDDEN"):
+    with pytest.raises(JobClaimFailure, match="OVERLAP_FORBIDDEN"):
         claim(retry_connection, retry.run_id, retry_definition, tmp_path)
 
 
@@ -487,13 +487,13 @@ def test_heartbeat_failure_stops_process_group_and_releases_lock(
             raise sqlite3.OperationalError("fixture heartbeat failure")
 
         monkeypatch.setattr(store, "heartbeat", raise_sqlite)
-    result = PipelineRunner(
+    result = JobRunner(
         store,
-        PipelineRuntimePaths(tmp_path / "runtime"),
+        JobRuntimePaths(tmp_path / "runtime"),
         heartbeat_interval_seconds=0.05,
         lease_seconds=1,
     ).run(run.run_id, item)
-    assert result.status is PipelineStatus.FAILED
+    assert result.status is JobStatus.FAILED
     assert result.timed_out is False
     assert "heartbeat failure" in (result.error_summary or "")
     assert not store.has_active_resource_lock("quant_db_writer")

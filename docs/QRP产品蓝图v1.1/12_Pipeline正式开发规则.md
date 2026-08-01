@@ -26,15 +26,15 @@
 
 ### 2.2 Pipeline runtime
 
-既有 `qrp_atlas.pipeline.runtime` 仍是唯一运行编排基础，负责：
+通用 `qrp_atlas.orchestration` 是 Job 编排基础，负责：
 
 - scheduler 根据 cron 创建运行记录和判断依赖状态；
 - SQLite run record 的 claim、overlap、lease、heartbeat 和 stale recovery；
 - 物理资源锁；
-- 子进程执行、timeout、retry、日志、状态和历史；
-- 将正式 Pipeline 的结构化结果写入独立 runtime SQLite。
+- 正式 Contract 的进程内 executor、兼容 argv Definition 的子进程监督、timeout、retry、日志、状态和历史；
+- 将 `PipelineResult` 或编排合成的 `JobResult` 写入独立 runtime SQLite。
 
-正式 Contract 不重写 scheduler、锁或 lease。它通过 `runtime.contract_adapter` 映射为既有 `PipelineDefinition`，使 runtime 得到 executor 入口、依赖、锁、timeout、retry、性能预算和新鲜度摘要。
+正式 Contract 不重写 scheduler、锁或 lease。它通过 `qrp_atlas.pipeline.job_adapter` 映射为 `JobDefinition`，使 Orchestration 得到 executor 入口、依赖、锁、timeout、retry、性能预算和新鲜度摘要。
 
 ### 2.3 生产部署
 
@@ -72,6 +72,8 @@
 | `outputs` | `tuple[OutputContract, ...]` | 输出、完成和最低质量。 |
 | `dependencies` | `tuple[str, ...]` | 业务 Pipeline 依赖，不表示物理锁。 |
 | `resource_locks` | `tuple[str, ...]` | 物理资源互斥声明。 |
+| `resource_reads` | `tuple[str, ...]` | 共享只读资源声明；正式 Contract 可用表级 DuckDB 资源表达读取范围。 |
+| `manual_execution_allowed` | `bool` | 是否允许通过正式 CLI `run` 提交该 Contract 的人工 Run（及其人工依赖链）；部署选择不能覆盖。 |
 | `idempotency` | `IdempotencyContract` | 重跑、恢复、staging 和原子替换语义。 |
 | `transaction` | `TransactionContract` | 写入事务边界和失败可见性。 |
 | `execution` | `ExecutionPolicy` | overlap 规则与最大 retry。 |
@@ -81,7 +83,7 @@
 
 ### 3.2 运行上下文与日期
 
-`PipelineInvocation` 在运行前携带 `run_id`、`pipeline_id`、`scheduled_for`、`attempt`、统一 `AppSettings`、显式参数覆盖和审计上下文。`TargetDatePolicy` 必须提供：
+`PipelineInvocation` 在运行前携带 `run_id`、`pipeline_id`、`scheduled_for`、`attempt`、统一 `AppSettings`、显式参数覆盖、审计上下文和一个 `ExecutionControl`。`TargetDatePolicy` 必须提供：
 
 - `policy_id`、说明和真实交易日历身份；
 - 非交易日行为：拒绝、上一交易日、下一交易日或明确允许自然日；
@@ -89,6 +91,8 @@
 - 对 `--trade-date YYYY-MM-DD` 显式覆盖的校验器。
 
 公共生命周期把解析结果写入 `PipelineRunContext.target_window`。业务代码不得直接用 `date.today()` 或私有环境变量推断目标日期。显式日期不通过交易日策略时，结果必须为 `FAILED`，错误码为 `TARGET_DATE_OVERRIDE_INVALID`。
+
+`PipelineInvocation.execution_control` 必须原样传入 `PipelineRunContext.execution_control`；业务 executor 不得替换、复制或丢弃该实例。目标日期/参数解析、输入与 freshness 检查、外部 I/O 前后以及进入或继续 DuckDB 写事务前都必须调用 `execution_control.check()`。网络请求、provider retry/backoff 和其他阻塞等待必须使用不超过剩余 deadline 的 `bounded_timeout()` 或等价受控等待。Python 线程不会被强制终止，正式 executor 不得忽略取消或进行不可取消的无限阻塞。
 
 除 `--trade-date` 外，业务参数必须以 `ParameterContract` 声明名称、`STRING`/`INTEGER`/`BOOLEAN`/`DATE` 类型、说明、必填性和类型正确的默认值。手动调用统一使用 `--set name=value`；未知、重复、缺失或类型错误的参数返回稳定失败，不能由部署命令拼接或由 executor 私自读取未声明环境变量。
 
@@ -131,6 +135,8 @@
 
 任何写入同一物理 DuckDB 的合同必须使用上述同一锁。公共校验会拒绝声明受管理资源却缺失对应锁的写任务。不得按表、模块或 Pipeline 名称创建不同写锁绕过互斥。
 
+正式 Contract 的写入声明只允许使用对应物理文件的数据库级 canonical writer lock；例如 `quant.db` 的写入统一使用 `quant_db_writer`。`resource_reads` 用于共享读取声明，可以使用 `duckdb://<database>#<object>` 表级资源；表级资源不得出现在正式 Contract 的 `resource_locks` 中，也不能替代数据库级写锁。通用 Orchestration 锁引擎仍为兼容 JSON Definition 支持表级资源锁，但那不是正式 Contract 的生产写入规则，本轮不改造该通用引擎。
+
 ### 3.6 幂等、事务与失败
 
 `IdempotencyContract` 必须给出幂等键、同一目标重复执行语义、已有目标处理、失败重跑方式、是否使用 staging 和原子替换边界。`TransactionContract` 必须给出模式、边界和失败半成品可见性。
@@ -145,7 +151,7 @@
 → completion 检查
 ```
 
-同一目标日期重跑不得重复追加、破坏历史、把残留视为成功或产生冲突有效版本。任何参数、配置、结构、freshness、API、局部资产、空输出、事务、completion、质量、timeout、依赖、锁或未处理异常失败，必须以非零退出并持久化 `FAILED` 结果。允许的无数据情况只能返回 `NOOP`，且必须有明确的 `noop_reason`。
+同一目标日期重跑不得重复追加、破坏历史、把残留视为成功或产生冲突有效版本。任何参数、配置、结构、freshness、API、局部资产、空输出、事务、completion、质量、timeout、依赖、锁或未处理异常失败，必须以非零退出并产生 `FAILED` 的业务结果或编排结果。允许的无数据情况只能返回 `NOOP`，且必须有明确的 `noop_reason`。
 
 ### 3.7 性能
 
@@ -159,11 +165,11 @@
 | `benchmark_scope` | 标准基准数据范围和扫描范围。 |
 | `baseline_source` | 可重复基准、真实历史运行或同规模生产证据的位置。 |
 
-基线来源不得是猜测。每次 `PipelineResult` 至少记录总耗时、阶段耗时、读取/写入行数、资产数、日期数、数据库写耗时和 retry 数；可可靠获取时还记录 RSS、临时磁盘、API 请求和 batch。超过阈值会在结构化 diagnostics 中留下性能告警；timeout 仍由 runtime 硬性执行，不能通过放宽 timeout 掩盖算法、扫描范围、全量重算、数据库使用或外部接口瓶颈。
+基线来源不得是猜测。`PipelineResult` 应记录业务代码实际能够可靠取得的耗时、阶段、读取/写入行数、资产/日期、数据库写耗时和 retry 等指标；可可靠获取时还记录 RSS、临时磁盘、API 请求和 batch。通用门禁只验证指标的类型、有限性、非负性、输出行数一致性和预算字段的机械关系，不替代专项性能基线。超过阈值会在结构化 diagnostics 中留下性能告警；timeout 仍由 runtime 硬性执行，不能通过放宽 timeout 掩盖算法、扫描范围、全量重算、数据库使用或外部接口瓶颈。
 
 大批量操作必须优先集合计算，明确扫描范围，控制重复读取，不得无依据逐行 Python 循环、按资产反复打开数据库或复制整表。性能测试必须覆盖声明的标准数据范围。
 
-### 3.8 统一结果
+### 3.8 `PipelineResult` 与 `JobResult`
 
 `PipelineResult` 是机器判定的执行结果，字段为：
 
@@ -181,37 +187,53 @@
 | `diagnostics` | 稳定错误码、等级、无凭据消息和结构化细节。 |
 | `noop_reason` | 仅允许 NOOP 时的明确原因。 |
 
-runtime 把该 JSON 结果写到其独立 SQLite 的 `pipeline_result` 表，并和 `pipeline_run` 的日志、状态、lease 历史关联。`runtime/results/<run_id>.json` 仅是 executor 到 runner 的一次性 IPC 文件：runner 完成读取和持久化尝试后立即删除，无论结果有效、无效还是落库失败；SQLite 中的 `pipeline_result` 是唯一需要保留的结构化结果。runtime 的进程层成功状态表示受控 executor 已返回成功或 NOOP；业务 NOOP 的真实语义保留在结构化结果中。
+`PipelineResult` 是 Pipeline 业务层的结构化结果，正常的正式 Contract 执行会把它作为 JSON 载荷持久化到独立 runtime SQLite 的 `job_result` 表。`JobResult` 是 Orchestration 对每个 Job Run 的持久化结果记录，主键为 `run_id`，与 `job_run` 的最终状态、日志摘要和 lease 历史关联；二者不能混称。`PipelineResult.status` 使用 `SUCCESS`、`FAILED` 或 `NOOP`；`JobRun.status` 使用 `SUCCESS`、`FAILED`、`TIMED_OUT`、`CANCELLED` 或 `SKIPPED`，编排合成的结果载荷另外记录相同的 `terminal_status`。
+
+每一个终态 `JobRun` 必须恰好有一条 durable `JobResult`，终态转换、结果写入和 lease 释放在同一事务中完成。正常返回真实业务结果时保留 `PipelineResult` 载荷；timeout、cancel、scheduler skip、stale recovery、Runner 异常或其他没有业务结果的路径由 Orchestration 合成结果，至少包含：
+
+```json
+{
+  "result_type": "orchestration",
+  "source": "orchestration",
+  "run_id": "RUN_ID",
+  "status": "TIMED_OUT",
+  "terminal_status": "TIMED_OUT",
+  "error_code": "ORCHESTRATION_TIMEOUT",
+  "error_summary": "...",
+  "business_result": null
+}
+```
+
+timeout、cancel 和 skip 即使 executor 曾经产生载荷，也不得伪造业务成功结果；运行时失败但没有业务载荷同样使用编排结果。错误码只需满足 `ERROR_CODE_PATTERN = ^[A-Z][A-Z0-9_]*$`，本规则不建设错误码注册中心。
+
+正式 Contract 在 `qrp-atlas-jobs serve` 的线程 worker 内执行，不使用子进程或结果文件 IPC。`orchestration/results/<run_id>.json` 仅属于兼容 argv Definition 的一次性 executor-to-runner IPC；读取和持久化尝试后立即删除，SQLite `job_result` 才是需要查询和保留的结构化结果。
 
 ## 4. 统一生命周期
 
 所有正式 Pipeline 的外层顺序固定为：
 
 ```text
-runtime 创建/claim run
-→ 解析统一运行上下文
-→ 解析交易日或时间范围
-→ runtime 判断依赖、overlap 和资源锁
-→ 输入结构检查
-→ 输入 freshness 检查
-→ 执行业务逻辑
-→ 源码声明的事务或 staging 原子写入
-→ 输出 completion 与质量检查
-→ 记录性能与结构化结果
-→ runtime 持久化运行状态和结果
+Scheduler scan：匹配 cron，处理依赖/overlap 预判，并创建 PENDING、BLOCKED 或 SKIPPED run
+→ Runner 在原子 claim transaction 中校验 Definition/version、overlap，取得 resource lease 并标记 RUNNING
+→ serve 线程 worker 创建/传递同一个 ExecutionControl，调用正式 Contract 的进程内 executor
+→ executor 解析目标日期和参数，执行输入结构、freshness、业务、completion 与质量检查
+→ executor 在 Contract 声明的事务或 staging 边界内写入业务输出
+→ Runner/Store 在同一事务中持久化终态 JobRun 与恰好一条 JobResult，并释放 lease
 ```
+
+`SKIPPED` 不进入 executor，在 scheduler 创建时直接获得编排合成的 `JobResult`。只有兼容 argv Definition 才走受控子进程分支；正式 Contract 不通过子进程、临时结果文件或业务 argv 完成上述生命周期。
 
 正式命令为：
 
 ```bash
-qrp-atlas-pipeline validate-contracts
-qrp-atlas-pipeline list-contracts
-qrp-atlas-pipeline run pipeline_id
-qrp-atlas-pipeline run pipeline_id --trade-date 2026-07-29
-qrp-atlas-pipeline run pipeline_id --set batch_size=500
+qrp-atlas-jobs validate-contracts
+qrp-atlas-jobs list-contracts
+qrp-atlas-jobs run job_id
+qrp-atlas-jobs run job_id --trade-date 2026-07-29
+qrp-atlas-jobs run job_id --set batch_size=500
 ```
 
-`run` 不是绕开 runtime 的脚本快捷方式：它创建独立 runtime run record 后再使用既有 claim、锁、heartbeat、timeout 和结果落库。排程场景使用 `scan`/`run-pending --contract-selections ...`，由合同适配器生成内部 argv；部署不需要也不得手写业务 argv。
+`run` 不是绕开 Orchestration 的脚本快捷方式：它创建独立 Job Run 后再使用既有 claim、锁、heartbeat、timeout 和结果落库。排程场景使用 `serve --contract-selections ...`，由 Pipeline adapter 生成 Job Definition；部署不需要也不得手写业务 argv。
 
 ## 5. 原子任务和顶层 DAG
 
@@ -227,9 +249,9 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 2. 用 `register_pipeline(contract)` 注册；
 3. 将模块名显式加入 `pipeline.contract_catalog.CONTRACT_MODULES`；
 4. 为该合同补充公共验收测试和性能证据；
-5. 通过 `qrp-atlas-pipeline validate-contracts` 后，才可在单独的部署选择清单中引用它。
+5. 通过 `qrp-atlas-jobs validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；本轮只收口通用规则，不重写这六条的业务定义，它们的 `quant_db` 写入仍明确使用 `quant_db_writer`。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ## 7. 公共测试规则
 
@@ -244,6 +266,8 @@ qrp-atlas-pipeline run pipeline_id --set batch_size=500
 7. 性能：标准规模基准、数据量指标、耗时记录、扫描范围、复杂度不退化和预算超限检测。
 
 可复用的基础工具在 `qrp_atlas.pipeline.testing.ContractTestHarness` 和 `assert_contract_result_matches_context`。模板专项测试在 `tests/pipeline/test_pipeline_contract.py`，并且不连接市场数据库或外部服务。
+
+通用门禁只负责可机械验证的结构约束：身份和字段形状、资源声明、错误码格式、指标类型/有限性/非负性、输出结果对应关系及预算字段关系。事务边界、幂等、原子性、分页完整性、来源完整性、freshness 的业务含义和真实性能基线，必须由各 Pipeline 的专项测试与证据证明；通用门禁不以非空描述或错误码格式替代这些证明。
 
 ## 8. PR 强制门禁
 
