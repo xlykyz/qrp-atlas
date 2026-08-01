@@ -1182,10 +1182,15 @@ def execute_suspend_d_ingest(context: PipelineRunContext) -> BusinessExecution:
     target = _target_date(context)
     started = time.monotonic()
     try:
-        raw = get_tushare_pro(settings=context.settings).suspend_d(
+        context.execution_control.check()
+        raw = get_tushare_pro(
+            settings=context.settings,
+            execution_control=context.execution_control,
+        ).suspend_d(
             start_date=target.strftime("%Y%m%d"),
             end_date=target.strftime("%Y%m%d"),
         )
+        context.execution_control.check()
         if raw is None:
             raise ContractError("SUSPEND_D_API_FAILED", "suspend_d returned None")
         if raw.empty:

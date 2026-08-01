@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -14,8 +14,10 @@ import pytest
 
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import init_database
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.contract_validation import validate_contracts
 from qrp_atlas.pipeline.contracts import CheckResult, CompletionContract, PipelineInvocation, ResultStatus
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.market_data_contracts import (
     ADJ_FACTOR_DAILY,
     DAILY_BASIC_UPDATE,
@@ -167,6 +169,22 @@ def run(contract, item: AppSettings, *, dependencies=()):
     if "market_daily_update" in contract.dependencies and MARKET_DAILY_UPDATE not in available:
         available = (*available, MARKET_DAILY_UPDATE)
     return ContractTestHarness(contract, item, dependency_contracts=available).run(trade_date=TARGET)
+
+
+def run_suspend_with_control(item: AppSettings, control: ExecutionControl):
+    return execute_pipeline_contract(
+        SUSPEND_D_INGEST,
+        PipelineInvocation(
+            run_id="suspend-d-execution-control-test",
+            pipeline_id=SUSPEND_D_INGEST.pipeline_id,
+            scheduled_for=datetime(2026, 7, 29, 8, 30, tzinfo=UTC),
+            attempt=1,
+            settings=item,
+            trade_date_override=TARGET,
+            audit_context={"test": "true"},
+            execution_control=control,
+        ),
+    )
 
 
 def diagnostics(result) -> set[str]:
@@ -662,6 +680,7 @@ def test_suspend_d_empty_is_an_explicit_complete_snapshot(tmp_path: Path, monkey
         )
     finally:
         connection.close()
+
     client = FakeTushare()
     client.suspend_frame = pd.DataFrame()
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
@@ -674,6 +693,114 @@ def test_suspend_d_empty_is_an_explicit_complete_snapshot(tmp_path: Path, monkey
     connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
     try:
         assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_suspend_d_passes_the_invocation_execution_control_to_tushare(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    client = FakeTushare()
+    control = ExecutionControl()
+    observed: list[ExecutionControl | None] = []
+
+    def get_client(**kwargs):
+        observed.append(kwargs.get("execution_control"))
+        return client
+
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", get_client)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert observed == [control]
+
+
+@pytest.mark.parametrize("stop_mode", ("cancel", "deadline"))
+def test_suspend_d_stops_before_client_creation_when_control_is_not_active(
+    tmp_path: Path,
+    monkeypatch,
+    stop_mode: str,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    control = ExecutionControl()
+    if stop_mode == "cancel":
+        control.cancel("test cancellation")
+    else:
+        control.deadline = datetime.now(UTC) - timedelta(seconds=1)
+    client_calls: list[dict] = []
+
+    def get_client(**kwargs):
+        client_calls.append(kwargs)
+        return FakeTushare()
+
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", get_client)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.FAILED
+    assert not client_calls
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("stop_mode", ("cancel", "deadline"))
+def test_suspend_d_checks_control_after_response_before_duckdb_write(
+    tmp_path: Path,
+    monkeypatch,
+    stop_mode: str,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        connection.execute(
+            "INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES (?, ?, ?)",
+            [TARGET, "000001.SZ", "S"],
+        )
+    finally:
+        connection.close()
+
+    control = ExecutionControl()
+    client = FakeTushare()
+
+    def suspend_d(**_kwargs):
+        if stop_mode == "cancel":
+            control.cancel("provider response cancellation")
+        else:
+            control.deadline = datetime.now(UTC) - timedelta(seconds=1)
+        return client.suspend_frame.copy()
+
+    client.suspend_d = suspend_d
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.market_data_contracts.get_tushare_pro",
+        lambda **kwargs: client,
+    )
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    write_calls: list[object] = []
+    original_replace = subject._replace_target_date
+
+    def tracked_replace(*args, **kwargs):
+        write_calls.append(object())
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(subject, "_replace_target_date", tracked_replace)
+
+    result = run_suspend_with_control(item, control)
+
+    assert result.status is ResultStatus.FAILED
+    assert not write_calls
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM suspend_d WHERE trade_date = ?", [TARGET]).fetchone()[0] == 1
     finally:
         connection.close()
 
