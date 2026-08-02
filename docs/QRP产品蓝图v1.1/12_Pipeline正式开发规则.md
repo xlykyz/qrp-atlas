@@ -253,6 +253,15 @@ qrp-atlas-jobs run job_id --set batch_size=500
 
 `qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts`、`qrp_atlas.pipeline.irm_qa_contracts`、`qrp_atlas.pipeline.membership_contracts`、`qrp_atlas.pipeline.pit_fundamentals_contracts`、`qrp_atlas.pipeline.research_report_contracts` 和 `qrp_atlas.pipeline.research_industry_contracts`，共包含十五条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest`、`irm_qa_incremental`、`industry_membership_ingest`、`index_component_ingest`、`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`、`research_stock_report_ingest` 以及 `research_industry_report_ingest`。两个研究报告 Contract 使用显式日期范围、完整列表/详情响应、数据库事务、run-scoped CSV/PDF staging、`quant_db_writer` 和 `overlap_policy=FORBID`；行业报告分类直接使用 provider 字段，不读取行业成员历史或行情表，也不执行成员/价格聚合；历史晨间和晚间 Job 只是同一业务能力的调度事实。IRM 使用 P5W 最新 feed、`pid` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；成员关系 Contract 使用显式范围、`revision_id` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；Tushare 没有可靠的 total/page 证据，结果保留这一完整性边界。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
+### 6.1 Contract 与源码模块组织
+
+1. 一项稳定、可独立调用的数据生产能力必须对应一条全局唯一的 `PipelineContract`。Contract 的划分依据是业务输入、输出、日期或范围、幂等、事务、完成和质量语义，不依据调度时间、运行频率、Job 名称、历史 Hermes Job 数量或参数取值。
+2. 不同 schedule、不同参数模板、人工调用和定时调用可以共同引用同一条 `PipelineContract`。不得因早晚调度、全量/增量参数或历史 Job 数量重复创建业务 Contract。
+3. 新增正式生产能力默认采用“一条 `PipelineContract`、一个独立 Contract 模块”的源码组织方式。模块名称应能直接定位对应的 `pipeline_id`，并通过 `register_pipeline()` 注册后加入显式 `CONTRACT_MODULES` catalog。
+4. 多条 Contract 之间共享的 provider 客户端、日期工具、清洗、写入和校验逻辑应下沉到普通业务模块或 support 模块，不得通过复制代码维持一 Contract 一模块，也不得仅因共享工具而把多个独立生产能力合并为一条 Contract。
+5. 现有聚合 Contract 模块可以保持兼容，不要求仅为目录形式统一而拆分。后续只有在相关模块发生实质业务修改、文件规模已经妨碍独立审查，或多个 Contract 的修改冲突明显时，才可随业务变更拆分；纯文件搬迁不作为生产迁移阻塞项。
+6. 无论源码模块如何组织，正式发现、依赖、Job 适配、版本、验收和生产治理的最小单位始终是 `PipelineContract.pipeline_id`，而不是 Python 模块名。`CONTRACT_MODULES` 是显式模块装载清单，registry 最终保存的是扁平的 Contract 集合。
+
 ## 7. 公共测试规则
 
 每个新增或改造后的 Pipeline 至少要有下列公共测试；测试只能使用 `tmp_path`、临时 SQLite/DuckDB、fixture 和 mock 外部接口：
