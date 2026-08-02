@@ -145,8 +145,11 @@ def append_only_insert(
     df: pd.DataFrame,
     *,
     id_column: str = "revision_id",
+    execution_control=None,
 ) -> int:
     """Insert rows whose id_column is not already present. Returns inserted count."""
+    if execution_control is not None:
+        execution_control.check()
     if df is None or df.empty:
         return 0
     ids = df[id_column].astype(str).tolist()
@@ -154,6 +157,8 @@ def append_only_insert(
     # chunk IN lists
     chunk = 500
     for i in range(0, len(ids), chunk):
+        if execution_control is not None:
+            execution_control.check()
         part = ids[i : i + chunk]
         placeholders = ", ".join(["?"] * len(part))
         rows = con.execute(
@@ -165,7 +170,17 @@ def append_only_insert(
     if new_df.empty:
         return 0
     con.register("tmp_pit_df", new_df)
-    cols = list(new_df.columns)
-    col_sql = ", ".join(cols)
-    con.execute(f"INSERT INTO {table_name} ({col_sql}) SELECT {col_sql} FROM tmp_pit_df")
-    return len(new_df)
+    try:
+        if execution_control is not None:
+            execution_control.check()
+        cols = list(new_df.columns)
+        col_sql = ", ".join(cols)
+        con.execute(f"INSERT INTO {table_name} ({col_sql}) SELECT {col_sql} FROM tmp_pit_df")
+        if execution_control is not None:
+            execution_control.check()
+        return len(new_df)
+    finally:
+        try:
+            con.unregister("tmp_pit_df")
+        except Exception:
+            pass

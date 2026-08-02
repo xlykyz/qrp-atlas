@@ -10,6 +10,7 @@ import pandas as pd
 from qrp_atlas.config import DB_PATH, ensure_dirs
 from qrp_atlas.contracts import align_to_schema, init_database, quick_validate
 from qrp_atlas.pipeline.pit_utils import append_only_insert
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 
 
 def load_financial(
@@ -18,9 +19,13 @@ def load_financial(
     *,
     db_path: str | Path | None = None,
     init: bool = True,
+    execution_control: ExecutionControl | None = None,
 ) -> int:
     """Append new revision rows only. Returns inserted row count."""
-    ensure_dirs()
+    if execution_control is not None:
+        execution_control.check()
+    if db_path is None:
+        ensure_dirs()
     path = Path(db_path or DB_PATH)
     if df is None or df.empty:
         # still ensure table exists when requested
@@ -39,8 +44,18 @@ def load_financial(
     try:
         if init:
             init_database(con)
+        if execution_control is not None:
+            execution_control.check()
         con.execute("BEGIN")
-        inserted = append_only_insert(con, table, df, id_column="revision_id")
+        inserted = append_only_insert(
+            con,
+            table,
+            df,
+            id_column="revision_id",
+            execution_control=execution_control,
+        )
+        if execution_control is not None:
+            execution_control.check()
         con.execute("COMMIT")
         return inserted
     except Exception:

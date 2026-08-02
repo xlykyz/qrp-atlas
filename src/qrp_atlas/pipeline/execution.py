@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from numbers import Integral, Real
 
+from qrp_atlas.orchestration.execution_control import ExecutionControlError
+
 from .contract_validation import is_valid_error_code
 from .contracts import (
     BusinessExecution,
@@ -183,6 +185,24 @@ def execute_pipeline_contract(contract: PipelineContract, invocation: PipelineIn
             freshness_checks=freshness_checks,
             completion_checks=completion_checks,
             diagnostics=diagnostics + _performance_diagnostics(contract, started),
+        )
+    except ExecutionControlError as exc:
+        return _failure_result(
+            invocation,
+            target_window,
+            started_at,
+            started,
+            input_checks=input_checks,
+            freshness_checks=freshness_checks,
+            completion_checks=completion_checks,
+            business=business,
+            diagnostic=PipelineDiagnostic(
+                code=exc.code,
+                level=DiagnosticLevel.ERROR,
+                message="execution control stopped the Pipeline contract",
+                detail={"reason": exc.detail or exc.code},
+            ),
+            contract=contract,
         )
     except ContractError as exc:
         return _failure_result(

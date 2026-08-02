@@ -605,6 +605,8 @@ def parse_parameter_overrides(
 
 def _parse_parameter_value(definition: ParameterContract, value: Any) -> Any:
     try:
+        if value is None and not definition.required:
+            return None
         if definition.parameter_type is ParameterType.STRING:
             if not isinstance(value, str):
                 raise ValueError

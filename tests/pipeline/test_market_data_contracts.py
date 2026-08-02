@@ -31,6 +31,7 @@ from qrp_atlas.pipeline.market_data_contracts import (
 from qrp_atlas.pipeline.cninfo_contracts import CNINFO_CONTRACTS
 from qrp_atlas.pipeline.irm_qa_contracts import IRM_CONTRACTS
 from qrp_atlas.pipeline.membership_contracts import MEMBERSHIP_CONTRACTS
+from qrp_atlas.pipeline.pit_fundamentals_contracts import PIT_FUNDAMENTALS_CONTRACTS
 from qrp_atlas.pipeline.job_adapter import ContractDeploymentSelection, contract_runtime_definition
 from qrp_atlas.jobs_cli import main as pipeline_cli
 from qrp_atlas.orchestration.store import JobRuntimeStore
@@ -256,6 +257,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         *(contract.pipeline_id for contract in CNINFO_CONTRACTS),
         *(contract.pipeline_id for contract in IRM_CONTRACTS),
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),
+        *(contract.pipeline_id for contract in PIT_FUNDAMENTALS_CONTRACTS),
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert MARKET_DAILY_UPDATE.dependencies == ()

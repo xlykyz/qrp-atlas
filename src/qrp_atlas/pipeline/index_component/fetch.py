@@ -84,18 +84,24 @@ def fetch_index_weight(
     start_date: str,
     end_date: str,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    settings=None,
 ) -> pd.DataFrame:
-    pro = client or get_tushare_pro()
+    _check(execution_control)
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, "index_weight")
     df = _call_with_retry(
         method,
         index_code=index_code,
         start_date=_ymd(start_date),
         end_date=_ymd(end_date),
+        execution_control=execution_control,
     )
     if df is None or df.empty:
         return pd.DataFrame()
-    return df.reset_index(drop=True)
+    out = df.reset_index(drop=True)
+    _check(execution_control)
+    return out
 
 
 def fetch_index_weights(
@@ -104,9 +110,18 @@ def fetch_index_weights(
     start_date: str,
     end_date: str,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     frames = [
-        fetch_index_weight(code, start_date=start_date, end_date=end_date, client=client)
+        fetch_index_weight(
+            code,
+            start_date=start_date,
+            end_date=end_date,
+            client=client,
+            execution_control=execution_control,
+            settings=settings,
+        )
         for code in index_codes
     ]
     frames = [f for f in frames if f is not None and not f.empty]
@@ -124,7 +139,7 @@ def fetch_index_weights_with_report(
     """Fetch each explicit index/date scope with cooperative control checks."""
 
     _check(execution_control)
-    pro = client or get_tushare_pro()
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, "index_weight")
     normalized_start = _ymd(start_date)
     normalized_end = _ymd(end_date)

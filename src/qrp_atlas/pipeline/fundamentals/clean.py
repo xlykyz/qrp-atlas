@@ -34,6 +34,7 @@ from qrp_atlas.pipeline.pit_utils import (
     stable_hash,
     to_date,
 )
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 
 MAPPING_BY_TABLE = {
     "income_statement": "tushare_income",
@@ -84,8 +85,11 @@ def clean_financial(
     trade_date_resolver: NextTradeDateResolver | None = None,
     open_dates: Sequence | None = None,
     ingested_at: datetime | None = None,
+    execution_control: ExecutionControl | None = None,
 ) -> pd.DataFrame:
     """Map raw Tushare financial rows to contracts schema."""
+    if execution_control is not None:
+        execution_control.check()
     if df is None or df.empty:
         return pd.DataFrame(columns=[])
 
@@ -133,6 +137,8 @@ def clean_financial(
     source_ids = []
     revision_ids = []
     for _, row in out.iterrows():
+        if execution_control is not None:
+            execution_control.check()
         # business identity without content
         if table == "financial_indicator":
             biz = [
@@ -167,4 +173,6 @@ def clean_financial(
     out = align_to_schema(out, table, fill_missing_optional=True, drop_extra=True)
     out = canonicalize(out, table)
     out = quick_validate(out, table, allow_extra=False)
+    if execution_control is not None:
+        execution_control.check()
     return out.reset_index(drop=True)

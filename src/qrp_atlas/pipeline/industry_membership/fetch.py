@@ -79,21 +79,25 @@ def fetch_industry_membership(
     l3_code: str | None = None,
     is_new: str | None = None,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Fetch membership rows.
 
     Prefer ticker list for small verification. Industry code filters support later backfill.
     """
-    pro = client or get_tushare_pro()
+    _check(execution_control)
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, "index_member_all")
     frames: list[pd.DataFrame] = []
 
     if tickers:
         for ts_code in tickers:
+            _check(execution_control)
             kwargs = {"ts_code": ts_code}
             if is_new is not None:
                 kwargs["is_new"] = is_new
-            df = _call_with_retry(method, **kwargs)
+            df = _call_with_retry(method, execution_control=execution_control, **kwargs)
             if df is not None and not df.empty:
                 frames.append(df)
     else:
@@ -108,13 +112,15 @@ def fetch_industry_membership(
             kwargs["is_new"] = is_new
         if not kwargs:
             raise ValueError("provide tickers or an industry code filter; refuse full-universe pull")
-        df = _call_with_retry(method, **kwargs)
+        df = _call_with_retry(method, execution_control=execution_control, **kwargs)
         if df is not None and not df.empty:
             frames.append(df)
 
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+    _check(execution_control)
+    return out
 
 
 def fetch_industry_membership_with_report(
@@ -126,6 +132,7 @@ def fetch_industry_membership_with_report(
     is_new: str | None = None,
     client=None,
     execution_control: ExecutionControl | None = None,
+    settings=None,
 ) -> tuple[pd.DataFrame, IndustryMembershipFetchReport]:
     """Fetch an explicit scope while reporting requests and controlled retries.
 
@@ -136,7 +143,7 @@ def fetch_industry_membership_with_report(
     """
 
     _check(execution_control)
-    pro = client or get_tushare_pro()
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, "index_member_all")
     report = IndustryMembershipFetchReport()
     frames: list[pd.DataFrame] = []
