@@ -1053,3 +1053,79 @@ def test_equivalent_daily_scale_benchmark_records_metrics_for_all_six_contracts(
         "market-data-benchmark-seconds "
         + " ".join(f"{result.pipeline_id}={result.duration_seconds:.3f}" for result in results)
     )
+
+
+def test_eastmoney_pool_accepts_qdate_and_tc_fields(monkeypatch) -> None:
+    """真实东财响应使用 qdate/tc 字段；date/total 兼容保持。"""
+    import qrp_atlas.pipeline.market_data_contracts as subject
+
+    records = [_eastmoney_record(value) for value in range(3)]
+    calls, open_url = _eastmoney_urlopen(
+        {
+            ("getTopicZTPool", 0): {
+                "rc": 0,
+                "data": {"qdate": int(TARGET.strftime("%Y%m%d")), "tc": 3, "pool": records},
+            },
+        }
+    )
+    monkeypatch.setattr(subject.urllib.request, "urlopen", open_url)
+
+    actual, total = subject._fetch_eastmoney_pool_page(
+        "getTopicZTPool", TARGET, sort="fbt:asc", page_index=0
+    )
+
+    assert len(actual) == 3
+    assert total == 3
+    assert calls == [("getTopicZTPool", 0)]
+
+
+def test_daily_basic_coverage_excludes_suspended_enriched_tickers(tmp_path: Path, monkeypatch) -> None:
+    """snapshot 中的停牌补全股（Tushare daily 无当日行）不要求 daily_basic 覆盖。"""
+    item = settings(tmp_path)
+    initialise_database(item)
+    # snapshot 预置 3 个 ticker：2 个当日交易 + 1 个补全停牌股
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        for ticker in ("000001.SZ", "600000.SH", "300001.SZ"):
+            connection.execute(
+                "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
+                [TARGET, ticker, 10.0],
+            )
+    finally:
+        connection.close()
+
+    client = FakeTushare()
+    # daily 当日仅 2 个交易；daily_basic 覆盖这 2 个
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    result = run(DAILY_BASIC_UPDATE, item)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.outputs[0].detail["expected_tickers"] == 2
+    assert result.outputs[0].detail["suspended_excluded"] == 1
+    assert result.metrics.api_requests == 2
+
+
+def test_daily_basic_coverage_still_fails_closed_when_traded_ticker_missing(tmp_path: Path, monkeypatch) -> None:
+    """当日交易股缺失仍必须 PARTIAL（fail-closed 保持）。"""
+    item = settings(tmp_path)
+    initialise_database(item)
+    connection = duckdb.connect(str(item.paths.duckdb_path))
+    try:
+        for ticker in ("000001.SZ", "600000.SH"):
+            connection.execute(
+                "INSERT INTO daily_market_snapshot (trade_date, ticker, close) VALUES (?, ?, ?)",
+                [TARGET, ticker, 10.0],
+            )
+    finally:
+        connection.close()
+
+    client = FakeTushare()
+    # daily_basic 只返回 1 个 traded ticker
+    client.daily_basic_frame = client.daily_basic_frame.iloc[[0]]
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+
+    result = run(DAILY_BASIC_UPDATE, item)
+
+    assert result.status is ResultStatus.FAILED
+    assert any(d.code == "DAILY_BASIC_API_PARTIAL" for d in result.diagnostics)

@@ -347,6 +347,22 @@ def _expected_market_output_tickers(context: PipelineRunContext, target: date, *
     return expected
 
 
+def _tushare_traded_tickers(client: Any, target: date) -> set[str]:
+    """Tickers that actually traded on the target date.
+
+    ``daily_market_snapshot`` additionally carries suspended stocks copied
+    from the previous trading day by enrichment.  Tushare date-bound
+    indicators (``daily_basic``, ``adj_factor``) only return rows for
+    stocks that traded on the target date, so coverage must be measured
+    against the traded set, not the enriched snapshot set.
+    """
+
+    raw = client.daily(trade_date=target.strftime("%Y%m%d"))
+    if raw is None or raw.empty:
+        return set()
+    return {normalize_ticker(value) for value in raw["ts_code"].dropna().astype(str)}
+
+
 def _external_target_freshness(error_code: str, input_id: str):
     """Require a calendar-supported target before asking a date-bound provider."""
 
@@ -733,18 +749,26 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
     try:
         context.execution_control.check()
         expected = _expected_market_output_tickers(context, target, error_code="DAILY_BASIC_COVERAGE_UNAVAILABLE")
-        raw = get_tushare_pro(
+        client = get_tushare_pro(
             settings=context.settings, execution_control=context.execution_control
-        ).daily_basic(trade_date=target.strftime("%Y%m%d"))
+        )
+        traded = _tushare_traded_tickers(client, target)
+        if not traded:
+            raise ContractError(
+                "DAILY_BASIC_API_PARTIAL",
+                "Tushare daily returned no traded tickers for the coverage check",
+            )
+        expected_traded = expected & traded
+        raw = client.daily_basic(trade_date=target.strftime("%Y%m%d"))
         context.execution_control.check()
         if raw is None or raw.empty:
             raise ContractError("DAILY_BASIC_API_EMPTY", target.isoformat())
         _required_columns(raw, ("ts_code", "trade_date", "close"), "DAILY_BASIC_API_PARTIAL")
         _ensure_target_rows(raw, target, "DAILY_BASIC_API_PARTIAL")
-        _ensure_expected_ticker_coverage(raw, expected, ticker_column="ts_code", code="DAILY_BASIC_API_PARTIAL")
+        _ensure_expected_ticker_coverage(raw, expected_traded, ticker_column="ts_code", code="DAILY_BASIC_API_PARTIAL")
         cleaned = clean_daily_basic(raw)
         _ensure_target_rows(cleaned, target, "DAILY_BASIC_CLEAN_EMPTY")
-        _ensure_expected_ticker_coverage(cleaned, expected, ticker_column="ticker", code="DAILY_BASIC_API_PARTIAL")
+        _ensure_expected_ticker_coverage(cleaned, expected_traded, ticker_column="ticker", code="DAILY_BASIC_API_PARTIAL")
     except ContractError:
         raise
     except Exception as exc:
@@ -761,7 +785,7 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
             assets_processed=cleaned["ticker"].nunique(),
             database_write_seconds=database_seconds,
             stages={"fetch_and_clean": fetched_at - started, "database_write": database_seconds},
-            api_requests=1,
+            api_requests=2,
         ),
         outputs=(
             OutputResult(
@@ -769,7 +793,12 @@ def execute_daily_basic_update(context: PipelineRunContext) -> BusinessExecution
                 rows_written=rows,
                 location="settings.paths.duckdb_path",
                 completed=True,
-                detail={"target_date": target.isoformat(), "expected_tickers": len(expected)},
+                detail={
+                    "target_date": target.isoformat(),
+                    "expected_tickers": len(expected_traded),
+                    "traded_tickers": len(traded),
+                    "suspended_excluded": len(expected) - len(expected_traded),
+                },
             ),
         ),
     )
@@ -816,7 +845,19 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
         _required_columns(raw, ("ts_code", "trade_date", "adj_factor"), "ADJ_FACTOR_API_PARTIAL")
         _ensure_target_rows(raw, target, "ADJ_FACTOR_API_PARTIAL")
         received = {normalize_ticker(value) for value in raw["ts_code"].dropna().astype(str)}
-        missing = sorted(expected - received)
+        # Coverage is measured against the traded tickers only: the enriched
+        # snapshot carries suspended stocks that have no target-date
+        # adjustment factor.
+        client = get_tushare_pro(
+            settings=context.settings, execution_control=context.execution_control
+        )
+        traded = _tushare_traded_tickers(client, target)
+        if not traded:
+            raise ContractError(
+                "ADJ_FACTOR_API_PARTIAL",
+                "Tushare daily returned no traded tickers for the coverage check",
+            )
+        missing = sorted((expected & traded) - received)
         if missing:
             raise ContractError("ADJ_FACTOR_API_PARTIAL", f"missing {len(missing)} target tickers")
         normalized = raw.loc[:, ["ts_code", "trade_date", "adj_factor"]].copy()
@@ -843,7 +884,7 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
             assets_processed=len(expected),
             database_write_seconds=database_seconds,
             stages={"fetch_and_compare": fetched_at - started, "database_write": database_seconds},
-            api_requests=1,
+            api_requests=2,
         ),
         outputs=(
             OutputResult(
@@ -851,7 +892,12 @@ def execute_adj_factor_daily(context: PipelineRunContext) -> BusinessExecution:
                 rows_written=rows,
                 location="settings.paths.duckdb_path",
                 completed=True,
-                detail={"target_date": target.isoformat(), "source_rows": len(normalized), "change_rows": rows},
+                detail={
+                    "target_date": target.isoformat(),
+                    "source_rows": len(normalized),
+                    "change_rows": rows,
+                    "traded_tickers": len(traded),
+                },
             ),
         ),
     )
@@ -947,12 +993,19 @@ def _fetch_eastmoney_pool_page(
     data = payload.get("data")
     if not isinstance(data, dict) or "pool" not in data or not isinstance(data["pool"], list):
         raise ContractError("ZT_DT_POOL_API_PARTIAL", "response does not contain a pool list")
-    if _eastmoney_date(data.get("date")) != target.strftime("%Y%m%d"):
+    # Eastmoney returns the target date as ``qdate`` and the total count as
+    # ``tc``; older responses used ``date``/``total``.  Accept both.
+    response_date = data.get("date")
+    if response_date is None:
+        response_date = data.get("qdate")
+    if _eastmoney_date(response_date) != target.strftime("%Y%m%d"):
         raise ContractError(
             "ZT_DT_POOL_API_PARTIAL",
-            f"response date {data.get('date')!r} does not match {target.isoformat()}",
+            f"response date {response_date!r} does not match {target.isoformat()}",
         )
     total = data.get("total")
+    if total is None:
+        total = data.get("tc")
     if isinstance(total, bool):
         raise ContractError("ZT_DT_POOL_API_PARTIAL", "response total must be a non-negative integer")
     try:
