@@ -9,4 +9,5 @@ from __future__ import annotations
 
 CONTRACT_MODULES: tuple[str, ...] = (
     "qrp_atlas.pipeline.market_data_contracts",
+    "qrp_atlas.pipeline.cninfo_contracts",
 )
