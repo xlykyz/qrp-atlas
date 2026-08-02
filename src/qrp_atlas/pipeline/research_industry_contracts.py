@@ -485,12 +485,14 @@ def _stage_pdf_outputs(
             continue
         publish_date = _parse_date(record.get("publish_date"), f"record[{index}].publish_date")
         industry_name = _classification_label(record)
+        info_code = _text(record.get("info_code"))
         if not industry_name:
             raise ContractError("RESEARCH_INDUSTRY_CLASSIFICATION_MISSING", f"record {index}")
         final_path = build_pdf_path(
             publish_date=publish_date,
             title=_text(record.get("title")),
             industry_name=industry_name,
+            info_code=info_code,
             base_dir=layout.final_pdf_root,
         )
         try:
@@ -498,7 +500,6 @@ def _stage_pdf_outputs(
         except ValueError as exc:
             raise ContractError("RESEARCH_INDUSTRY_PDF_PATH_INVALID") from exc
         previous = seen_paths.get(relative_path)
-        info_code = _text(record.get("info_code"))
         if previous is not None and previous != info_code:
             raise ContractError("RESEARCH_INDUSTRY_PDF_PATH_COLLISION", str(relative_path))
         seen_paths[relative_path] = info_code
@@ -926,6 +927,7 @@ def _pdf_quality(context: PipelineRunContext) -> CheckResult:
                 publish_date=publish_date,
                 title=_text(title),
                 industry_name=industry_label,
+                info_code=_text(info_code),
                 base_dir=layout.final_pdf_root,
             )
             if not _valid_pdf(path):

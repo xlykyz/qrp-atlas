@@ -323,6 +323,7 @@ def test_pdf_is_staged_invalid_existing_is_replaced_and_valid_repeat_reused(tmp_
         publish_date=datetime(2024, 1, 2).date(),
         title="An industry research report",
         industry_name="Technology",
+        info_code="I-001",
         base_dir=settings.paths.research_pdfs_dir / "research_industry",
     )
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,6 +340,78 @@ def test_pdf_is_staged_invalid_existing_is_replaced_and_valid_repeat_reused(tmp_
     assert download_calls == ["https://example.test/industry-report.pdf"]
     pdf_output = next(item for item in second.outputs if item.output_id == "research_report_industry_pdf")
     assert pdf_output.detail["reused_files"] == 1
+
+
+def test_pdf_paths_include_info_code_across_separate_runs(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    first_record = _record(info_code="I-001", attach_url="https://example.test/industry-report-1.pdf")
+    second_record = _record(info_code="I-002", attach_url="https://example.test/industry-report-2.pdf")
+    monkeypatch.setattr(
+        subject,
+        "fetch_report_detail_with_report",
+        lambda records, **kwargs: _detail_report(list(records)),
+    )
+    download_calls: list[str] = []
+
+    def download(url, destination, control):
+        download_calls.append(url)
+        control.check()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-1.7\n" + url.encode("ascii") + b"x" * 1200)
+        control.check()
+
+    monkeypatch.setattr(subject, "_download_pdf_to_stage", download)
+    parameters = {"start_date": "2024-01-02", "end_date": "2024-01-02"}
+
+    monkeypatch.setattr(
+        subject,
+        "fetch_report_list_with_report",
+        lambda *args, **kwargs: _list_report([first_record]),
+    )
+    first = _run(
+        subject.RESEARCH_INDUSTRY_REPORT_INGEST,
+        settings,
+        parameters,
+        run_id="industry-pdf-collision-1",
+    )
+    assert first.status is ResultStatus.SUCCESS
+
+    monkeypatch.setattr(
+        subject,
+        "fetch_report_list_with_report",
+        lambda *args, **kwargs: _list_report([second_record]),
+    )
+    second = _run(
+        subject.RESEARCH_INDUSTRY_REPORT_INGEST,
+        settings,
+        parameters,
+        run_id="industry-pdf-collision-2",
+    )
+    assert second.status is ResultStatus.SUCCESS
+    assert download_calls == [
+        "https://example.test/industry-report-1.pdf",
+        "https://example.test/industry-report-2.pdf",
+    ]
+
+    first_path = build_pdf_path(
+        publish_date=datetime(2024, 1, 2).date(),
+        title="An industry research report",
+        industry_name="Technology",
+        info_code="I-001",
+        base_dir=settings.paths.research_pdfs_dir / "research_industry",
+    )
+    second_path = build_pdf_path(
+        publish_date=datetime(2024, 1, 2).date(),
+        title="An industry research report",
+        industry_name="Technology",
+        info_code="I-002",
+        base_dir=settings.paths.research_pdfs_dir / "research_industry",
+    )
+    assert first_path != second_path
+    assert first_path.is_file()
+    assert second_path.is_file()
+    assert _count(settings) == 2
 
 
 def test_html_pdf_response_fails_closed_without_writing(tmp_path, monkeypatch) -> None:
