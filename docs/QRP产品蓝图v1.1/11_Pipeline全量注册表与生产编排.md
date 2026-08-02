@@ -33,7 +33,7 @@
 
 共注册 30 条，排除 29 个已核查候选项。13 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
 
-当前源码默认 catalog 中的八条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）、一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）以及一条 IRM 最新问答增量 Contract（`irm_qa_incremental`）。IRM 的真实语义是按请求时间扫描 P5W 最新 feed，以 `pid` 为唯一键增量追加；没有 provider 日期过滤或持久化水位线。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
+当前源码默认 catalog 中的十条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）、一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）、一条 IRM 最新问答增量 Contract（`irm_qa_incremental`），以及两条成员关系历史 Contract（`industry_membership_ingest`、`index_component_ingest`）。IRM 的真实语义是按请求时间扫描 P5W 最新 feed，以 `pid` 为唯一键增量追加；没有 provider 日期过滤或持久化水位线。成员关系 Contract 均只接受人工显式范围：行业成员使用 ticker 或 l1/l2/l3 行业代码（另有真实的 `is_new` 过滤），指数成分使用 index codes 与 start/end 日期；两者都不新增自动 schedule。Tushare endpoint 没有可靠的 total/page 证据，Contract 只对返回记录的范围和结构作 fail-closed 校验。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
 `task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。研究报告的实际业务入口是仓库内确定性 Python Pipeline；它们当前缺少可移植的运行时日期参数包装，因此未建立 Shadow Definition，而不是因为其业务计算需要 LLM。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
@@ -65,8 +65,8 @@
 | `system_b_pool_recognition` | READY / DETERMINISTIC | ? / none | `system-b-pools RECOGNITION`; Q + E -> P | episode / `system_b_pools_writer` |
 | `pit_backfill` | READY / MANUAL | 人工 / none | PIT backfill CLI; external/history -> Q PIT | Tushare / `quant_db_writer` |
 | `suspend_d_ingest` | READY / DETERMINISTIC | ? / none | suspend-d CLI; Tushare -> Q `suspend_d` | Tushare / `quant_db_writer` |
-| `industry_membership_ingest` | READY / MANUAL | 人工 / none | industry-membership CLI -> Q history | Tushare / `quant_db_writer` |
-| `index_component_ingest` | READY / MANUAL | 人工 / none | index-component CLI -> Q history | Tushare / `quant_db_writer` |
+| `industry_membership_ingest` | READY / MANUAL | 人工 / none | `membership_contracts` formal Contract；显式 ticker 或 l1/l2/l3 行业范围 -> Q `industry_membership_history` | Tushare + Q calendar / `quant_db_writer` |
+| `index_component_ingest` | READY / MANUAL | 人工 / none | `membership_contracts` formal Contract；显式 index codes + start/end -> Q `index_component_history` | Tushare + Q calendar / `quant_db_writer` |
 | `fundamentals_ingest` | READY / MANUAL | 人工 / none | fundamentals CLI -> Q financial tables | Tushare / `quant_db_writer` |
 | `earnings_forecast_ingest` | READY / MANUAL | 人工 / none | earnings-forecast CLI -> Q revisions/runs | Tushare / `quant_db_writer` |
 | `system_b_pool_completeness_daily` | PLANNED | ? | P `system_b_pool_run` -> health status | all three pools / none |
