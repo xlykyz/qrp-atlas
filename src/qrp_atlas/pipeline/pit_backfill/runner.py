@@ -13,15 +13,17 @@ import logging
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, Sequence
 
 import pandas as pd
 
-from qrp_atlas.config import ensure_dirs
 from qrp_atlas.config.settings import AppSettings, redact_secrets
+from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
 from qrp_atlas.pipeline.fundamentals.clean import clean_financial
 from qrp_atlas.pipeline.fundamentals.fetch import fetch_financial_by_period
 from qrp_atlas.pipeline.fundamentals.load_duckdb import load_financial
+from qrp_atlas.pipeline.fundamentals.run import ALL_TABLES
 from qrp_atlas.pipeline.index_component.clean import clean_index_component
 from qrp_atlas.pipeline.index_component.fetch import fetch_index_weight
 from qrp_atlas.pipeline.index_component.load_duckdb import load_index_component
@@ -137,9 +139,15 @@ def parse_stages(raw: str | Sequence[str] | None) -> tuple[str, ...]:
 class RateLimitedPro:
     """Proxy that paces every callable attribute access (including retries)."""
 
-    def __init__(self, pro: Any, limiter: RateLimiter):
+    def __init__(
+        self,
+        pro: Any,
+        limiter: RateLimiter,
+        execution_control: ExecutionControl | None = None,
+    ):
         self._pro = pro
         self._limiter = limiter
+        self._execution_control = execution_control
 
     def __getattr__(self, name: str):
         attr = getattr(self._pro, name)
@@ -147,13 +155,14 @@ class RateLimitedPro:
             return attr
 
         def wrapped(*args, **kwargs):
-            import time
-
             try:
-                return self._limiter.call(attr, *args, **kwargs)
-            except Exception as exc:
-                if is_rate_limit_error(exc):
-                    time.sleep(30.0)
+                return self._limiter.call(
+                    attr,
+                    *args,
+                    execution_control=self._execution_control,
+                    **kwargs,
+                )
+            except ExecutionControlError:
                 raise
 
         return wrapped
@@ -182,11 +191,23 @@ class BackfillConfig:
     index_codes: Sequence[str] = DEFAULT_INDEX_CODES
     # If true, do not call network even when raw missing (fail instead)
     offline_only: bool = False
+    # Formal callers supply these explicit scopes; None preserves legacy CLI defaults.
+    financial_tables: Sequence[str] | None = None
+    financial_periods: Sequence[str] | None = None
+    financial_start: Any = None
+    financial_end: Any = None
+    index_start: Any = None
+    index_end: Any = None
+    settings: AppSettings | None = None
+    execution_control: ExecutionControl | None = None
+    lock_path: str | Path | None = None
+    strict_scope: bool = False
 
 
 class PitBackfillRunner:
     def __init__(self, config: BackfillConfig):
         self.config = config
+        self.settings = config.settings or AppSettings.load()
         paths = default_paths(config.run_tag)
         self.db_path = Path(config.db_path or paths["db_path"])
         self.raw_dir = Path(config.raw_dir or paths["raw_dir"])
@@ -211,11 +232,22 @@ class PitBackfillRunner:
         if self._client is not None:
             return self._client
         if self._base_client is not None:
-            self._client = RateLimitedPro(self._base_client, self.limiter)
+            self._client = RateLimitedPro(
+                self._base_client,
+                self.limiter,
+                self.config.execution_control,
+            )
             return self._client
         from qrp_atlas.config import get_tushare_pro
 
-        self._client = RateLimitedPro(get_tushare_pro(), self.limiter)
+        self._client = RateLimitedPro(
+            get_tushare_pro(
+                settings=self.settings,
+                execution_control=self.config.execution_control,
+            ),
+            self.limiter,
+            self.config.execution_control,
+        )
         return self._client
 
     def build_plan(self) -> list[Batch]:
@@ -226,7 +258,26 @@ class PitBackfillRunner:
 
         batches: list[Batch] = []
         if "fundamentals" in cfg.datasets:
-            batches.extend(financial_batches())
+            tables = tuple(cfg.financial_tables or ())
+            if cfg.financial_periods is not None:
+                batches.extend(
+                    financial_batches(
+                        tables=tables or ALL_TABLES,
+                        periods=cfg.financial_periods,
+                    )
+                )
+            elif cfg.financial_start is not None or cfg.financial_end is not None:
+                if cfg.financial_start is None or cfg.financial_end is None:
+                    raise ValueError("financial_start and financial_end must be supplied together")
+                batches.extend(
+                    financial_batches(
+                        tables=tables or ALL_TABLES,
+                        start=cfg.financial_start,
+                        end=cfg.financial_end,
+                    )
+                )
+            else:
+                batches.extend(financial_batches(tables=tables or ALL_TABLES))
         if "industry" in cfg.datasets:
             codes_path = self.state_dir / "sw2021_l1_codes.json"
             if cfg.l1_codes is not None:
@@ -251,7 +302,18 @@ class PitBackfillRunner:
                     l1_codes = json.loads(codes_path.read_text(encoding="utf-8"))
             batches.extend(industry_batches(l1_codes))
         if "index" in cfg.datasets:
-            batches.extend(index_batches(index_codes=cfg.index_codes))
+            if cfg.index_start is not None or cfg.index_end is not None:
+                if cfg.index_start is None or cfg.index_end is None:
+                    raise ValueError("index_start and index_end must be supplied together")
+                batches.extend(
+                    index_batches(
+                        index_codes=cfg.index_codes,
+                        start=cfg.index_start,
+                        end=cfg.index_end,
+                    )
+                )
+            else:
+                batches.extend(index_batches(index_codes=cfg.index_codes))
         if cfg.max_batches is not None:
             batches = batches[: int(cfg.max_batches)]
         return batches
@@ -276,12 +338,25 @@ class PitBackfillRunner:
         return self.resolver
 
     def _fetch_from_api(self, batch: Batch) -> pd.DataFrame:
+        self._check_control()
         client = self._get_client()
         if batch.dataset == "fundamentals":
-            df = fetch_financial_by_period(batch.key, batch.period, client=client)
+            df = fetch_financial_by_period(
+                batch.key,
+                batch.period,
+                client=client,
+                execution_control=self.config.execution_control,
+                settings=self.settings,
+            )
             return df if df is not None else pd.DataFrame()
         if batch.dataset == "industry":
-            df = fetch_industry_membership(l1_code=batch.key, is_new=None, client=client)
+            df = fetch_industry_membership(
+                l1_code=batch.key,
+                is_new=None,
+                client=client,
+                execution_control=self.config.execution_control,
+                settings=self.settings,
+            )
             return df if df is not None else pd.DataFrame()
         if batch.dataset == "index":
             df = fetch_index_weight(
@@ -289,32 +364,116 @@ class PitBackfillRunner:
                 start_date=batch.start_date,
                 end_date=batch.end_date,
                 client=client,
+                execution_control=self.config.execution_control,
+                settings=self.settings,
             )
             return df if df is not None else pd.DataFrame()
         raise ValueError(f"unknown dataset: {batch.dataset}")
 
+    def _validate_strict_scope(self, batch: Batch, raw: pd.DataFrame | None) -> None:
+        """Fail closed on raw artifacts that do not identify their batch scope."""
+        if not self.config.strict_scope or raw is None or raw.empty:
+            return
+        if not isinstance(raw, pd.DataFrame):
+            raise ValueError(f"{batch.batch_id} returned a non-DataFrame payload")
+        if batch.dataset == "fundamentals":
+            required = {"ts_code", "end_date"}
+            if "ann_date" not in raw.columns and "f_ann_date" not in raw.columns:
+                required.add("ann_date|f_ann_date")
+            missing = sorted(required - set(raw.columns))
+            if missing:
+                raise ValueError(f"{batch.batch_id} raw schema missing {missing}")
+            periods = raw["end_date"].astype(str).str.replace("-", "", regex=False)
+            if periods.ne(str(batch.period).replace("-", "")).any():
+                raise ValueError(f"{batch.batch_id} raw end_date is outside the requested period")
+            if raw["ts_code"].isna().any() or raw["end_date"].isna().any():
+                raise ValueError(f"{batch.batch_id} raw identity fields contain nulls")
+            announcement = raw["ann_date"] if "ann_date" in raw.columns else raw["f_ann_date"]
+            if announcement.isna().any():
+                raise ValueError(f"{batch.batch_id} raw announcement field contains nulls")
+        elif batch.dataset == "industry":
+            required = {"ts_code", "in_date", "l1_code"}
+            missing = sorted(required - set(raw.columns))
+            if missing:
+                raise ValueError(f"{batch.batch_id} raw schema missing {missing}")
+            if raw["l1_code"].astype(str).str.strip().ne(str(batch.key)).any():
+                raise ValueError(f"{batch.batch_id} raw l1_code is outside the requested scope")
+        elif batch.dataset == "index":
+            required = {"index_code", "con_code", "trade_date"}
+            missing = sorted(required - set(raw.columns))
+            if missing:
+                raise ValueError(f"{batch.batch_id} raw schema missing {missing}")
+            dates = raw["trade_date"].astype(str).str.replace("-", "", regex=False)
+            start = str(batch.start_date).replace("-", "")
+            end = str(batch.end_date).replace("-", "")
+            if dates.lt(start).any() or dates.gt(end).any():
+                raise ValueError(f"{batch.batch_id} raw trade_date is outside the requested range")
+            if raw["index_code"].astype(str).str.strip().ne(str(batch.key)).any():
+                raise ValueError(f"{batch.batch_id} raw index_code is outside the requested scope")
+
     def _clean_df(self, batch: Batch, raw: pd.DataFrame) -> pd.DataFrame:
+        self._check_control()
         resolver = self._ensure_resolver()
         if raw is None or raw.empty:
             return pd.DataFrame()
         if batch.dataset == "fundamentals":
-            return clean_financial(raw, batch.key, trade_date_resolver=resolver)
+            return clean_financial(
+                raw,
+                batch.key,
+                trade_date_resolver=resolver,
+                execution_control=self.config.execution_control,
+            )
         if batch.dataset == "industry":
-            return clean_industry_membership(raw, trade_date_resolver=resolver)
+            return clean_industry_membership(
+                raw,
+                trade_date_resolver=resolver,
+                execution_control=self.config.execution_control,
+            )
         if batch.dataset == "index":
-            return clean_index_component(raw, trade_date_resolver=resolver)
+            return clean_index_component(
+                raw,
+                trade_date_resolver=resolver,
+                execution_control=self.config.execution_control,
+            )
         raise ValueError(f"unknown dataset: {batch.dataset}")
 
     def _load_df(self, batch: Batch, cleaned: pd.DataFrame) -> int:
+        self._check_control()
         if cleaned is None or cleaned.empty:
             return 0
         if batch.dataset == "fundamentals":
-            return int(load_financial(cleaned, batch.key, db_path=self.db_path, init=True))
+            return int(
+                load_financial(
+                    cleaned,
+                    batch.key,
+                    db_path=self.db_path,
+                    init=True,
+                    execution_control=self.config.execution_control,
+                )
+            )
         if batch.dataset == "industry":
-            return int(load_industry_membership(cleaned, db_path=self.db_path, init=True))
+            return int(
+                load_industry_membership(
+                    cleaned,
+                    db_path=self.db_path,
+                    init=True,
+                    execution_control=self.config.execution_control,
+                )
+            )
         if batch.dataset == "index":
-            return int(load_index_component(cleaned, db_path=self.db_path, init=True))
+            return int(
+                load_index_component(
+                    cleaned,
+                    db_path=self.db_path,
+                    init=True,
+                    execution_control=self.config.execution_control,
+                )
+            )
         raise ValueError(f"unknown dataset: {batch.dataset}")
+
+    def _check_control(self) -> None:
+        if self.config.execution_control is not None:
+            self.config.execution_control.check()
 
     def _needs_stage(self, rec: BatchRecord, stage: str) -> bool:
         if stage not in self.stages:
@@ -329,6 +488,7 @@ class PitBackfillRunner:
         return rec.stage_status(stage) not in TERMINAL_OK
 
     def _run_fetch(self, batch: Batch, rec: BatchRecord) -> BatchRecord:
+        self._check_control()
         raw_path = raw_file_path(self.raw_dir, batch.batch_id)
         rec.raw_path = str(raw_path)
         rec.set_stage(STAGE_FETCH, STATUS_RUNNING, error=None)
@@ -344,6 +504,7 @@ class PitBackfillRunner:
                         raise
                     self.logger.warning("batch=%s re-fetch after corrupt raw", batch.batch_id)
                     raw = self._fetch_from_api(batch)
+                    self._validate_strict_scope(batch, raw)
                     save_parquet(raw, raw_path)
                     offline = False
                     fetched = 0 if raw is None else len(raw)
@@ -357,9 +518,11 @@ class PitBackfillRunner:
                     raise FileNotFoundError(f"offline_only set but raw missing: {raw_path}")
                 self.logger.info("batch=%s FETCH network", batch.batch_id)
                 raw = self._fetch_from_api(batch)
+                self._validate_strict_scope(batch, raw)
                 save_parquet(raw, raw_path)
                 offline = False
             fetched = 0 if raw is None else len(raw)
+            self._validate_strict_scope(batch, raw)
             rec.fetched_rows = fetched
             if fetched == 0:
                 if not raw_path.exists():
@@ -383,6 +546,8 @@ class PitBackfillRunner:
                 offline,
             )
             return rec
+        except ExecutionControlError:
+            raise
         except Exception as exc:
             err = _sanitize_error(exc)
             if is_rate_limit_error(exc):
@@ -394,6 +559,7 @@ class PitBackfillRunner:
             return rec
 
     def _run_clean(self, batch: Batch, rec: BatchRecord) -> BatchRecord:
+        self._check_control()
         raw_path = Path(rec.raw_path) if rec.raw_path else raw_file_path(self.raw_dir, batch.batch_id)
         cleaned_path = cleaned_file_path(self.cleaned_dir, batch.batch_id)
         rec.cleaned_path = str(cleaned_path)
@@ -439,6 +605,8 @@ class PitBackfillRunner:
                 cleaned_path,
             )
             return rec
+        except ExecutionControlError:
+            raise
         except Exception as exc:
             err = _sanitize_error(exc)
             self.logger.error("batch=%s CLEAN FAILED %s", batch.batch_id, err)
@@ -448,6 +616,7 @@ class PitBackfillRunner:
             return rec
 
     def _run_load(self, batch: Batch, rec: BatchRecord) -> BatchRecord:
+        self._check_control()
         cleaned_path = Path(rec.cleaned_path) if rec.cleaned_path else cleaned_file_path(self.cleaned_dir, batch.batch_id)
         rec.cleaned_path = str(cleaned_path)
         rec.set_stage(STAGE_LOAD, STATUS_RUNNING, error=None)
@@ -465,7 +634,9 @@ class PitBackfillRunner:
             if not cleaned_path.exists():
                 raise FileNotFoundError(f"cleaned missing for load: {cleaned_path}")
             cleaned = self._load_parquet_resilient(rec, STAGE_CLEAN, cleaned_path)
+            write_started = monotonic()
             inserted = self._load_df(batch, cleaned)
+            rec.meta["database_write_seconds"] = max(0.0, monotonic() - write_started)
             rec.inserted_rows = int(inserted)
             # load success even when inserted=0 (idempotent)
             rec.set_stage(STAGE_LOAD, STATUS_SUCCESS, finished=True)
@@ -478,6 +649,8 @@ class PitBackfillRunner:
                 rec.cleaned_rows,
             )
             return rec
+        except ExecutionControlError:
+            raise
         except Exception as exc:
             err = _sanitize_error(exc)
             self.logger.error("batch=%s LOAD FAILED %s", batch.batch_id, err)
@@ -533,6 +706,7 @@ class PitBackfillRunner:
         # Reload latest multi-process state
         self.manifest.reload()
         for batch in batches:
+            self._check_control()
             rec = self.manifest.get(batch.batch_id)
             if rec is None:
                 issues.append({"batch_id": batch.batch_id, "issue": "fetch_not_terminal", "status": "missing"})
@@ -602,6 +776,7 @@ class PitBackfillRunner:
         return summary
 
     def process_batch(self, batch: Batch) -> dict[str, Any]:
+        self._check_control()
         rec = self.manifest.get(batch.batch_id)
         if rec is None:
             rec = BatchRecord.from_batch(batch)
@@ -671,6 +846,7 @@ class PitBackfillRunner:
                 pass
 
         # FETCH
+        self._check_control()
         if self._needs_stage(rec, STAGE_FETCH):
             rec = self._run_fetch(batch, rec)
             if rec.fetch_status == STATUS_FAILED:
@@ -693,6 +869,7 @@ class PitBackfillRunner:
             return self._result_from_rec(rec)
 
         # CLEAN
+        self._check_control()
         if self._needs_stage(rec, STAGE_CLEAN):
             # require fetch ok; if not ready skip (fetch may still be in another process)
             if rec.fetch_status not in TERMINAL_OK:
@@ -730,6 +907,7 @@ class PitBackfillRunner:
             self.logger.info("batch=%s skip CLEAN status=%s", batch.batch_id, rec.clean_status)
 
         # LOAD
+        self._check_control()
         if self._needs_stage(rec, STAGE_LOAD):
             if rec.clean_status not in TERMINAL_OK:
                 cleaned_p = Path(rec.cleaned_path) if rec.cleaned_path else cleaned_file_path(self.cleaned_dir, batch.batch_id)
@@ -786,13 +964,14 @@ class PitBackfillRunner:
             "fetched": rec.fetched_rows,
             "cleaned": rec.cleaned_rows,
             "inserted": rec.inserted_rows,
+            "database_write_seconds": float(rec.meta.get("database_write_seconds", 0.0) or 0.0),
             "error": rec.error,
             "raw_path": rec.raw_path,
             "cleaned_path": rec.cleaned_path,
         }
 
     def run(self) -> dict[str, Any]:
-        ensure_dirs()
+        self._check_control()
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.cleaned_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -880,6 +1059,7 @@ class PitBackfillRunner:
                     self.db_path,
                     state_dir=self.state_dir,
                     tag=self.config.run_tag,
+                    lock_path=self.config.lock_path,
                 )
                 self.logger.info(
                     "load backup ready path=%s size=%s reused=%s",
@@ -921,7 +1101,7 @@ class PitBackfillRunner:
         results: list[dict[str, Any]] = []
         # DB lock only required when loading; clean may open calendar read-only.
         if STAGE_LOAD in self.stages:
-            lock_cm = pipeline_db_lock()
+            lock_cm = pipeline_db_lock(self.config.lock_path)
         else:
             from contextlib import nullcontext
 
@@ -929,6 +1109,7 @@ class PitBackfillRunner:
 
         with lock_cm:
             for batch in batches:
+                self._check_control()
                 # Revalidate terminal artifacts before skip decision so corrupt/missing
                 # raw or cleaned files are reopened even when stage status is success.
                 rec = self.manifest.get(batch.batch_id)
@@ -968,6 +1149,7 @@ class PitBackfillRunner:
                     )
                     continue
                 results.append(self.process_batch(batch))
+                self._check_control()
 
         counts = self.manifest.counts()
         stage_counts = self.manifest.stage_counts()
@@ -976,6 +1158,9 @@ class PitBackfillRunner:
             "cleaned_rows": sum(int(r.get("cleaned", 0) or 0) for r in results),
             "inserted_rows": sum(int(r.get("inserted", 0) or 0) for r in results),
             "processed": len(results),
+            "database_write_seconds": sum(
+                float(r.get("database_write_seconds", 0.0) or 0.0) for r in results
+            ),
         }
         out: dict[str, Any] = {
             "mode": self.config.mode,

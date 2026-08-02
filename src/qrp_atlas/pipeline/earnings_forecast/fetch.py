@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
 import pandas as pd
 
 from qrp_atlas.config import get_tushare_pro
+from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
 
 # Business source identity is endpoint-agnostic.
 # Endpoint name is retained only in fetch diagnostics / raw metadata.
@@ -38,6 +41,16 @@ OPTIONAL_RAW_FIELDS = (
 REQUIRED_RAW_FIELDS = CORE_RAW_FIELDS + OPTIONAL_RAW_FIELDS
 
 
+@dataclass(slots=True)
+class ForecastFetchReport:
+    """Provider work counters for one explicit earnings-forecast invocation."""
+
+    api_requests: int = 0
+    batches: int = 0
+    retries: int = 0
+    rows_read: int = 0
+
+
 class ForecastPermissionError(PermissionError):
     """Raised when Tushare returns a permission / points / auth failure."""
 
@@ -56,6 +69,18 @@ _PERMISSION_MARKERS = (
     "点数不足",
     "token",
 )
+
+
+def _check(execution_control: ExecutionControl | None) -> None:
+    if execution_control is not None:
+        execution_control.check()
+
+
+def _wait(execution_control: ExecutionControl | None, seconds: float) -> None:
+    if execution_control is None:
+        time.sleep(seconds)
+    else:
+        execution_control.wait(threading.Event(), timeout=seconds)
 
 
 def _is_permission_error(exc: BaseException) -> bool:
@@ -78,17 +103,25 @@ def _call_with_retry(
     retries: int = 5,
     base_sleep: float = 1.2,
     endpoint: str,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     last_err: Exception | None = None
     for i in range(retries):
+        _check(execution_control)
+        if report is not None:
+            report.api_requests += 1
         try:
             df = func(**kwargs)
+            _check(execution_control)
             if df is None:
                 return pd.DataFrame()
             if not isinstance(df, pd.DataFrame):
                 raise ForecastApiError(f"{endpoint} returned non-DataFrame: {type(df)!r}")
             return df
+        except ExecutionControlError:
+            raise
         except Exception as exc:  # network / gateway / permission
             if _is_permission_error(exc):
                 raise ForecastPermissionError(
@@ -97,7 +130,9 @@ def _call_with_retry(
             last_err = exc
             if i + 1 >= retries:
                 break
-            time.sleep(base_sleep * (i + 1))
+            if report is not None:
+                report.retries += 1
+            _wait(execution_control, base_sleep * (i + 1))
     if last_err is not None:
         raise ForecastApiError(f"{endpoint} failed after retries: {last_err}") from last_err
     return pd.DataFrame()
@@ -129,14 +164,24 @@ def fetch_forecast_vip(
     *,
     client=None,
     tickers: Sequence[str] | None = None,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Market-wide historical pull by report period via forecast_vip."""
     period = _normalize_yyyymmdd(period, field_name="period")
-    pro = client or get_tushare_pro()
+    _check(execution_control)
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, ENDPOINT_FORECAST_VIP, None)
     if method is None:
         raise ForecastApiError(f"client missing endpoint {ENDPOINT_FORECAST_VIP}")
-    df = _call_with_retry(method, endpoint=ENDPOINT_FORECAST_VIP, period=period)
+    df = _call_with_retry(
+        method,
+        endpoint=ENDPOINT_FORECAST_VIP,
+        period=period,
+        execution_control=execution_control,
+        report=report,
+    )
     df = _ensure_raw_columns(df)
     if tickers:
         ticker_set = set(tickers)
@@ -145,6 +190,10 @@ def fetch_forecast_vip(
         df = df.copy()
         df.attrs["fetch_endpoint"] = ENDPOINT_FORECAST_VIP
         df.attrs["business_source"] = SOURCE_BUSINESS
+    if report is not None:
+        report.batches += 1
+        report.rows_read += len(df)
+    _check(execution_control)
     return df.reset_index(drop=True)
 
 
@@ -156,9 +205,13 @@ def fetch_forecast(
     start_date: str | None = None,
     end_date: str | None = None,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Single-stock / ann_date / targeted forecast pull."""
-    pro = client or get_tushare_pro()
+    _check(execution_control)
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
     method = getattr(pro, ENDPOINT_FORECAST, None)
     if method is None:
         raise ForecastApiError(f"client missing endpoint {ENDPOINT_FORECAST}")
@@ -175,12 +228,22 @@ def fetch_forecast(
         kwargs["end_date"] = _normalize_yyyymmdd(end_date, field_name="end_date")
     if not kwargs:
         raise ValueError("at least one of ts_code/period/ann_date/start_date/end_date is required")
-    df = _call_with_retry(method, endpoint=ENDPOINT_FORECAST, **kwargs)
+    df = _call_with_retry(
+        method,
+        endpoint=ENDPOINT_FORECAST,
+        execution_control=execution_control,
+        report=report,
+        **kwargs,
+    )
     df = _ensure_raw_columns(df)
     if not df.empty:
         df = df.copy()
         df.attrs["fetch_endpoint"] = ENDPOINT_FORECAST
         df.attrs["business_source"] = SOURCE_BUSINESS
+    if report is not None:
+        report.batches += 1
+        report.rows_read += len(df)
+    _check(execution_control)
     return df.reset_index(drop=True)
 
 
@@ -191,6 +254,9 @@ def fetch_forecast_by_tickers(
     start_date: str | None = None,
     end_date: str | None = None,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Loop forecast(ts_code=...) for targeted debug / gap-fill."""
     frames: list[pd.DataFrame] = []
@@ -198,11 +264,15 @@ def fetch_forecast_by_tickers(
     if periods is not None:
         period_set = {_normalize_yyyymmdd(p, field_name="period") for p in periods}
     for ts_code in tickers:
+        _check(execution_control)
         df = fetch_forecast(
             ts_code=ts_code,
             start_date=start_date,
             end_date=end_date,
             client=client,
+            execution_control=execution_control,
+            report=report,
+            settings=settings,
         )
         if df is None or df.empty:
             continue
@@ -211,6 +281,7 @@ def fetch_forecast_by_tickers(
             df = df.loc[mask].copy()
         if not df.empty:
             frames.append(df)
+        _check(execution_control)
     if not frames:
         return pd.DataFrame(columns=list(REQUIRED_RAW_FIELDS))
     out = pd.concat(frames, ignore_index=True)
@@ -224,9 +295,18 @@ def fetch_forecast_by_ann_date(
     *,
     client=None,
     tickers: Sequence[str] | None = None,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Daily incremental candidate: forecast(ann_date=YYYYMMDD)."""
-    df = fetch_forecast(ann_date=ann_date, client=client)
+    df = fetch_forecast(
+        ann_date=ann_date,
+        client=client,
+        execution_control=execution_control,
+        report=report,
+        settings=settings,
+    )
     if tickers:
         ticker_set = set(tickers)
         df = df[df["ts_code"].isin(ticker_set)].copy()
@@ -242,6 +322,9 @@ def fetch_earnings_forecast(
     start_date: str | None = None,
     end_date: str | None = None,
     client=None,
+    execution_control: ExecutionControl | None = None,
+    report: ForecastFetchReport | None = None,
+    settings=None,
 ) -> pd.DataFrame:
     """Unified fetch entry for earnings forecast.
 
@@ -254,7 +337,14 @@ def fetch_earnings_forecast(
         if not periods:
             raise ValueError("periods is required when mode='period'")
         frames = [
-            fetch_forecast_vip(p, client=client, tickers=tickers)
+            fetch_forecast_vip(
+                p,
+                client=client,
+                tickers=tickers,
+                execution_control=execution_control,
+                report=report,
+                settings=settings,
+            )
             for p in periods
         ]
         frames = [f for f in frames if f is not None and not f.empty]
@@ -273,12 +363,22 @@ def fetch_earnings_forecast(
             start_date=start_date,
             end_date=end_date,
             client=client,
+            execution_control=execution_control,
+            report=report,
+            settings=settings,
         )
     if mode == "ann_date":
         if not ann_dates:
             raise ValueError("ann_dates is required when mode='ann_date'")
         frames = [
-            fetch_forecast_by_ann_date(d, client=client, tickers=tickers)
+            fetch_forecast_by_ann_date(
+                d,
+                client=client,
+                tickers=tickers,
+                execution_control=execution_control,
+                report=report,
+                settings=settings,
+            )
             for d in ann_dates
         ]
         frames = [f for f in frames if f is not None and not f.empty]

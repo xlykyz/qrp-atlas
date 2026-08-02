@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Callable, TypeVar
 
+from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
+
 T = TypeVar("T")
 
 # User limit is 100/min; operate at 80/min => >= 0.75s between requests.
@@ -25,18 +27,35 @@ class RateLimiter:
         self._last_call = 0.0
         self.call_count = 0
 
-    def wait(self) -> None:
+    def wait(self, execution_control: ExecutionControl | None = None) -> None:
         with self._lock:
+            if execution_control is not None:
+                execution_control.check()
             now = time.monotonic()
             elapsed = now - self._last_call
             if elapsed < self.min_interval:
-                time.sleep(self.min_interval - elapsed)
+                delay = self.min_interval - elapsed
+                if execution_control is None:
+                    time.sleep(delay)
+                else:
+                    execution_control.wait(threading.Event(), timeout=delay)
             self._last_call = time.monotonic()
             self.call_count += 1
+            if execution_control is not None:
+                execution_control.check()
 
-    def call(self, func: Callable[..., T], *args, **kwargs) -> T:
-        self.wait()
-        return func(*args, **kwargs)
+    def call(
+        self,
+        func: Callable[..., T],
+        *args,
+        execution_control: ExecutionControl | None = None,
+        **kwargs,
+    ) -> T:
+        self.wait(execution_control)
+        result = func(*args, **kwargs)
+        if execution_control is not None:
+            execution_control.check()
+        return result
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
@@ -60,14 +79,19 @@ def call_with_rate_limit(
     *args,
     retries: int = DEFAULT_MAX_RETRIES,
     backoff_base: float = DEFAULT_BACKOFF_BASE,
+    execution_control: ExecutionControl | None = None,
     **kwargs,
 ) -> T:
     """Invoke func under rate limit; retries and backs off on transient failures."""
     last_err: BaseException | None = None
     attempts = max(1, int(retries))
     for i in range(attempts):
+        if execution_control is not None:
+            execution_control.check()
         try:
-            return limiter.call(func, *args, **kwargs)
+            return limiter.call(func, *args, execution_control=execution_control, **kwargs)
+        except ExecutionControlError:
+            raise
         except Exception as exc:  # network / gateway / rate limit
             last_err = exc
             if i + 1 >= attempts:
@@ -75,6 +99,9 @@ def call_with_rate_limit(
             sleep_s = backoff_base * (i + 1)
             if is_rate_limit_error(exc):
                 sleep_s = max(sleep_s, 30.0 * (i + 1))
-            time.sleep(sleep_s)
+            if execution_control is None:
+                time.sleep(sleep_s)
+            else:
+                execution_control.wait(threading.Event(), timeout=sleep_s)
     assert last_err is not None
     raise last_err

@@ -44,6 +44,7 @@ from qrp_atlas.pipeline.pit_utils import (
     stable_hash,
     to_date,
 )
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 
 EVENT_TYPE_EARNINGS_FORECAST = "earnings_forecast"
 TIME_PRECISION_DATE = "date"
@@ -155,8 +156,11 @@ def clean_earnings_forecast(
     open_dates: Sequence | None = None,
     ingested_at: datetime | None = None,
     source: str = SOURCE_BUSINESS,
+    execution_control: ExecutionControl | None = None,
 ) -> pd.DataFrame:
     """Map raw Tushare forecast rows to earnings_forecast_event schema."""
+    if execution_control is not None:
+        execution_control.check()
     if df is None or df.empty:
         return pd.DataFrame(columns=[])
 
@@ -224,6 +228,8 @@ def clean_earnings_forecast(
 
     # Range consistency
     for idx, row in out.iterrows():
+        if execution_control is not None:
+            execution_control.check()
         pmin, pmax = row[PROFIT_CHANGE_MIN], row[PROFIT_CHANGE_MAX]
         if pmin is not None and pmax is not None and pmin > pmax:
             raise EarningsForecastDataQualityError(
@@ -244,6 +250,8 @@ def clean_earnings_forecast(
     source_ids = []
     revision_ids = []
     for _, row in out.iterrows():
+        if execution_control is not None:
+            execution_control.check()
         sid = event_series_id(row[TICKER], row[REPORT_PERIOD])
         srid = source_record_id(
             ticker=row[TICKER],
@@ -279,4 +287,6 @@ def clean_earnings_forecast(
     out = align_to_schema(out, "earnings_forecast_event", fill_missing_optional=True, drop_extra=True)
     out = canonicalize(out, "earnings_forecast_event")
     out = quick_validate(out, "earnings_forecast_event", allow_extra=False)
+    if execution_control is not None:
+        execution_control.check()
     return out.reset_index(drop=True)
