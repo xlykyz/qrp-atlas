@@ -33,6 +33,7 @@ from qrp_atlas.pipeline.pit_utils import (
     stable_hash,
     to_date,
 )
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 
 LEVEL_FIELDS = {
     1: ("l1_code", "l1_name"),
@@ -48,7 +49,10 @@ def clean_industry_membership(
     open_dates: Sequence | None = None,
     ingested_at: datetime | None = None,
     classification_system: str = "sw2021",
+    execution_control: ExecutionControl | None = None,
 ) -> pd.DataFrame:
+    if execution_control is not None:
+        execution_control.check()
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -81,7 +85,11 @@ def clean_industry_membership(
     now = ingested_at or datetime.now(timezone.utc).replace(tzinfo=None)
     rows: list[dict] = []
     for _, r in raw.iterrows():
+        if execution_control is not None:
+            execution_control.check()
         for level, (code_col, name_col) in LEVEL_FIELDS.items():
+            if execution_control is not None:
+                execution_control.check()
             code = r.get(code_col)
             name = r.get(name_col)
             if code is None or (isinstance(code, float) and pd.isna(code)) or str(code).strip() == "":
@@ -123,6 +131,8 @@ def clean_industry_membership(
 
     if not rows:
         return pd.DataFrame()
+    if execution_control is not None:
+        execution_control.check()
     out = pd.DataFrame(rows)
     out = out.drop_duplicates(subset=[REVISION_ID], keep="last")
     out = align_to_schema(out, "industry_membership_history", fill_missing_optional=True, drop_extra=True)

@@ -39,6 +39,7 @@ from qrp_atlas.pipeline.pit_utils import (
     stable_hash,
     to_date,
 )
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 
 
 def clean_index_component(
@@ -47,7 +48,10 @@ def clean_index_component(
     trade_date_resolver: NextTradeDateResolver | None = None,
     open_dates: Sequence | None = None,
     ingested_at: datetime | None = None,
+    execution_control: ExecutionControl | None = None,
 ) -> pd.DataFrame:
+    if execution_control is not None:
+        execution_control.check()
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -91,6 +95,9 @@ def clean_index_component(
     out[SOURCE_RECORD_ID] = source_ids
     out[REVISION_ID] = revision_ids
     out = out.drop_duplicates(subset=[REVISION_ID], keep="last")
+
+    if execution_control is not None:
+        execution_control.check()
 
     out = align_to_schema(out, "index_component_history", fill_missing_optional=True, drop_extra=True)
     out = canonicalize(out, "index_component_history")
