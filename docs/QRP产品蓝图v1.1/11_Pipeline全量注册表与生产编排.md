@@ -33,7 +33,7 @@
 
 共注册 30 条，排除 29 个已核查候选项。13 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
 
-当前源码默认 catalog 中的七条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）以及一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
+当前源码默认 catalog 中的八条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）、一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）以及一条 IRM 最新问答增量 Contract（`irm_qa_incremental`）。IRM 的真实语义是按请求时间扫描 P5W 最新 feed，以 `pid` 为唯一键增量追加；没有 provider 日期过滤或持久化水位线。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
 `task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。研究报告的实际业务入口是仓库内确定性 Python Pipeline；它们当前缺少可移植的运行时日期参数包装，因此未建立 Shadow Definition，而不是因为其业务计算需要 LLM。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
@@ -55,7 +55,7 @@
 | `index_daily_update` | LEGACY / DETERMINISTIC | 20:00 工作日 / `0450c10ccb5f` | `fetch_index_daily.py`; Tushare -> Q `index_daily` | Tushare / `quant_db_writer` |
 | `zt_dt_pool_daily` | LEGACY / DETERMINISTIC | 15:30 工作日 / `3c40deda0c79` | `fetch_zt_dt_pool.py`; Tushare -> Q pools | Tushare / `quant_db_writer` |
 | `daily_basic_update` | LEGACY / DETERMINISTIC | 17:15 工作日 / `4afb74bd0769` | `daily_basic.run`; Q snapshot + Tushare -> Q `daily_basic` | market daily / `quant_db_writer` |
-| `irm_qa_incremental` | LEGACY / DETERMINISTIC | 每 5 分钟 08:00-21:59 / `3fdbd779c4da` | `irm_qa.run`; P5W -> Q Q&A | P5W / `quant_db_writer` |
+| `irm_qa_incremental` | LEGACY / DETERMINISTIC | 每 5 分钟 08:00-21:59 / `3fdbd779c4da` | `irm_qa_contracts` 进程内 executor（`irm_qa.run` 为 Hermes 兼容入口）；P5W 最新 feed -> Q Q&A，`pid` 幂等追加 | P5W / `quant_db_writer` |
 | `system_b_state_readiness` | READY / HEALTH_CHECK | 18:30 工作日示例 / none | `system-b readiness`; Q `stock_info`、`trading_calendar`、`daily_market_snapshot`、`adj_factor_changes`、`suspend_d` read-only | market daily + adj factor / none |
 | `system_b_state_daily` | READY / DETERMINISTIC | 18:30 工作日示例 / none | `system-b run-daily`; Q state tables | readiness / `quant_db_writer` |
 | `system_b_state_initialize` | READY / MANUAL | 人工 / none | `system-b initialize`; Q state tables | none / `quant_db_writer` |
@@ -111,8 +111,8 @@ flowchart LR
 
 | Pipeline | Definition 原因 | 不纳入的原因 |
 | --- | --- | --- |
-| `market_daily_update`、`adj_factor_daily`、`zt_dt_pool_daily`、`daily_basic_update`、`index_daily_update`、`irm_qa_incremental` | 历史上已证明为无参数、确定性 argv 的兼容 Definition | 全部 disabled；不是正式 Contract 入口，未测 timeout/性能预算保留空值 |
-| CNINFO 和研究报告 | 无 | 当前 shell 负责动态日期参数；Foundation 尚无经批准的参数模板/仓库 wrapper |
+| `market_daily_update`、`adj_factor_daily`、`zt_dt_pool_daily`、`daily_basic_update`、`index_daily_update`、`irm_qa_incremental` | 历史上已证明为无参数、确定性 argv 的兼容 Definition | 全部 disabled；正式 source Contract 与兼容 Definition 分离，不能据此推导生产启用；其余历史 Definition 的 timeout/性能证据仍可能为空 |
+| CNINFO 和研究报告 | CNINFO 已有正式 source Contract；研究报告仍是确定性 Python 入口 | 当前没有经批准的部署参数模板/仓库 wrapper，因此不生成生产 Definition 或切换调度权 |
 | System B state、episode、pools | 无 | CLI 需要 trade date、路径或范围；尚未定义生产配置和验收时点 |
 | Agent summary/health | 无 | Agent prompt 不是确定性 CLI，且不应成为数据任务成功条件 |
 
@@ -142,10 +142,10 @@ System B readiness 的五张真实输入表为 `stock_info`、`trading_calendar`
 
 - CNINFO、研究和 System B 的可移植 runtime 参数包装与实际工作目录；
 - System B episode、三池、完整性检查的日常 schedule、超时、重试和新鲜度门槛；
-- 所有任务的端到端 timeout、性能预算和历史耗时（目前没有可用测量历史）；
+- 除已明确 source-contract benchmark 的 Contract 外，所有任务的端到端 timeout、性能预算和历史耗时（目前没有可用测量历史）；
 - 研究 Pipeline 的精确表级输入输出、失败传播和最终退出语义；
 - Agent 报告中哪些内容应拆为确定性检查，哪些只保留解释用途；
-- `zt_dt_pool_daily`、`daily_basic_update`、`irm_qa_incremental` 的精确重复执行/失败恢复语义。
+- `zt_dt_pool_daily`、`daily_basic_update` 的精确重复执行/失败恢复语义。
 - `suspend_d` 的日常更新与新鲜度证明；System B 在该前置关闭前不得启用。
 
 这些事项不允许用 schedule 错峰或猜测的性能数字替代。

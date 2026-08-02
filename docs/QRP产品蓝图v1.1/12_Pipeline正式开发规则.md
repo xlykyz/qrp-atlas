@@ -4,7 +4,7 @@
 
 本文件是 QRP Atlas v1.1 数据 Pipeline 的权威开发规则。任何新增 Pipeline，或任何会改变 Pipeline 生产语义的修改，必须同时满足本文件、源码 `PipelineContract` 和公共契约测试。
 
-本规则建立的是正式开发门禁、机器可读合同、公共校验和模板；不是一次业务迁移。本轮不改造既有行情、复权、CNINFO、IRM、研究、System B 或其他业务 Pipeline，不修改 Hermes，不启用 Production Definition，不部署 systemd，也不访问生产数据路径。
+本规则建立的是正式开发门禁、机器可读合同、公共校验和模板；它本身不是生产切换声明。当前工作包已将六条市场数据、CNINFO 和 IRM 纳入源码正式 Contract，但仍不修改 Hermes，不启用 Production Definition，不部署 systemd，也不访问生产数据路径；研究、System B 和其他业务仍按各自工作包推进。
 
 正式上线采用单一二元门禁：一个 Pipeline 完整通过本规则、契约校验和公共验收，才能被放入部署选择清单；否则不得被正式 QRP runtime 调度。现有生产继续由 Hermes 保持原有行为，直到全部计划内 Pipeline 都完成同一标准的改造并统一验收、统一切换。
 
@@ -251,7 +251,7 @@ qrp-atlas-jobs run job_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-jobs validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 只显式导入 `qrp_atlas.pipeline.market_data_contracts`，其中已有 `market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest` 六条通过正式验收的基础数据 Contract；本轮只收口通用规则，不重写这六条的业务定义，它们的 `quant_db` 写入仍明确使用 `quant_db_writer`。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这六条任务新增部署选择、Production Definition、systemd 或 Hermes 变更。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts` 和 `qrp_atlas.pipeline.irm_qa_contracts`，共包含八条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest` 和 `irm_qa_incremental`。IRM 使用 P5W 最新 feed、`pid` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；其计划日期只是请求观察标签，不能被误读为 provider 日期过滤。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ## 7. 公共测试规则
 

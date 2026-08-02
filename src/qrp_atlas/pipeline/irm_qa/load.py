@@ -7,16 +7,89 @@ load.py - 互动问答数据入库模块
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pandas as pd
 
+from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.contracts import (
     CREATED_AT,
+    INTERACTION_PID,
     IRM_INTERACTION_QA,
     align_to_schema,
     quick_validate,
 )
+
+
+def prepare_interaction_qa_frame(
+    records: Sequence[Mapping[str, Any]] | pd.DataFrame,
+) -> pd.DataFrame:
+    """Align and validate cleaned records against the table contract."""
+
+    frame = records.copy() if isinstance(records, pd.DataFrame) else pd.DataFrame(records)
+    if frame.empty and not len(frame.columns):
+        return pd.DataFrame(columns=IRM_INTERACTION_QA.column_names())
+    frame = align_to_schema(
+        frame,
+        IRM_INTERACTION_QA.name,
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
+    return quick_validate(frame, IRM_INTERACTION_QA.name, allow_extra=False)
+
+
+def append_interaction_qa(
+    con: Any,
+    records: Sequence[Mapping[str, Any]] | pd.DataFrame,
+    *,
+    execution_control: ExecutionControl | None = None,
+) -> int:
+    """Append cleaned records and return the actual number of inserted rows.
+
+    The caller owns the transaction. Existing ``pid`` rows are preserved by
+    ``INSERT OR IGNORE``; this function does not implement revision updates.
+    """
+
+    if execution_control is not None:
+        execution_control.check()
+    prepared = prepare_interaction_qa_frame(records)
+    if prepared.empty:
+        return 0
+    prepared = prepared.drop_duplicates(
+        subset=list(IRM_INTERACTION_QA.primary_key),
+        keep="first",
+    ).reset_index(drop=True)
+
+    table_name = IRM_INTERACTION_QA.name
+    view_name = "irm_contract_rows"
+    con.register(view_name, prepared)
+    try:
+        if execution_control is not None:
+            execution_control.check()
+        existing = int(
+            con.execute(
+                f"""
+                SELECT COUNT(DISTINCT incoming.{INTERACTION_PID})
+                FROM {view_name} AS incoming
+                JOIN {table_name} AS target
+                  ON target.{INTERACTION_PID} = incoming.{INTERACTION_PID}
+                """
+            ).fetchone()[0]
+        )
+        columns = [column for column in IRM_INTERACTION_QA.column_names() if column != CREATED_AT]
+        column_sql = ", ".join(columns)
+        con.execute(
+            f"""
+            INSERT OR IGNORE INTO {table_name} ({column_sql})
+            SELECT {column_sql} FROM {view_name}
+            """
+        )
+        if execution_control is not None:
+            execution_control.check()
+        return max(0, len(prepared) - existing)
+    finally:
+        con.unregister(view_name)
 
 
 def upsert_interaction_qa(
@@ -39,14 +112,7 @@ def upsert_interaction_qa(
         return 0
 
     table_name = IRM_INTERACTION_QA.name
-    df = pd.DataFrame(records)
-    df = align_to_schema(
-        df,
-        table_name,
-        fill_missing_optional=True,
-        drop_extra=True,
-    )
-    df = quick_validate(df, table_name, allow_extra=False)
+    df = prepare_interaction_qa_frame(records)
 
     columns = [c for c in IRM_INTERACTION_QA.column_names() if c != CREATED_AT]
     col_names = ", ".join(columns)

@@ -1,13 +1,4 @@
-"""
-fetch.py - 全景网互动问答数据抓取模块
-
-接口限制（见 docs/全景网互动问答接口调研报告.md）：
-- 活跃深度有限，默认全量抓取当前可见数据
-- rows 硬截断为 10，必须分页
-- page 越界会循环返回第一页数据，需用 pid 去重判断结束
-- total 字段固定无效
-- since_date 可选，一般不用
-"""
+"""Strict P5W latest-reply feed fetching with pagination evidence."""
 
 from __future__ import annotations
 
@@ -16,15 +7,67 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
+
+from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
+from qrp_atlas.pipeline.contracts import ContractError
 
 from .config import (
     P5W_HEADERS,
     P5W_MAX_PAGES,
     P5W_PAGE_SIZE,
+    P5W_PROVIDER_MAX_RETRIES,
+    P5W_REQUEST_TIMEOUT,
+    P5W_RETRY_BACKOFF_BASE_SECONDS,
     P5W_URL,
     p5w_sleep_interval,
 )
+
+
+P5W_REQUIRED_PROVIDER_FIELDS: tuple[str, ...] = (
+    "companyShortname",
+    "companyCode",
+    "nickname",
+    "content",
+    "replyContent",
+    "replyerTimeStr",
+    "questionerTimeStr",
+    "pid",
+)
+P5W_REQUIRED_NON_EMPTY_FIELDS: tuple[str, ...] = (
+    "companyCode",
+    "replyerTimeStr",
+    "pid",
+)
+
+
+@dataclass(slots=True)
+class InteractionQAFetchReport:
+    """Observable provider work for one latest-feed scan."""
+
+    api_requests: int = 0
+    pages_fetched: int = 0
+    rows_read: int = 0
+    unique_rows: int = 0
+    retries: int = 0
+    stop_reason: str | None = None
+
+
+def _check(execution_control: ExecutionControl | None) -> None:
+    if execution_control is not None:
+        execution_control.check()
+
+
+def _wait(
+    execution_control: ExecutionControl | None,
+    seconds: float,
+) -> None:
+    if execution_control is None:
+        time.sleep(seconds)
+        return
+    execution_control.wait(execution_control.cancel_event, seconds)
 
 
 def _post_page(
@@ -32,9 +75,12 @@ def _post_page(
     *,
     company_code: str = "",
     keywords: str = "",
-    timeout: float = 15.0,
+    timeout: float = P5W_REQUEST_TIMEOUT,
+    execution_control: ExecutionControl | None = None,
 ) -> dict[str, Any]:
-    """请求单页互动问答数据。"""
+    """Request one P5W page while honoring the invocation deadline."""
+
+    _check(execution_control)
     payload = {
         "page": str(page),
         "rows": str(P5W_PAGE_SIZE),
@@ -50,8 +96,190 @@ def _post_page(
         headers=P5W_HEADERS,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    bounded_timeout = (
+        execution_control.bounded_timeout(timeout)
+        if execution_control is not None
+        else timeout
+    )
+    if bounded_timeout is not None and bounded_timeout <= 0:
+        _check(execution_control)
+        raise TimeoutError("P5W request deadline elapsed")
+    with urllib.request.urlopen(req, timeout=bounded_timeout) as resp:
+        status = getattr(resp, "status", None)
+        if status is not None and status != 200:
+            raise RuntimeError(f"P5W returned HTTP {status}")
+        body_bytes = resp.read()
+    _check(execution_control)
+    return json.loads(body_bytes.decode("utf-8"))
+
+
+def _validate_page_response(data: object, *, page: int) -> list[dict[str, Any]]:
+    if not isinstance(data, Mapping):
+        raise ContractError("IRM_PROVIDER_RESPONSE_INVALID", f"page {page} is not an object")
+    if data.get("success") is not True:
+        message = str(data.get("message") or "provider returned success=false")
+        raise ContractError("IRM_PROVIDER_RESPONSE_FAILED", f"page {page}: {message}")
+    rows = data.get("rows")
+    if not isinstance(rows, list):
+        raise ContractError("IRM_PROVIDER_RESPONSE_INVALID", f"page {page} rows is not a list")
+
+    validated: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ContractError(
+                "IRM_PROVIDER_SCHEMA_MISSING",
+                f"page {page} row {index} is not an object",
+            )
+        missing = [field for field in P5W_REQUIRED_PROVIDER_FIELDS if field not in row]
+        if missing:
+            raise ContractError(
+                "IRM_PROVIDER_SCHEMA_MISSING",
+                f"page {page} row {index} missing {','.join(missing)}",
+            )
+        for field in P5W_REQUIRED_NON_EMPTY_FIELDS:
+            if not str(row.get(field) or "").strip():
+                raise ContractError(
+                    "IRM_PROVIDER_SCHEMA_MISSING",
+                    f"page {page} row {index} has empty {field}",
+                )
+        validated.append(dict(row))
+    return validated
+
+
+def _fetch_page_with_retries(
+    page: int,
+    *,
+    company_code: str,
+    keywords: str,
+    timeout: float,
+    max_retries: int,
+    execution_control: ExecutionControl | None,
+    report: InteractionQAFetchReport,
+) -> list[dict[str, Any]]:
+    last_error: Exception | None = None
+    for retry_index in range(max_retries + 1):
+        _check(execution_control)
+        report.api_requests += 1
+        try:
+            data = _post_page(
+                page,
+                company_code=company_code,
+                keywords=keywords,
+                timeout=timeout,
+                execution_control=execution_control,
+            )
+            rows = _validate_page_response(data, page=page)
+            report.pages_fetched += 1
+            return rows
+        except ExecutionControlError:
+            raise
+        except ContractError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if retry_index >= max_retries:
+                break
+            report.retries += 1
+            _wait(
+                execution_control,
+                P5W_RETRY_BACKOFF_BASE_SECONDS * (3**retry_index),
+            )
+
+    detail = type(last_error).__name__ if last_error is not None else "unknown error"
+    raise ContractError("IRM_PROVIDER_REQUEST_FAILED", f"page {page}: {detail}") from last_error
+
+
+def fetch_interaction_qa_with_report(
+    *,
+    since_date: str | None = None,
+    company_code: str = "",
+    keywords: str = "",
+    max_pages: int = P5W_MAX_PAGES,
+    max_retries: int = P5W_PROVIDER_MAX_RETRIES,
+    timeout: float = P5W_REQUEST_TIMEOUT,
+    execution_control: ExecutionControl | None = None,
+) -> tuple[list[dict[str, Any]], InteractionQAFetchReport]:
+    """Scan the provider's latest feed and return records plus work metrics.
+
+    The provider's ``total`` field is intentionally ignored because the local
+    investigation found it is not a reliable total. A full repeated page is a
+    known provider wrap-around terminator. A partial overlap, malformed page,
+    failed page, or exhausted page limit is not sufficient evidence of a
+    complete scan and fails closed.
+    """
+
+    if max_pages <= 0 or max_retries < 0 or timeout <= 0:
+        raise ContractError("IRM_PROVIDER_CONFIGURATION_INVALID")
+
+    page = 1
+    all_records: list[dict[str, Any]] = []
+    seen_pids: set[str] = set()
+    report = InteractionQAFetchReport()
+
+    while page <= max_pages:
+        _check(execution_control)
+        rows = _fetch_page_with_retries(
+            page,
+            company_code=company_code,
+            keywords=keywords,
+            timeout=timeout,
+            max_retries=max_retries,
+            execution_control=execution_control,
+            report=report,
+        )
+        _check(execution_control)
+        report.rows_read += len(rows)
+
+        if not rows:
+            report.stop_reason = "empty_page"
+            break
+
+        page_pids = [str(row["pid"]).strip() for row in rows]
+        if len(page_pids) != len(set(page_pids)):
+            raise ContractError("IRM_PROVIDER_DUPLICATE_PAGE", f"page {page} contains duplicate pid values")
+        overlap = set(page_pids) & seen_pids
+        if overlap:
+            if len(overlap) == len(page_pids):
+                report.stop_reason = "full_page_overlap"
+                break
+            raise ContractError(
+                "IRM_PROVIDER_PARTIAL_PAGE_OVERLAP",
+                f"page {page} overlaps {len(overlap)} prior pid values",
+            )
+
+        stop_by_date = False
+        for row in rows:
+            reply_time = str(row.get("replyerTimeStr") or "").strip()
+            if since_date and reply_time and reply_time[:10] < since_date:
+                stop_by_date = True
+                continue
+            seen_pids.add(str(row["pid"]).strip())
+            all_records.append(row)
+
+        if stop_by_date:
+            report.stop_reason = "since_date"
+            break
+        if len(rows) < P5W_PAGE_SIZE:
+            report.stop_reason = "short_page"
+            break
+        if page == max_pages:
+            raise ContractError(
+                "IRM_PROVIDER_PAGE_LIMIT",
+                f"page limit {max_pages} reached without a complete-page boundary",
+            )
+
+        page += 1
+        _wait(execution_control, p5w_sleep_interval())
+
+    if report.stop_reason is None:
+        raise ContractError("IRM_PROVIDER_PAGE_LIMIT")
+    report.unique_rows = len(all_records)
+    print(
+        f"Fetched {report.pages_fetched} pages, {report.rows_read} rows "
+        f"({report.unique_rows} unique), {report.api_requests} requests",
+        file=sys.stderr,
+    )
+    return all_records, report
 
 
 def fetch_interaction_qa(
@@ -60,119 +288,13 @@ def fetch_interaction_qa(
     company_code: str = "",
     keywords: str = "",
     max_pages: int = P5W_MAX_PAGES,
-) -> list[dict]:
-    """
-    分页抓取全景网最新互动问答回复。
+) -> list[dict[str, Any]]:
+    """Backward-compatible list-only wrapper for the legacy CLI/tests."""
 
-    Args:
-        since_date: 可选回复日期下限（含），格式 YYYY-MM-DD；
-            默认 None，表示全量抓取直到页重叠或到顶。
-        company_code: 6 位证券代码，空串表示全市场。
-        keywords: 关键词过滤。
-        max_pages: 最大翻页数，防止服务端越界循环。
-
-    Returns:
-        原始 API 记录列表（保留 camelCase 字段）。
-    """
-    page = 1
-    all_records: list[dict] = []
-    seen_pids: set[str] = set()
-    max_retries = 3
-    consecutive_failures = 0
-    max_consecutive_failures = 5
-
-    while page <= max_pages:
-        success = False
-        rows: list[dict] = []
-        last_error: Exception | None = None
-
-        for attempt in range(max_retries):
-            try:
-                data = _post_page(
-                    page,
-                    company_code=company_code,
-                    keywords=keywords,
-                )
-                if data.get("success") is not True:
-                    err_msg = data.get("message", "unknown error")
-                    raise RuntimeError(f"API error: {err_msg}")
-                rows = data.get("rows", []) or []
-                success = True
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                if attempt < max_retries - 1:
-                    time.sleep((3 ** attempt) * 1.0)
-
-        if not success:
-            consecutive_failures += 1
-            print(
-                f"[WARN] Page {page} failed after {max_retries} retries: "
-                f"{last_error}. Skipping "
-                f"(consecutive failures: {consecutive_failures}).",
-                file=sys.stderr,
-            )
-            if consecutive_failures >= max_consecutive_failures:
-                print(
-                    f"[WARN] {max_consecutive_failures} consecutive failures, "
-                    "stopping fetch.",
-                    file=sys.stderr,
-                )
-                break
-            page += 1
-            time.sleep(p5w_sleep_interval())
-            continue
-
-        consecutive_failures = 0
-
-        if not rows:
-            print(f"Fetched page {page}, 0 records – stop", file=sys.stderr)
-            break
-
-        page_pids = [str(item.get("pid", "")).strip() for item in rows]
-        page_pids = [pid for pid in page_pids if pid]
-        overlap = [pid for pid in page_pids if pid in seen_pids]
-        # 服务端越界会循环回第一页：本页全部已见则停止
-        if page_pids and len(overlap) == len(page_pids):
-            print(
-                f"Fetched page {page}, full overlap with previous pages – stop",
-                file=sys.stderr,
-            )
-            break
-
-        stop_by_date = False
-        new_count = 0
-        for item in rows:
-            pid = str(item.get("pid", "")).strip()
-            if not pid or pid in seen_pids:
-                continue
-
-            reply_time = str(item.get("replyerTimeStr", "") or "").strip()
-            if since_date and reply_time and reply_time[:10] < since_date:
-                stop_by_date = True
-                continue
-
-            seen_pids.add(pid)
-            all_records.append(item)
-            new_count += 1
-
-        print(
-            f"Fetched page {page}, {len(rows)} records "
-            f"({new_count} new, total {len(all_records)})",
-            file=sys.stderr,
-        )
-
-        if stop_by_date:
-            print(
-                f"Reached records earlier than {since_date}, stop paging",
-                file=sys.stderr,
-            )
-            break
-
-        if len(rows) < P5W_PAGE_SIZE:
-            break
-
-        page += 1
-        time.sleep(p5w_sleep_interval())
-
-    return all_records
+    records, _report = fetch_interaction_qa_with_report(
+        since_date=since_date,
+        company_code=company_code,
+        keywords=keywords,
+        max_pages=max_pages,
+    )
+    return records

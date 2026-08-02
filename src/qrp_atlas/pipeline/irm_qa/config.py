@@ -6,6 +6,9 @@ import random
 P5W_URL = "https://ir.p5w.net/interaction/getNewSearchR.shtml"
 P5W_PAGE_SIZE = 10  # 服务端硬截断，实际最多返回 10 条
 P5W_SOURCE = "p5w"
+P5W_REQUEST_TIMEOUT = 15.0
+P5W_PROVIDER_MAX_RETRIES = 2
+P5W_RETRY_BACKOFF_BASE_SECONDS = 1.0
 
 P5W_HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
