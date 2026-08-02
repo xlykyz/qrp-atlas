@@ -294,6 +294,7 @@ class JobRuntimeStore:
                 CREATE TABLE IF NOT EXISTS job_run (
                     run_id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
+                    job_pipeline_id TEXT,
                     definition_version TEXT NOT NULL,
                     scheduled_at TEXT NOT NULL,
                     started_at TEXT,
@@ -378,6 +379,8 @@ class JobRuntimeStore:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_run)").fetchall()}
             if "trade_date_override" not in columns:
                 connection.execute("ALTER TABLE job_run ADD COLUMN trade_date_override TEXT")
+            if "job_pipeline_id" not in columns:
+                connection.execute("ALTER TABLE job_run ADD COLUMN job_pipeline_id TEXT")
             if "parameter_overrides_json" not in columns:
                 connection.execute(
                     "ALTER TABLE job_run ADD COLUMN parameter_overrides_json TEXT NOT NULL DEFAULT '{}'"
@@ -485,6 +488,7 @@ class JobRuntimeStore:
         return JobRun(
             run_id=row["run_id"],
             job_id=row["job_id"],
+            pipeline_id=row["job_pipeline_id"],
             definition_version=row["definition_version"],
             scheduled_at=_parse_timestamp(row["scheduled_at"]),  # type: ignore[arg-type]
             started_at=_parse_timestamp(row["started_at"]),
@@ -626,18 +630,21 @@ class JobRuntimeStore:
         created_at: datetime,
     ) -> tuple[JobRun, bool]:
         scheduled_text = _timestamp(scheduled_at)
-        parameter_overrides_json = _encode_parameter_overrides(parameter_overrides)
+        parameter_overrides_json = _encode_parameter_overrides(
+            {**definition.fixed_parameters, **(parameter_overrides or {})}
+        )
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO job_run (
-                run_id, job_id, definition_version, scheduled_at, status, attempt,
+                run_id, job_id, job_pipeline_id, definition_version, scheduled_at, status, attempt,
                 timed_out, trigger_type, error_summary, trade_date_override,
                 parameter_overrides_json, created_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(uuid.uuid4()),
                 definition.job_id,
+                definition.pipeline_id,
                 definition.definition_version,
                 scheduled_text,
                 status.value,
@@ -1273,14 +1280,15 @@ class JobRuntimeStore:
             connection.execute(
                 """
                 INSERT INTO job_run (
-                    run_id, job_id, definition_version, scheduled_at, status, attempt,
+                    run_id, job_id, job_pipeline_id, definition_version, scheduled_at, status, attempt,
                     timed_out, trigger_type, retry_of_run_id, trade_date_override,
                     parameter_overrides_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
                 """,
                 [
                     retry_id,
                     previous["job_id"],
+                    previous["job_pipeline_id"],
                     previous["definition_version"],
                     previous["scheduled_at"],
                     JobStatus.PENDING.value,

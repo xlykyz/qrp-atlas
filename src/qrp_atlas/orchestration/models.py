@@ -72,9 +72,18 @@ class JobDefinition:
     overlap_policy: OverlapPolicy
     resource_locks: tuple[str, ...]
     resource_reads: tuple[str, ...] = ()
+    # Optional business-capability identifier of the formal PipelineContract
+    # behind this instance.  Source-registered production jobs set it to the
+    # Contract pipeline_id; legacy JSON definitions leave it unset.
+    pipeline_id: str | None = None
     performance_budget: Mapping[str, Any] = field(default_factory=dict)
     freshness_checks: tuple[Mapping[str, Any], ...] = ()
     definition_version: str = "1"
+    # Fixed parameter defaults declared by a production job instance.  They
+    # are merged into every scheduled Run's parameter_overrides (per-run
+    # manual overrides win) and therefore become part of the durable run
+    # record.  Legacy JSON definitions leave this empty.
+    fixed_parameters: Mapping[str, str] = field(default_factory=dict)
     inherit_environment: bool = False
     environment: Mapping[str, str] = field(default_factory=dict)
     requires_structured_result: bool = False
@@ -105,6 +114,10 @@ class JobRun:
     stderr_path: Path | None
     error_summary: str | None
     heartbeat_at: datetime | None
+    # Business-capability pipeline_id persisted at run creation; may be None
+    # for legacy JSON definitions.  job_id and pipeline_id remain distinct:
+    # one Contract can own multiple production job instances.
+    pipeline_id: str | None = None
     wall_duration_ms: int | None = None
     user_cpu_ms: int | None = None
     system_cpu_ms: int | None = None

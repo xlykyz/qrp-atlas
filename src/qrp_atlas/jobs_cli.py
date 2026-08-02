@@ -25,6 +25,11 @@ from qrp_atlas.pipeline.job_adapter import (
     definitions_from_contract_selections,
     load_contract_selections,
     make_in_process_contract_executor,
+    runtime_definition_from_production_job,
+)
+from qrp_atlas.pipeline.production_jobs import (
+    DEFAULT_PRODUCTION_JOBS_PATH,
+    load_and_validate_production_jobs,
 )
 from qrp_atlas.orchestration.definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
 from qrp_atlas.orchestration.models import JobDefinition, JobStatus
@@ -95,21 +100,26 @@ def build_parser() -> argparse.ArgumentParser:
     listing = subparsers.add_parser("list-definitions", help="list definitions without scheduling or executing")
     listing.add_argument("--definitions", type=Path)
     listing.add_argument("--contract-selections", type=Path)
+    listing.add_argument("--production-jobs", type=Path)
     listing_alias = subparsers.add_parser("list", help="list registered source contracts or configured definitions")
     listing_alias.add_argument("--definitions", type=Path)
     listing_alias.add_argument("--contract-selections", type=Path)
+    listing_alias.add_argument("--production-jobs", type=Path)
     show = subparsers.add_parser("show", help="show one registered Pipeline definition and dependencies")
     show.add_argument("job_id")
     show.add_argument("--definitions", type=Path)
     show.add_argument("--contract-selections", type=Path)
+    show.add_argument("--production-jobs", type=Path)
     plan = subparsers.add_parser("plan", help="produce a non-executing dependency plan for one Pipeline")
     plan.add_argument("job_id")
     plan.add_argument("--definitions", type=Path)
     plan.add_argument("--contract-selections", type=Path)
+    plan.add_argument("--production-jobs", type=Path)
     plan.add_argument("--target-date", type=_parse_trade_date)
     scan = subparsers.add_parser("scan", help="create due PENDING/BLOCKED run records; never executes commands")
     scan.add_argument("--definitions", type=Path)
     scan.add_argument("--contract-selections", type=Path)
+    scan.add_argument("--production-jobs", type=Path)
     scan.add_argument("--at", type=_parse_instant, help="ISO-8601 scan instant with timezone")
     scan.add_argument("--scheduler-id", default=DEFAULT_SCHEDULER_ID)
     scan.add_argument("--max-catch-up-minutes", type=int, default=DEFAULT_MAX_CATCH_UP_MINUTES)
@@ -119,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run-pending", help="execute one pending record from an explicit definition source")
     run.add_argument("--definitions", type=Path)
     run.add_argument("--contract-selections", type=Path)
+    run.add_argument("--production-jobs", type=Path)
     run.add_argument("--run-id", help="specific pending run id; defaults to the oldest pending record")
     run.add_argument("--heartbeat-interval-seconds", type=float, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
     run.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
@@ -137,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("run_id")
     retry.add_argument("--definitions", type=Path)
     retry.add_argument("--contract-selections", type=Path)
+    retry.add_argument("--production-jobs", type=Path)
     retry.add_argument("--execute", action="store_true", help="execute the newly created retry attempt immediately")
     formal_run = subparsers.add_parser(
         "run",
@@ -148,12 +160,14 @@ def build_parser() -> argparse.ArgumentParser:
     formal_run.add_argument("--scheduled-for", type=_parse_instant)
     formal_run.add_argument("--definitions", type=Path)
     formal_run.add_argument("--contract-selections", type=Path)
+    formal_run.add_argument("--production-jobs", type=Path)
     formal_run.add_argument("--with-dependencies", action="store_true")
     formal_run.add_argument("--heartbeat-interval-seconds", type=float, default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
     formal_run.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
     serve = subparsers.add_parser("serve", help="continuously scan and execute due configured Pipelines")
     serve.add_argument("--definitions", type=Path)
     serve.add_argument("--contract-selections", type=Path)
+    serve.add_argument("--production-jobs", type=Path)
     serve.add_argument("--scheduler-id", default=DEFAULT_SCHEDULER_ID)
     serve.add_argument("--service-name", default="job-scheduler")
     serve.add_argument("--poll-interval-seconds", type=float, default=5.0)
@@ -168,6 +182,22 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument("--service-name", default="job-scheduler")
     execute_contract = subparsers.add_parser("execute-contract", help=argparse.SUPPRESS)
     execute_contract.add_argument("job_id")
+    validate_jobs = subparsers.add_parser(
+        "validate-job-definitions",
+        help="validate source-registered production job definitions without executing them",
+    )
+    validate_jobs.add_argument("--production-jobs", type=Path)
+    list_jobs = subparsers.add_parser(
+        "list-job-definitions",
+        help="list source-registered production job definitions without scheduling or executing",
+    )
+    list_jobs.add_argument("--production-jobs", type=Path)
+    show_job = subparsers.add_parser(
+        "show-job-definition",
+        help="show one source-registered production job definition and its Contract mapping",
+    )
+    show_job.add_argument("job_id")
+    show_job.add_argument("--production-jobs", type=Path)
     return parser
 
 
@@ -186,6 +216,7 @@ def _print_run(run, *, result: object | None = None, submitted_to_service: bool 
     payload = {
         "run_id": run.run_id,
         "job_id": run.job_id,
+        "pipeline_id": run.pipeline_id,
         "definition_version": run.definition_version,
         "scheduled_at": run.scheduled_at.isoformat(),
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -228,17 +259,42 @@ def _print_error(reason: str, *, detail: str | None = None) -> None:
 
 
 def _load_definitions_for_args(args: argparse.Namespace, *, require_source: bool = False):
-    if args.definitions is not None and args.contract_selections is not None:
-        raise DefinitionValidationError("choose either --definitions or --contract-selections")
+    sources = [
+        value is not None
+        for value in (args.definitions, args.contract_selections, getattr(args, "production_jobs", None))
+    ]
+    if sum(sources) > 1:
+        raise DefinitionValidationError(
+            "choose exactly one of --definitions, --contract-selections, --production-jobs"
+        )
     if args.contract_selections is not None:
         definitions = definitions_from_contract_selections(load_contract_selections(args.contract_selections))
         environment = {"QRP_ENV_FILE": args.env_file} if args.env_file else {}
         return _apply_definition_environment(definitions, environment)
+    if getattr(args, "production_jobs", None) is not None:
+        environment = {"QRP_ENV_FILE": args.env_file} if args.env_file else {}
+        return _apply_definition_environment(
+            _definitions_from_production_jobs(args.production_jobs),
+            environment,
+        )
     if args.definitions is not None:
         return load_definitions(args.definitions)
     if require_source:
-        raise DefinitionValidationError("--definitions or --contract-selections is required")
+        raise DefinitionValidationError(
+            "--definitions, --contract-selections, or --production-jobs is required"
+        )
     return load_definitions(DEFAULT_DEFINITIONS_PATH)
+
+
+def _definitions_from_production_jobs(path: str | Path) -> tuple[JobDefinition, ...]:
+    """Map validated production job instances onto existing runtime definitions."""
+
+    registry = default_registry()
+    jobs = load_and_validate_production_jobs(path, registry=registry)
+    return tuple(
+        runtime_definition_from_production_job(job, registry.get(job.pipeline_id))
+        for job in jobs
+    )
 
 
 def _print_definition(definition: JobDefinition) -> None:
@@ -248,6 +304,7 @@ def _print_definition(definition: JobDefinition) -> None:
         json.dumps(
             {
                 "job_id": definition.job_id,
+                "pipeline_id": definition.pipeline_id,
                 "name": definition.name,
                 "enabled": definition.enabled,
                 "schedule": definition.schedule,
@@ -294,7 +351,7 @@ def _apply_definition_environment(
     for item in definitions:
         merged_environment = {**item.environment, **environment}
         if item.in_process_executor is not None:
-            contract = default_registry().get(item.job_id)
+            contract = default_registry().get(item.pipeline_id or item.job_id)
             item = replace(
                 item,
                 environment=merged_environment,
@@ -315,10 +372,11 @@ def _definitions_for_manual_run(args: argparse.Namespace, *, environment: dict[s
         if args.parameter_assignments:
             raise DefinitionValidationError("--set is supported only for source-registered formal Pipelines")
         return _apply_definition_environment(definitions, environment)
-    if args.contract_selections is not None:
-        # Selections still resolve to source-registered Contracts.  Their
-        # deployment-only manifest may choose schedule/enablement, while
-        # controlled manual parameters remain part of the persisted Run.
+    if args.contract_selections is not None or getattr(args, "production_jobs", None) is not None:
+        # Selections and production jobs still resolve to source-registered
+        # Contracts.  Their instance-level manifests may choose
+        # schedule/enablement/fixed parameters, while controlled manual
+        # parameters remain part of the persisted Run.
         return _load_definitions_for_args(args, require_source=True)
     return _formal_runtime_definitions(environment=environment)
 
@@ -417,9 +475,63 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "execute-contract":
         return _execute_contract_command(args)
+    if args.command in {"validate-job-definitions", "list-job-definitions", "show-job-definition"}:
+        try:
+            jobs = load_and_validate_production_jobs(
+                args.production_jobs or DEFAULT_PRODUCTION_JOBS_PATH
+            )
+            if args.command == "validate-job-definitions":
+                print(f"valid production job definitions: {len(jobs)}")
+                return 0
+            by_id = {job.job_id: job for job in jobs}
+            if args.command == "list-job-definitions":
+                for job in jobs:
+                    print(
+                        json.dumps(
+                            {
+                                "job_id": job.job_id,
+                                "pipeline_id": job.pipeline_id,
+                                "enabled": job.enabled,
+                                "schedule": job.schedule,
+                                "timezone": job.timezone,
+                                "parameters": dict(job.parameters),
+                                "name": job.name,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                    )
+                return 0
+            job = by_id.get(args.job_id)
+            if job is None:
+                raise DefinitionValidationError(f"unknown production job: {args.job_id}")
+            print(
+                json.dumps(
+                    {
+                        "job_id": job.job_id,
+                        "pipeline_id": job.pipeline_id,
+                        "enabled": job.enabled,
+                        "schedule": job.schedule,
+                        "timezone": job.timezone,
+                        "parameters": dict(job.parameters),
+                        "name": job.name,
+                        "description": job.description,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        except (DefinitionValidationError, ContractValidationError, ValueError, KeyError) as exc:
+            print(f"Job error: {exc}", file=sys.stderr)
+            return 2
     if args.command in {"list", "show", "plan"}:
         try:
-            if args.definitions is not None or args.contract_selections is not None:
+            if (
+                args.definitions is not None
+                or args.contract_selections is not None
+                or getattr(args, "production_jobs", None) is not None
+            ):
                 definitions = _load_definitions_for_args(args, require_source=True)
                 by_id = definitions_by_id(definitions)
                 if args.command == "list":
@@ -498,6 +610,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     json.dumps(
                         {
                             "job_id": definition.job_id,
+                            "pipeline_id": definition.pipeline_id,
                             "name": definition.name,
                             "enabled": definition.enabled,
                             "schedule": definition.schedule,

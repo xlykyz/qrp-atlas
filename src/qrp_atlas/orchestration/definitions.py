@@ -42,9 +42,18 @@ def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
 def parse_definition(payload: Mapping[str, Any]) -> JobDefinition:
     """Parse one JSON definition without resolving relative working directories."""
 
-    # ``pipeline_id`` is accepted only for pre-existing shadow manifests;
-    # all parsed runtime objects and persisted columns use ``job_id``.
-    job_id = _required_string(payload.get("job_id", payload.get("pipeline_id")), "job_id")
+    # ``job_id`` is the production-instance identity.  ``pipeline_id`` is the
+    # optional business-capability identifier of the formal Contract behind
+    # the instance; legacy shadow manifests that only carry ``pipeline_id``
+    # are still accepted with job_id defaulting to it.
+    raw_job_id = payload.get("job_id")
+    raw_pipeline_id = payload.get("pipeline_id")
+    if raw_job_id is None:
+        raw_job_id = raw_pipeline_id
+    job_id = _required_string(raw_job_id, "job_id")
+    pipeline_id = None
+    if raw_pipeline_id is not None:
+        pipeline_id = _required_string(raw_pipeline_id, "pipeline_id")
     name = _required_string(payload.get("name"), "name")
     if not isinstance(payload.get("enabled"), bool):
         raise DefinitionValidationError("enabled must be a boolean")
@@ -99,6 +108,7 @@ def parse_definition(payload: Mapping[str, Any]) -> JobDefinition:
         raise DefinitionValidationError("manual_execution_allowed must be a boolean")
     return JobDefinition(
         job_id=job_id,
+        pipeline_id=pipeline_id,
         name=name,
         enabled=payload["enabled"],
         schedule=schedule,

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "jobs": [
+    {
+      "job_id": "research-stock-report-morning",
+      "pipeline_id": "research_stock_report_ingest",
+      "enabled": false,
+      "schedule": "0 7 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {"incremental": "true"},
+      "name": "Stock research report ingestion (morning)",
+      "description": "Disabled offline example: second schedule instance of research_stock_report_ingest. Not part of any formal deployment selection."
+    },
+    {
+      "job_id": "research-stock-report-evening",
+      "pipeline_id": "research_stock_report_ingest",
+      "enabled": false,
+      "schedule": "0 19 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Stock research report ingestion (evening)",
+      "description": "Disabled offline example: third schedule instance of research_stock_report_ingest. Not part of any formal deployment selection."
+    }
+  ]
+}

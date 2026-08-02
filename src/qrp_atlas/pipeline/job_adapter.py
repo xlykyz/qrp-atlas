@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -182,7 +182,7 @@ def make_in_process_contract_executor(
         )
         invocation = PipelineInvocation(
             run_id=claimed.run_id,
-            pipeline_id=claimed.job_id,
+            pipeline_id=contract.pipeline_id,
             scheduled_for=claimed.scheduled_at,
             attempt=claimed.attempt,
             settings=settings,
@@ -216,3 +216,65 @@ def make_in_process_contract_executor(
         )
 
     return execute
+
+
+def runtime_definition_from_production_job(
+    job: Any,
+    contract: PipelineContract,
+    *,
+    environment: dict[str, str] | None = None,
+) -> JobDefinition:
+    """Map one production job instance onto the existing runtime definition.
+
+    The instance contributes only identity (``job_id``), the referenced
+    ``pipeline_id``, enablement, schedule, timezone, fixed parameters and
+    display name.  Every business rule (locks, dependencies, outputs,
+    transaction, timeout, retry, completion, quality, date policy) comes
+    from the referenced Contract.
+    """
+
+    return JobDefinition(
+        job_id=job.job_id,
+        pipeline_id=contract.pipeline_id,
+        name=job.name or contract.name,
+        enabled=job.enabled,
+        schedule=job.schedule,
+        timezone=job.timezone,
+        command=(
+            sys.executable,
+            "-m",
+            "qrp_atlas.jobs_cli",
+            "execute-contract",
+            job.job_id,
+        ),
+        working_directory=None,
+        dependencies=contract.dependencies,
+        timeout_seconds=contract.performance.hard_timeout_seconds,
+        max_retries=contract.execution.max_retries,
+        overlap_policy=contract.execution.overlap_policy,
+        resource_locks=contract.resource_locks,
+        resource_reads=contract.resource_reads,
+        performance_budget={
+            "normal_budget_seconds": contract.performance.normal_budget_seconds,
+            "warning_threshold_seconds": contract.performance.warning_threshold_seconds,
+            "baseline_source": contract.performance.baseline_source,
+        },
+        freshness_checks=tuple(
+            {
+                "input_id": item.input_id,
+                "check_id": item.freshness.check_id,
+                "maximum_lag_trading_days": item.freshness.maximum_lag_trading_days,
+            }
+            for item in contract.inputs
+        ),
+        definition_version=contract.contract_version,
+        inherit_environment=True,
+        environment=environment or {},
+        requires_structured_result=True,
+        manual_execution_allowed=contract.manual_execution_allowed,
+        fixed_parameters=dict(job.parameters),
+        in_process_executor=make_in_process_contract_executor(
+            contract,
+            environment=environment,
+        ),
+    )
