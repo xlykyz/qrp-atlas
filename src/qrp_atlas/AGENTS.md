@@ -148,6 +148,17 @@ frontend → DuckDB、文件结果目录或 Python 策略对象
 
 如果 contracts 尚未定义所需结构，应先补充 contracts 及其公开导出，再实现 pipeline。
 
+### PipelineContract 与源码模块组织
+
+- 一项稳定、可独立调用的数据生产能力必须对应一条全局唯一的 `PipelineContract`。能力边界按业务输入、输出、日期或范围、幂等、事务、完成和质量语义划分，不按调度时间、运行频率、历史 Job 数量或参数取值划分。
+- 不同 schedule、不同参数模板、人工调用和定时调用可以共同引用同一条 `PipelineContract`；不得因早晚调度、全量/增量参数或 Hermes Job 数量重复创建业务 Contract。
+- 新增正式生产能力默认采用“一条 `PipelineContract`、一个独立 Contract 模块”。模块名称应能直接定位对应的 `pipeline_id`，通过 `register_pipeline()` 注册，并显式加入 `pipeline.contract_catalog.CONTRACT_MODULES`。
+- 多条 Contract 共享的 provider 客户端、日期工具、清洗、写入和校验逻辑应下沉到普通业务模块或 support 模块；不得复制公共逻辑，也不得仅因共享工具而合并独立生产能力。
+- 现有聚合 Contract 模块保持兼容，不要求仅为目录形式统一而拆分。只有在相关模块发生实质业务修改、文件规模妨碍独立审查或修改冲突明显时，才可随业务变更拆分；纯文件搬迁不是生产迁移阻塞项。
+- 无论源码模块如何组织，正式发现、依赖、Job 适配、版本、验收和生产治理的最小单位始终是 `PipelineContract.pipeline_id`，不是 Python 模块名。
+
+完整 Contract 准入和源码组织规范见 [`docs/QRP产品蓝图v1.1/12_Pipeline正式开发规则.md`](../../docs/QRP产品蓝图v1.1/12_Pipeline正式开发规则.md)。
+
 ## `indicators/`｜指标、特征与因子层
 
 `indicators/` 基于调用方准备好的标准数据，计算可复用的客观指标、特征、因子和状态事实。
