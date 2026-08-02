@@ -24,18 +24,18 @@
 
 | 状态 | 数量 | 含义 |
 | --- | ---: | --- |
-| `LEGACY_SCHEDULED` | 12 | 14 个 Hermes Job 映射出的可迁移能力；CNINFO 的三个历史 Job、个股研报的两个历史 Job 各自归并为一项业务能力，日更 Job 包含市场日更和 adj factor 两个阶段 |
+| `LEGACY_SCHEDULED` | 11 | 14 个 Hermes Job 映射出的可迁移能力；CNINFO、个股研报和行业研报的多个历史 Job 各自归并为一项业务能力，日更 Job 包含市场日更和 adj factor 两个阶段 |
 | `READY_UNSCHEDULED` | 13 | 已有生产入口但当前未调度，包括 System B、手动回补和数据入口 |
 | `SHADOW` | 0 | 不把“仍由 Hermes 调度”的生产状态改写为 SHADOW；其禁用 Definition 由单独字段/文件表达 |
 | `PRODUCTION` | 0 | 尚无 QRP 正式调度 |
 | `PLANNED` | 4 | 边界明确、尚未实现的检查或确定性替代能力 |
 | `DEFERRED` | 0 | 无 |
 
-共注册 29 条，排除 29 个已核查候选项。12 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
+共注册 28 条，排除 29 个已核查候选项。11 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
 
-当前源码默认 catalog 中的十四条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）、一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）、一条 IRM 最新问答增量 Contract（`irm_qa_incremental`）、两条成员关系历史 Contract（`industry_membership_ingest`、`index_component_ingest`）、三条 PIT/基本面/业绩预告 Contract（`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`）和一条个股研究报告 Contract（`research_stock_report_ingest`）。个股研究报告 Contract 使用显式 start/end 日期范围、完整东财列表/详情响应、`research_report_stock` 数据库事务、raw/canonical CSV 与 PDF 暂存提交；历史 `research-stock-0700` 和 `research-stock-1900` 只是同一业务能力的调度事实，不再作为两个正式 `pipeline_id`。IRM 的真实语义是按请求时间扫描 P5W 最新 feed，以 `pid` 为唯一键增量追加；没有 provider 日期过滤或持久化水位线。成员关系 Contract 均只接受人工显式范围：行业成员使用 ticker 或 l1/l2/l3 行业代码（另有真实的 `is_new` 过滤），指数成分使用 index codes 与 start/end 日期；两者都不新增自动 schedule。Tushare endpoint 没有可靠的 total/page 证据，Contract 只对返回记录的范围和结构作 fail-closed 校验。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
+当前源码默认 catalog 中的十五条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）、一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）、一条 IRM 最新问答增量 Contract（`irm_qa_incremental`）、两条成员关系历史 Contract（`industry_membership_ingest`、`index_component_ingest`）、三条 PIT/基本面/业绩预告 Contract（`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`）、一条个股研究报告 Contract（`research_stock_report_ingest`）和一条行业研究报告 Contract（`research_industry_report_ingest`）。两个研究报告 Contract 均使用显式 start/end 日期范围、完整东财列表/详情响应、数据库事务、run-scoped raw/canonical CSV 与 PDF 暂存提交、`quant_db_writer` 和 `overlap_policy=FORBID`；个股与行业历史早晚 Job 只是同一业务能力的调度事实，不再作为多个正式 `pipeline_id`。行业 Contract 的分类直接采用报告 provider 字段，不读取行业成员历史或行情表，也不执行成员/价格聚合。IRM 的真实语义是按请求时间扫描 P5W 最新 feed，以 `pid` 为唯一键增量追加；没有 provider 日期过滤或持久化水位线。成员关系 Contract 均只接受人工显式范围：行业成员使用 ticker 或 l1/l2/l3 行业代码（另有真实的 `is_new` 过滤），指数成分使用 index codes 与 start/end 日期；两者都不新增自动 schedule。Tushare endpoint 没有可靠的 total/page 证据，Contract 只对返回记录的范围和结构作 fail-closed 校验。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
-`task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。个股研究报告现在已有可移植的正式 Contract；行业研究报告仍是仓库内确定性 Python 入口，尚未建立正式 Contract。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
+`task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。个股和行业研究报告现在均已有可移植的正式 Contract；任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
 ## 4. 全量注册表
 
@@ -47,8 +47,7 @@
 | `adj_factor_daily` | LEGACY / DETERMINISTIC | 同上（同一 shell 后续阶段） | `pull_adj_factor_daily.py`; Q calendar/history + Tushare -> Q `adj_factor_changes` | market daily / `quant_db_writer` |
 | `cninfo_research_visit_ingest` | LEGACY / DETERMINISTIC | 历史 Hermes 调度事实：`83895a6a24a7`、`e56ff366b299`、`053db3ea5a9f` | `cninfo.run --date` 历史入口；CNINFO -> Q visits | CNINFO / `quant_db_writer` |
 | `research_stock_report_ingest` | LEGACY / DETERMINISTIC | 历史调度事实：07:00 / `2b3c60fc1bcc`、19:00 / `cd3ce52ff14a` | `research_report_contracts` 进程内 executor；东财列表/详情/PDF -> Q `research_report_stock`、CSV/PDF | 显式日期范围 / `quant_db_writer` |
-| `research_industry_morning` | LEGACY / DETERMINISTIC | 07:00 / `3591486225dc` | `research_industry.run`; Q -> research tables/files | ? / `quant_db_writer` |
-| `research_industry_evening` | LEGACY / DETERMINISTIC | 19:00 / `16a55246bddc` | `research_industry.run`; Q -> research tables/files | ? / `quant_db_writer` |
+| `research_industry_report_ingest` | LEGACY / DETERMINISTIC | 历史调度事实：07:00 / `3591486225dc`、19:00 / `16a55246bddc` | `research_industry_contracts` 进程内 executor；东财行业列表/详情/PDF -> Q `research_report_industry`、CSV/PDF；分类取 provider 字段，不做成员/价格聚合 | 显式日期范围 / `quant_db_writer` |
 | `pipeline_daily_summary_agent` | LEGACY / AGENT | 21:00 / `56d22829661c` | Hermes history -> Agent report | Hermes Agent / none |
 | `system_health_weekly_agent` | LEGACY / AGENT | 周一 06:00 / `eadada323c3c` | host metrics -> Agent report | host + Hermes Agent / none |
 | `index_daily_update` | LEGACY / DETERMINISTIC | 20:00 工作日 / `0450c10ccb5f` | `fetch_index_daily.py`; Tushare -> Q `index_daily` | Tushare / `quant_db_writer` |
@@ -111,7 +110,7 @@ flowchart LR
 | Pipeline | Definition 原因 | 不纳入的原因 |
 | --- | --- | --- |
 | `market_daily_update`、`adj_factor_daily`、`zt_dt_pool_daily`、`daily_basic_update`、`index_daily_update`、`irm_qa_incremental` | 历史上已证明为无参数、确定性 argv 的兼容 Definition | 全部 disabled；正式 source Contract 与兼容 Definition 分离，不能据此推导生产启用；其余历史 Definition 的 timeout/性能证据仍可能为空 |
-| CNINFO 和研究报告 | CNINFO 与个股研究报告已有正式 source Contract；行业研究仍是确定性 Python 入口 | 当前没有经批准的部署参数模板/仓库 wrapper，因此不生成生产 Definition 或切换调度权 |
+| CNINFO 和研究报告 | CNINFO、个股研究报告和行业研究报告已有正式 source Contract | 当前没有经批准的部署参数模板/仓库 wrapper，因此不生成生产 Definition 或切换调度权 |
 | System B state、episode、pools | 无 | CLI 需要 trade date、路径或范围；尚未定义生产配置和验收时点 |
 | Agent summary/health | 无 | Agent prompt 不是确定性 CLI，且不应成为数据任务成功条件 |
 

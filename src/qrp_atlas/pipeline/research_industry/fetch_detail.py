@@ -1,10 +1,17 @@
-"""fetch_detail.py - 行业研报详情页抓取模块"""
+"""Eastmoney industry research-report detail fetching."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 import json
 import logging
 import re
-import time
+import threading
 import urllib.request
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
 
 from .config import (
     DETAIL_HEADERS,
@@ -13,6 +20,126 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+
+DETAIL_TIMEOUT_SECONDS = 30.0
+MAX_RETRIES = 2
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryReportDetailReport:
+    """Auditable outcome of detail-page enrichment."""
+
+    records: tuple[dict[str, Any], ...]
+    requests: int
+    retries: int
+    failed_indices: tuple[int, ...]
+    complete: bool
+
+
+def _check(execution_control: ExecutionControl | None) -> None:
+    if execution_control is not None:
+        execution_control.check()
+
+
+def _wait(execution_control: ExecutionControl | None, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    if execution_control is None:
+        import time
+
+        time.sleep(seconds)
+        return
+    execution_control.wait(threading.Event(), seconds)
+
+
+def _parse_detail(html: str, info_code: str) -> tuple[str, str]:
+    match = re.search(r"var zwinfo = ({.*?});", html, re.DOTALL)
+    if not match:
+        raise ValueError(f"detail page has no zwinfo for {info_code}")
+    try:
+        zwinfo = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"detail page zwinfo is invalid for {info_code}") from exc
+    if not isinstance(zwinfo, Mapping):
+        raise ValueError(f"detail page zwinfo is not an object for {info_code}")
+    return str(zwinfo.get("notice_content") or ""), str(zwinfo.get("attach_url") or "")
+
+
+def fetch_report_detail_with_report(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    execution_control: ExecutionControl | None = None,
+) -> IndustryReportDetailReport:
+    """Enrich every record and fail closed when any detail page is incomplete."""
+
+    enriched: list[dict[str, Any]] = []
+    failed_indices: list[int] = []
+    requests = 0
+    retries = 0
+
+    for index, source_record in enumerate(records):
+        _check(execution_control)
+        if not isinstance(source_record, Mapping):
+            failed_indices.append(index)
+            continue
+        record = dict(source_record)
+        info_code = str(record.get("infoCode") or "").strip()
+        if not info_code:
+            failed_indices.append(index)
+            continue
+        last_error: Exception | None = None
+        enriched_record: tuple[str, str] | None = None
+        for retry_index in range(MAX_RETRIES + 1):
+            _check(execution_control)
+            try:
+                url = DETAIL_URL_TEMPLATE.format(info_code=info_code)
+                request = urllib.request.Request(url, headers=DETAIL_HEADERS, method="GET")
+                timeout = (
+                    execution_control.bounded_timeout(DETAIL_TIMEOUT_SECONDS)
+                    if execution_control is not None
+                    else DETAIL_TIMEOUT_SECONDS
+                )
+                if timeout is not None and timeout <= 0:
+                    _check(execution_control)
+                    raise TimeoutError("industry research report detail deadline elapsed")
+                requests += 1
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    status = getattr(response, "status", None)
+                    if status is not None and status != 200:
+                        raise RuntimeError(f"Eastmoney industry detail returned HTTP {status}")
+                    html = response.read().decode("utf-8", errors="replace")
+                _check(execution_control)
+                enriched_record = _parse_detail(html, info_code)
+                break
+            except ExecutionControlError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded as incomplete detail.
+                last_error = exc
+                if retry_index < MAX_RETRIES:
+                    retries += 1
+                    _wait(execution_control, float(3**retry_index))
+        if enriched_record is None:
+            logger.warning(
+                "Failed to fetch industry detail for record %d: %s",
+                index,
+                type(last_error).__name__ if last_error is not None else "unknown",
+            )
+            failed_indices.append(index)
+            continue
+        notice_content, attach_url = enriched_record
+        record["noticeContent"] = notice_content
+        record["attachUrl"] = attach_url
+        enriched.append(record)
+        if index + 1 < len(records):
+            _wait(execution_control, sleep_interval())
+
+    return IndustryReportDetailReport(
+        records=tuple(enriched),
+        requests=requests,
+        retries=retries,
+        failed_indices=tuple(failed_indices),
+        complete=not failed_indices,
+    )
 
 
 def fetch_report_detail(records: list[dict]) -> list[dict]:
@@ -25,55 +152,14 @@ def fetch_report_detail(records: list[dict]) -> list[dict]:
     Returns:
         相同列表，每条记录补充了 noticeContent 和 attachUrl 字段
     """
-    total = len(records)
-    for idx, record in enumerate(records):
-        info_code = record.get("infoCode")
-        if not info_code:
-            logger.warning("Record at index %d has no infoCode – skipping", idx)
-            continue
-
-        url = DETAIL_URL_TEMPLATE.format(info_code=info_code)
-
-        try:
-            req = urllib.request.Request(
-                url,
-                headers=DETAIL_HEADERS,
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status != 200:
-                    logger.warning(
-                        "Detail page for %s returned HTTP %s – skipping",
-                        info_code,
-                        resp.status,
-                    )
-                    continue
-                html = resp.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            logger.warning("Failed to fetch detail page for %s: %s – skipping", info_code, exc)
-            continue
-
-        # 提取 var zwinfo = {...};
-        match = re.search(r"var zwinfo = ({.*?});", html, re.DOTALL)
-        if not match:
-            logger.warning("Could not find zwinfo in detail page for %s – skipping", info_code)
-            continue
-
-        try:
-            zwinfo = json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            logger.warning("Failed to parse zwinfo JSON for %s: %s – skipping", info_code, exc)
-            continue
-
-        record["noticeContent"] = zwinfo.get("notice_content") or ""
-        record["attachUrl"] = zwinfo.get("attach_url") or ""
-
-        # 进度打印，每 10 条输出一次
-        if (idx + 1) % 10 == 0:
-            logger.info("[fetch_detail] Processed %d/%d records...", idx + 1, total)
-
-        # 速率限制：首次请求不延迟
-        if idx > 0:
-            time.sleep(sleep_interval())
-
+    report = fetch_report_detail_with_report(records)
+    failed_indices = set(report.failed_indices)
+    enriched_records = iter(report.records)
+    result: list[dict] = []
+    for index, record in enumerate(records):
+        result.append(dict(record) if index in failed_indices else next(enriched_records))
+    records[:] = result
     return records
+
+
+__all__ = ["IndustryReportDetailReport", "fetch_report_detail", "fetch_report_detail_with_report"]

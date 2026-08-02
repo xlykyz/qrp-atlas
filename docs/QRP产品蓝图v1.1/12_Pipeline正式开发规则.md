@@ -4,7 +4,7 @@
 
 本文件是 QRP Atlas v1.1 数据 Pipeline 的权威开发规则。任何新增 Pipeline，或任何会改变 Pipeline 生产语义的修改，必须同时满足本文件、源码 `PipelineContract` 和公共契约测试。
 
-本规则建立的是正式开发门禁、机器可读合同、公共校验和模板；它本身不是生产切换声明。当前工作包已将六条市场数据、CNINFO、IRM、两条成员关系历史能力以及个股研究报告纳入源码正式 Contract，但仍不修改 Hermes，不启用 Production Definition，不部署 systemd，也不访问生产数据路径；行业研究、System B 和其他业务仍按各自工作包推进。
+本规则建立的是正式开发门禁、机器可读合同、公共校验和模板；它本身不是生产切换声明。当前工作包已将六条市场数据、CNINFO、IRM、两条成员关系历史能力、个股研究报告和行业研究报告纳入源码正式 Contract，但仍不修改 Hermes，不启用 Production Definition，不部署 systemd，也不访问生产数据路径；System B 和其他业务仍按各自工作包推进。
 
 正式上线采用单一二元门禁：一个 Pipeline 完整通过本规则、契约校验和公共验收，才能被放入部署选择清单；否则不得被正式 QRP runtime 调度。现有生产继续由 Hermes 保持原有行为，直到全部计划内 Pipeline 都完成同一标准的改造并统一验收、统一切换。
 
@@ -251,7 +251,7 @@ qrp-atlas-jobs run job_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-jobs validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts`、`qrp_atlas.pipeline.irm_qa_contracts`、`qrp_atlas.pipeline.membership_contracts`、`qrp_atlas.pipeline.pit_fundamentals_contracts` 和 `qrp_atlas.pipeline.research_report_contracts`，共包含十四条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest`、`irm_qa_incremental`、`industry_membership_ingest`、`index_component_ingest`、`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest` 以及 `research_stock_report_ingest`。研究报告 Contract 使用显式日期范围、完整列表/详情响应、数据库事务、run-scoped CSV/PDF staging、`quant_db_writer` 和 `overlap_policy=FORBID`；历史晨间和晚间 Job 只是同一业务能力的调度事实。IRM 使用 P5W 最新 feed、`pid` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；成员关系 Contract 使用显式范围、`revision_id` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；Tushare 没有可靠的 total/page 证据，结果保留这一完整性边界。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts`、`qrp_atlas.pipeline.irm_qa_contracts`、`qrp_atlas.pipeline.membership_contracts`、`qrp_atlas.pipeline.pit_fundamentals_contracts`、`qrp_atlas.pipeline.research_report_contracts` 和 `qrp_atlas.pipeline.research_industry_contracts`，共包含十五条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest`、`irm_qa_incremental`、`industry_membership_ingest`、`index_component_ingest`、`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`、`research_stock_report_ingest` 以及 `research_industry_report_ingest`。两个研究报告 Contract 使用显式日期范围、完整列表/详情响应、数据库事务、run-scoped CSV/PDF staging、`quant_db_writer` 和 `overlap_policy=FORBID`；行业报告分类直接使用 provider 字段，不读取行业成员历史或行情表，也不执行成员/价格聚合；历史晨间和晚间 Job 只是同一业务能力的调度事实。IRM 使用 P5W 最新 feed、`pid` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；成员关系 Contract 使用显式范围、`revision_id` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；Tushare 没有可靠的 total/page 证据，结果保留这一完整性边界。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ## 7. 公共测试规则
 

@@ -19,6 +19,7 @@ from qrp_atlas.pipeline.irm_qa_contracts import IRM_CONTRACTS
 from qrp_atlas.pipeline.membership_contracts import MEMBERSHIP_CONTRACTS
 from qrp_atlas.pipeline.pit_fundamentals_contracts import PIT_FUNDAMENTALS_CONTRACTS
 from qrp_atlas.pipeline.research_report_contracts import RESEARCH_REPORT_CONTRACTS
+from qrp_atlas.pipeline.research_industry_contracts import RESEARCH_INDUSTRY_CONTRACTS
 from qrp_atlas.pipeline.contracts import (
     BusinessExecution,
     CheckResult,
@@ -798,7 +799,7 @@ def test_deployment_selection_has_only_identity_enabled_and_schedule(tmp_path: P
 def test_default_registry_contains_only_admitted_contracts_and_never_the_template(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     assert pipeline_cli(["validate-contracts"]) == 0
-    assert capsys.readouterr().out == "valid contracts: 14\n"
+    assert capsys.readouterr().out == "valid contracts: 15\n"
     assert pipeline_cli(["list-contracts"]) == 0
     contracts = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert {contract["pipeline_id"] for contract in contracts} == {
@@ -813,6 +814,7 @@ def test_default_registry_contains_only_admitted_contracts_and_never_the_templat
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),
         *(contract.pipeline_id for contract in PIT_FUNDAMENTALS_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_REPORT_CONTRACTS),
+        *(contract.pipeline_id for contract in RESEARCH_INDUSTRY_CONTRACTS),
     }
     assert pipeline_cli(["--runtime-dir", str(runtime_dir), "run", "contract_template_example"]) == 2
     assert "unknown formal pipeline" in capsys.readouterr().err
@@ -821,4 +823,4 @@ def test_default_registry_contains_only_admitted_contracts_and_never_the_templat
 
 def test_cli_contract_validation_is_config_free(capsys) -> None:
     assert pipeline_cli(["validate-contracts"]) == 0
-    assert capsys.readouterr().out == "valid contracts: 14\n"
+    assert capsys.readouterr().out == "valid contracts: 15\n"

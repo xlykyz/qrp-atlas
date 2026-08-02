@@ -85,7 +85,7 @@ def _diagnostic_codes(result) -> set[str]:
 def test_irm_contract_is_registered_and_describes_latest_feed() -> None:
     registry = default_registry()
     contracts = validate_contracts(registry.all())
-    assert len(contracts) == 14
+    assert len(contracts) == 15
     contract = registry.get("irm_qa_incremental")
     description = contract.describe()
     assert description["pipeline_id"] == "irm_qa_incremental"
