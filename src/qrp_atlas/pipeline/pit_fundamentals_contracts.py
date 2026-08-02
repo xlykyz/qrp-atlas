@@ -70,7 +70,12 @@ from .earnings_forecast.fetch import (
     fetch_earnings_forecast,
 )
 from .fundamentals.clean import clean_financial
-from .fundamentals.fetch import FinancialFetchReport, fetch_financial
+from .fundamentals.fetch import (
+    FINANCIAL_TICKER_ROW_LIMIT,
+    FinancialFetchError,
+    FinancialFetchReport,
+    fetch_financial,
+)
 from .pit_backfill.batches import DEFAULT_INDEX_CODES
 from .pit_backfill.manifest import (
     BatchRecord,
@@ -79,6 +84,8 @@ from .pit_backfill.manifest import (
     STATUS_FAILED,
     STATUS_RUNNING,
     STATUS_SUCCESS,
+    STAGE_FETCH,
+    STAGE_LOAD,
     utc_now_iso,
 )
 from .pit_backfill.raw_io import (
@@ -114,6 +121,12 @@ PIT_TABLES = FINANCIAL_TABLES + (
 EARNINGS_TABLE = EARNINGS_FORECAST_EVENT.name
 PIT_DATASETS = ("fundamentals", "industry", "index")
 PIT_STAGES = ("fetch", "clean", "load")
+FINANCIAL_TICKER_DATE_SCOPE = {
+    INCOME_STATEMENT.name: "report_period",
+    BALANCE_SHEET.name: "report_period",
+    CASHFLOW_STATEMENT.name: "announcement_date",
+    FINANCIAL_INDICATOR.name: "report_period",
+}
 
 
 def _check_context(context: PipelineRunContext) -> None:
@@ -482,6 +495,10 @@ def _fundamentals_provider_freshness(context: PipelineRunContext) -> CheckResult
         tables=list(scope["tables"]),
         periods=list(scope["periods"]),
         tickers=list(scope["tickers"]),
+        start_date=scope["start_date"].isoformat() if scope["start_date"] else None,
+        end_date=scope["end_date"].isoformat() if scope["end_date"] else None,
+        ticker_date_scope={table: FINANCIAL_TICKER_DATE_SCOPE[table] for table in scope["tables"]},
+        financial_indicator_page_limit=FINANCIAL_TICKER_ROW_LIMIT,
         announcement_semantics="f_ann_date when present, otherwise ann_date; available_trade_date is strict next open date",
     )
 
@@ -596,6 +613,18 @@ def _validate_financial_frame(frame: object, scope: Mapping[str, Any], table: st
         missing.append("ann_date|f_ann_date")
     if missing:
         raise ContractError("FUNDAMENTALS_PROVIDER_SCHEMA_MISSING", ",".join(missing))
+    if (
+        scope["mode"] == "ticker"
+        and table == FINANCIAL_INDICATOR.name
+        and len(frame) >= FINANCIAL_TICKER_ROW_LIMIT
+    ):
+        raise ContractError(
+            "FUNDAMENTALS_PAGE_LIMIT_REACHED",
+            f"{table} returned {len(frame)} rows; the 100-row provider limit may truncate the requested scope",
+        )
+    start_date = scope.get("start_date")
+    end_date = scope.get("end_date")
+    date_scope = FINANCIAL_TICKER_DATE_SCOPE[table]
     for row_number, (_, row) in enumerate(frame.iterrows()):
         ticker = _text(row.get("ts_code")).upper()
         if not CODE_PATTERN.fullmatch(ticker):
@@ -613,6 +642,20 @@ def _validate_financial_frame(frame: object, scope: Mapping[str, Any], table: st
             announcement = row.get("f_ann_date")
         if _is_missing(announcement):
             raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number} ann_date")
+        if scope["mode"] == "ticker" and start_date is not None and end_date is not None:
+            scoped_value = announcement if date_scope == "announcement_date" else row.get("end_date")
+            try:
+                scoped_date = _date_value(scoped_value, date_scope)
+            except ContractError as exc:
+                raise ContractError(
+                    "FUNDAMENTALS_PROVIDER_DATE_INVALID",
+                    f"row {row_number} {date_scope}",
+                ) from exc
+            if not start_date <= scoped_date <= end_date:
+                raise ContractError(
+                    "FUNDAMENTALS_SCOPE_MISMATCH",
+                    f"row {row_number} {date_scope} outside {start_date:%Y%m%d}-{end_date:%Y%m%d}",
+                )
     return frame
 
 
@@ -820,9 +863,9 @@ def _pit_execute(context: PipelineRunContext) -> BusinessExecution:
         settings=context.settings,
         execution_control=context.execution_control,
         skip_preflight=True,
-        create_backup=False,
         lock_path=state_root / "quant.db.write.lock",
         strict_scope=True,
+        create_backup=STAGE_LOAD in scope["stages"] and STAGE_FETCH not in scope["stages"],
     )
     _check_context(context)
     try:
@@ -934,6 +977,8 @@ def _execute_fundamentals(context: PipelineRunContext) -> BusinessExecution:
             prepared[table] = align_to_schema(cleaned, table, fill_missing_optional=True, drop_extra=True) if not cleaned.empty else pd.DataFrame()
         except ExecutionControlError as exc:
             raise ContractError(exc.code, exc.detail) from exc
+        except FinancialFetchError as exc:
+            raise ContractError(exc.code, exc.detail) from exc
         except ContractError:
             raise
         except Exception as exc:
@@ -954,6 +999,7 @@ def _execute_fundamentals(context: PipelineRunContext) -> BusinessExecution:
                 "rows_inserted": inserted.get(table, 0),
                 "periods": list(scope["periods"]),
                 "announcement_semantics": "f_ann_date preferred over ann_date; available_trade_date is strict next open",
+                "provider_date_scope": FINANCIAL_TICKER_DATE_SCOPE[table],
                 "revision_semantics": "same normalized content repeats the revision_id; changed content is retained",
             },
         )

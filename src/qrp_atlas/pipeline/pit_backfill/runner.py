@@ -1059,6 +1059,7 @@ class PitBackfillRunner:
                     self.db_path,
                     state_dir=self.state_dir,
                     tag=self.config.run_tag,
+                    lock_path=self.config.lock_path,
                 )
                 self.logger.info(
                     "load backup ready path=%s size=%s reused=%s",

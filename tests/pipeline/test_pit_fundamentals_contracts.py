@@ -12,10 +12,12 @@ import pytest
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import init_database
 from qrp_atlas.orchestration.execution_control import ExecutionControl
+from qrp_atlas.pipeline.fundamentals.fetch import FinancialFetchError, fetch_financial_by_tickers
 from qrp_atlas.pipeline.contract_validation import validate_contracts
 from qrp_atlas.pipeline.contracts import PipelineInvocation, ResultStatus
 from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.pit_backfill.raw_io import save_parquet
+from qrp_atlas.pipeline.pit_backfill.safety import load_backup_marker
 from qrp_atlas.pipeline.registry import default_registry
 from qrp_atlas.pipeline import pit_fundamentals_contracts as subject
 
@@ -171,6 +173,91 @@ def test_fundamentals_failure_before_write_leaves_all_selected_tables_empty(tmp_
     assert _count(settings, "balance_sheet") == 0
 
 
+def test_fundamentals_ticker_date_scope_is_endpoint_specific_and_atomic(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+
+    def provider(table, *_args, **_kwargs):
+        if table == "income_statement":
+            return pd.DataFrame([_financial_row(period="20240331")])
+        return pd.DataFrame([_financial_row(period="20231231") | {"ann_date": "20240229", "f_ann_date": "20240229"}])
+
+    monkeypatch.setattr(subject, "fetch_financial", provider)
+    result = _run(
+        subject.FUNDAMENTALS_INGEST,
+        settings,
+        {
+            "mode": "ticker",
+            "tables": "income_statement,cashflow_statement",
+            "tickers": "000001.SZ",
+            "start_date": "20240301",
+            "end_date": "20240331",
+        },
+        run_id="fund-date-scope",
+    )
+
+    assert result.status is ResultStatus.FAILED
+    assert "FUNDAMENTALS_SCOPE_MISMATCH" in {item.code for item in result.diagnostics}
+    assert _count(settings, "income_statement") == 0
+    assert _count(settings, "cashflow_statement") == 0
+
+
+def test_financial_indicator_ticker_scope_uses_report_period_and_rejects_limit(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    current = {"frame": pd.DataFrame([_financial_row(period="20231231")])}
+
+    monkeypatch.setattr(subject, "fetch_financial", lambda *_args, **_kwargs: current["frame"].copy())
+    out_of_range = _run(
+        subject.FUNDAMENTALS_INGEST,
+        settings,
+        {
+            "mode": "ticker",
+            "tables": "financial_indicator",
+            "tickers": "000001.SZ",
+            "start_date": "20240301",
+            "end_date": "20240331",
+        },
+        run_id="indicator-date-scope",
+    )
+    assert out_of_range.status is ResultStatus.FAILED
+    assert "FUNDAMENTALS_SCOPE_MISMATCH" in {item.code for item in out_of_range.diagnostics}
+    assert _count(settings, "financial_indicator") == 0
+
+    current["frame"] = pd.DataFrame([_financial_row(period="20240331") for _ in range(100)])
+    page_limited = _run(
+        subject.FUNDAMENTALS_INGEST,
+        settings,
+        {
+            "mode": "ticker",
+            "tables": "financial_indicator",
+            "tickers": "000001.SZ",
+            "start_date": "20240301",
+            "end_date": "20240331",
+        },
+        run_id="indicator-page-limit",
+    )
+    assert page_limited.status is ResultStatus.FAILED
+    assert "FUNDAMENTALS_PAGE_LIMIT_REACHED" in {item.code for item in page_limited.diagnostics}
+    assert _count(settings, "financial_indicator") == 0
+
+
+def test_financial_indicator_fetch_rejects_exact_provider_page_limit() -> None:
+    class FakePro:
+        def fina_indicator(self, ts_code, **_kwargs):
+            return pd.DataFrame([_financial_row(period="20240331") for _ in range(100)])
+
+    with pytest.raises(FinancialFetchError) as caught:
+        fetch_financial_by_tickers(
+            "financial_indicator",
+            ["000001.SZ"],
+            start_date="20240301",
+            end_date="20240331",
+            client=FakePro(),
+        )
+    assert caught.value.code == "FUNDAMENTALS_PAGE_LIMIT_REACHED"
+
+
 def test_earnings_forecast_preserves_disclosure_and_technical_revisions(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     _initialise_database(settings)
@@ -297,6 +384,74 @@ def test_pit_backfill_uses_explicit_scope_and_offline_corruption_fails_closed(tm
     assert retry.status is ResultStatus.FAILED
     assert "PIT_BACKFILL_FAILED" in {item.code for item in retry.diagnostics}
     assert _count(settings, "income_statement") == 1
+
+
+def test_pit_backfill_formal_staged_load_creates_backup_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+
+    class FakePro:
+        def income_vip(self, period):
+            return pd.DataFrame([_financial_row(period)])
+
+    monkeypatch.setattr("qrp_atlas.config.get_tushare_pro", lambda **_kwargs: FakePro())
+    parameters = {
+        "run_tag": "staged-load",
+        "datasets": "fundamentals",
+        "financial_tables": "income_statement",
+        "financial_periods": "20231231",
+        "stages": "fetch,clean",
+    }
+    first = _run(subject.PIT_BACKFILL, settings, parameters, run_id="staged-fetch-clean")
+    assert first.status is ResultStatus.SUCCESS
+    assert _count(settings, "income_statement") == 0
+    state_dir = settings.paths.state_dir / "pit_backfill" / "staged-load"
+    assert load_backup_marker(state_dir) is None
+
+    load_parameters = {**parameters, "stages": "load", "resume": True, "offline_only": True}
+    loaded = _run(subject.PIT_BACKFILL, settings, load_parameters, run_id="staged-load-1")
+    assert loaded.status is ResultStatus.SUCCESS
+    assert loaded.metrics.rows_written == 1
+    marker = load_backup_marker(state_dir)
+    assert marker is not None
+    assert marker["tag"] == "staged-load"
+
+    repeated = _run(subject.PIT_BACKFILL, settings, load_parameters, run_id="staged-load-2")
+    assert repeated.status is ResultStatus.SUCCESS
+    assert repeated.metrics.rows_written == 0
+    assert _count(settings, "income_statement") == 1
+
+
+def test_pit_backfill_load_only_rejects_corrupt_cleaned_artifact_without_write(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+
+    class FakePro:
+        def income_vip(self, period):
+            return pd.DataFrame([_financial_row(period)])
+
+    monkeypatch.setattr("qrp_atlas.config.get_tushare_pro", lambda **_kwargs: FakePro())
+    parameters = {
+        "run_tag": "staged-corrupt",
+        "datasets": "fundamentals",
+        "financial_tables": "income_statement",
+        "financial_periods": "20231231",
+        "stages": "fetch,clean",
+    }
+    first = _run(subject.PIT_BACKFILL, settings, parameters, run_id="corrupt-fetch-clean")
+    assert first.status is ResultStatus.SUCCESS
+    cleaned_path = settings.paths.canonical_dir / "pit_backfill" / "staged-corrupt" / "fundamentals__income_statement__20231231.parquet"
+    cleaned_path.write_bytes(b"corrupt cleaned artifact")
+
+    failed = _run(
+        subject.PIT_BACKFILL,
+        settings,
+        {**parameters, "stages": "load", "resume": True, "offline_only": True},
+        run_id="corrupt-load",
+    )
+    assert failed.status is ResultStatus.FAILED
+    assert "PIT_BACKFILL_FAILED" in {item.code for item in failed.diagnostics}
+    assert _count(settings, "income_statement") == 0
 
 
 def test_performance_result_and_all_registered_contracts_are_valid(tmp_path) -> None:

@@ -28,6 +28,20 @@ API_BY_TICKER = {
     "financial_indicator": "fina_indicator",
 }
 
+# Tushare's per-ticker fina_indicator endpoint returns at most 100 rows.  A
+# response at the limit is ambiguous: it may be a truncated window, so the
+# formal contract must not silently ingest it as a complete scope.
+FINANCIAL_TICKER_ROW_LIMIT = 100
+
+
+class FinancialFetchError(RuntimeError):
+    """A provider response cannot be accepted as a complete financial scope."""
+
+    def __init__(self, code: str, detail: str):
+        self.code = code
+        self.detail = detail
+        super().__init__(detail)
+
 
 @dataclass(slots=True)
 class FinancialFetchReport:
@@ -175,6 +189,11 @@ def fetch_financial_by_tickers(
         if df is None or df.empty:
             _check(execution_control)
             continue
+        if table == "financial_indicator" and len(df) >= FINANCIAL_TICKER_ROW_LIMIT:
+            raise FinancialFetchError(
+                "FUNDAMENTALS_PAGE_LIMIT_REACHED",
+                f"{table}:{ts_code} returned {len(df)} rows; the 100-row provider limit may truncate the requested scope",
+            )
         if period_set is not None and "end_date" in df.columns:
             periods_normalized = df["end_date"].astype(str).str.replace("-", "", regex=False)
             df = df[periods_normalized.isin(period_set)]
