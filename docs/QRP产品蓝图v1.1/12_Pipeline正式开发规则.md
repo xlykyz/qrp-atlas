@@ -314,3 +314,46 @@ git diff --check
 6. 再一次性创建部署选择、切换调度权并替换 Hermes。
 
 在第 5 步前，Hermes 仍是现有生产的唯一权威。任何单条已完成源码重构的 Pipeline 都不得提前进入 QRP 正式排程。
+
+## 10. Production JobDefinition（生产 Job 实例层）
+
+### 10.1 Contract 与 Job 实例的职责分离
+
+`PipelineContract` 是业务能力的唯一事实来源：输入输出、target date 语义、参数声明与校验、依赖、资源锁、overlap、幂等、事务、completion、quality、超时、重试、性能预算与 executor。它本身不表达"何时调度、是否启用"。
+
+Production JobDefinition（`qrp_atlas.pipeline.production_jobs.ProductionJobDefinition`）只表达生产调度实例：
+
+- `job_id`：生产实例的稳定唯一标识（调度、运行记录与审计的最小单位）；
+- `pipeline_id`：引用一条正式 `PipelineContract`；
+- `enabled`：是否允许进入调度计算；
+- `schedule`：cron 表达式；
+- `timezone`：显式时区；
+- `parameters`：调用 Contract 时注入的固定参数（非必填）；
+- `name` / `description`：可选展示信息。
+
+JobDefinition 禁止复制 Contract 的 `resource_locks`、`dependencies`、`outputs`、`transaction`、`timeout`、`retry`、`completion`、`quality_checks`、业务日期规则与 provider 规则；运行时全部从被引用的 Contract 解析（`job_id → pipeline_id → PipelineContract → 现有 orchestration 执行路径`）。
+
+### 10.2 job_id 与 pipeline_id
+
+- `pipeline_id` 标识业务能力（一条 Contract）；
+- `job_id` 标识生产实例（一个调度条目）；
+- 一条 Contract 可被多个 `job_id` 引用；每个 `job_id` 的 JobRun 历史相互独立，`job_run.job_pipeline_id` 保留能力标识以便审计。
+
+### 10.3 配置载体与校验
+
+- 正式清单：`deploy/pipeline/production-job-definitions.json`（`schema_version: 1`，`jobs` 数组）；
+- 清单可版本控制、可离线校验、不含凭据、不含本机绝对路径；
+- 校验（`validate_production_jobs`）至少覆盖：`job_id` 非空且全局唯一、`pipeline_id` 必须存在于正式 Contract registry、timezone 有效、cron 合法、固定参数只能使用 Contract 已声明参数、缺失必填参数与类型错误 fail-closed；
+- 参数解析与运行时使用同一来源：`parse_parameter_overrides`；
+- 固定参数随每次调度 Run 持久化进 `parameter_overrides`（手动覆盖优先），不复制到 Contract。
+
+### 10.4 源码可发现、定义存在、enabled 与正式部署
+
+四者不是同一概念：
+
+1. 源码可发现：Contract 已注册进 catalog（`validate-contracts`）；
+2. 定义存在：生产 JobDefinition 已写入清单并通过离线校验（`validate-job-definitions`）；
+3. `enabled = true`：该实例允许进入 Scheduler 扫描（`scan`/`serve` 只对 enabled 实例创建 Run）；
+4. 正式部署：由后续 apps 级任务创建 systemd/Schedule 并切换调度权。
+
+本任务所有示例 JobDefinition 均为 `enabled = false`，不代表任何正式部署选择；IRM 的生产切换属于后续 apps 级任务。任何 JobDefinition 都不修改 Hermes、systemd、生产环境变量或生产数据库。
