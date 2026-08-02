@@ -170,28 +170,45 @@ def content_metrics(con: duckdb.DuckDBPyConnection, table_name: str) -> dict[str
         ) AS grouped
         """
     ).fetchone()
-    fingerprint = con.execute(
-        f"""
-        SELECT md5(string_agg(pid || '|' || CAST(reply_time AS VARCHAR), ',' ORDER BY pid))
-        FROM {table_name}
-        """
-    ).fetchone()[0]
     return {
         "total_rows": int(row[0]),
         "min_reply_time": row[1],
         "max_reply_time": row[2],
         "distinct_pid": int(dup_row[0]),
         "duplicate_pid": int(dup_row[1] or 0),
-        "fingerprint": fingerprint,
     }
 
 
-def metrics_diff(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    keys = ("total_rows", "distinct_pid", "duplicate_pid", "min_reply_time", "max_reply_time", "fingerprint")
-    differences = {key: {"source": source[key], "target": target[key]} for key in keys if source[key] != target[key]}
+def content_identity_check(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    source_path: Path,
+    column_names: Sequence[str],
+) -> dict[str, int]:
+    """Compare every Contract column in both directions with EXCEPT ALL.
+
+    The source database is attached read-only to the caller's connection;
+    each connection may attach the source at most once. A row difference in
+    any business field (not only pid/reply_time) is detected, so a tampered
+    target that keeps its primary key and reply_time still fails closed.
+    """
+    con.execute(f"ATTACH '{str(source_path)}' AS source_irm (READ_ONLY)")
+    columns = ", ".join(column_names)
+    missing_in_target = int(
+        con.execute(
+            f"SELECT COUNT(*) FROM (SELECT {columns} FROM source_irm.{TABLE_NAME} "
+            f"EXCEPT ALL SELECT {columns} FROM {TABLE_NAME}) AS diff_rows"
+        ).fetchone()[0]
+    )
+    extra_in_target = int(
+        con.execute(
+            f"SELECT COUNT(*) FROM (SELECT {columns} FROM {TABLE_NAME} "
+            f"EXCEPT ALL SELECT {columns} FROM source_irm.{TABLE_NAME}) AS diff_rows"
+        ).fetchone()[0]
+    )
     return {
-        "identical": not differences,
-        "differences": differences,
+        "missing_in_target": missing_in_target,
+        "extra_in_target": extra_in_target,
     }
 
 
@@ -285,32 +302,48 @@ def migrate(settings: AppSettings, *, source_path: Path | None = None, target_pa
                     target_con.close()
                 result = {"action": "copied_into_empty_target", "target_created": False}
             else:
-                # Target present with rows: require full identity.
+                # Target present with rows: require full identity on every
+                # Contract column (bidirectional EXCEPT ALL).
                 if not diff["compatible"]:
                     raise RuntimeError(
                         f"target {TABLE_NAME} schema diverges from the formal Contract: {diff}"
                     )
-                content_diff = metrics_diff(source_metrics, target_metrics)
-                if not content_diff["identical"]:
+                target_con = duckdb.connect(str(target_path), read_only=True)
+                try:
+                    identity = content_identity_check(
+                        target_con,
+                        source_path=source_path,
+                        column_names=copy_columns,
+                    )
+                finally:
+                    target_con.close()
+                if identity["missing_in_target"] or identity["extra_in_target"]:
                     raise RuntimeError(
                         f"target {TABLE_NAME} content diverges from source; refusing to overwrite: "
-                        f"{content_diff['differences']}"
+                        f"{identity}"
                     )
                 result = {"action": "noop", "target_created": False}
 
-        # Final verification after any write path.
+        # Final verification after any write path: schema plus full-column
+        # bidirectional EXCEPT ALL identity.
         final_con = duckdb.connect(str(target_path), read_only=True)
         try:
             final_actual = inspect_table(final_con, TABLE_NAME)
             final_diff = schema_diff(final_actual, expected)
             final_metrics = content_metrics(final_con, TABLE_NAME)
+            final_identity = content_identity_check(
+                final_con,
+                source_path=source_path,
+                column_names=copy_columns,
+            )
         finally:
             final_con.close()
         if not final_diff["compatible"]:
             raise RuntimeError(f"post-migration schema check failed: {final_diff}")
-        content_diff = metrics_diff(source_metrics, final_metrics)
-        if not content_diff["identical"]:
-            raise RuntimeError(f"post-migration content check failed: {content_diff['differences']}")
+        if final_identity["missing_in_target"] or final_identity["extra_in_target"]:
+            raise RuntimeError(
+                f"post-migration content diverges from source: {final_identity}"
+            )
 
         result.update(
             {
@@ -319,6 +352,7 @@ def migrate(settings: AppSettings, *, source_path: Path | None = None, target_pa
                 "table": TABLE_NAME,
                 "source_metrics": source_metrics,
                 "target_metrics": final_metrics,
+                "identity": final_identity,
                 "schema_ok": True,
             }
         )
@@ -346,7 +380,9 @@ def main(argv: list[str] | None = None) -> int:
         f"distinct_pid={result['target_metrics']['distinct_pid']} "
         f"duplicate_pid={result['target_metrics']['duplicate_pid']} "
         f"min_reply_time={result['target_metrics']['min_reply_time']} "
-        f"max_reply_time={result['target_metrics']['max_reply_time']}"
+        f"max_reply_time={result['target_metrics']['max_reply_time']} "
+        f"identity_missing={result['identity']['missing_in_target']} "
+        f"identity_extra={result['identity']['extra_in_target']}"
     )
     return 0
 

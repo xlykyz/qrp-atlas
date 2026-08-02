@@ -204,3 +204,30 @@ def test_migrate_does_not_modify_source(tmp_path: Path) -> None:
 
     after = _target_metrics(source)
     assert before == after
+
+
+def test_migrate_fails_closed_on_business_field_tampering(tmp_path: Path) -> None:
+    """行数/pid/reply_time 均相同，仅业务字段（reply_content）被篡改时必须 fail-closed。"""
+    source = tmp_path / "quant.db"
+    target = tmp_path / "irm_qa.duckdb"
+    _build_source(source)
+    settings = _settings(tmp_path, source=source, target=target)
+
+    first = mod.migrate(settings)
+    assert first["action"] == "created"
+
+    # 篡改目标库 reply_content（pid 与 reply_time 保持不变）
+    con = duckdb.connect(str(target))
+    try:
+        con.execute(
+            "UPDATE irm_interaction_qa SET reply_content = '损坏或错误内容' "
+            "WHERE pid = 'PID001'"
+        )
+    finally:
+        con.close()
+
+    with pytest.raises(RuntimeError, match="content diverges"):
+        mod.migrate(settings)
+
+    # 目标库未被覆盖或清空
+    assert _target_metrics(target)["total_rows"] == 2
