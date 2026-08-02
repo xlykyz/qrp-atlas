@@ -30,6 +30,7 @@ from qrp_atlas.pipeline.job_adapter import (
 from qrp_atlas.pipeline.production_jobs import (
     DEFAULT_PRODUCTION_JOBS_PATH,
     load_and_validate_production_jobs,
+    resolve_instance_dependencies,
 )
 from qrp_atlas.orchestration.definitions import DEFAULT_DEFINITIONS_PATH, DefinitionValidationError, definitions_by_id, load_definitions
 from qrp_atlas.orchestration.models import JobDefinition, JobStatus
@@ -287,12 +288,22 @@ def _load_definitions_for_args(args: argparse.Namespace, *, require_source: bool
 
 
 def _definitions_from_production_jobs(path: str | Path) -> tuple[JobDefinition, ...]:
-    """Map validated production job instances onto existing runtime definitions."""
+    """Map validated production job instances onto existing runtime definitions.
+
+    Contract dependencies (pipeline_id values) are resolved to the
+    corresponding production instance job_id values before mapping, so the
+    runtime Scheduler and dependency plans query by job_id.
+    """
 
     registry = default_registry()
     jobs = load_and_validate_production_jobs(path, registry=registry)
+    resolved = resolve_instance_dependencies(jobs, registry=registry)
     return tuple(
-        runtime_definition_from_production_job(job, registry.get(job.pipeline_id))
+        runtime_definition_from_production_job(
+            job,
+            registry.get(job.pipeline_id),
+            dependency_job_ids=resolved[job.job_id],
+        )
         for job in jobs
     )
 

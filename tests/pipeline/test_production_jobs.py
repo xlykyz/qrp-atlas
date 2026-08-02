@@ -13,6 +13,7 @@ from qrp_atlas.orchestration.cron import CronExpression
 from qrp_atlas.orchestration.definitions import DefinitionValidationError
 from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.orchestration.models import JobRun, JobStatus
+from qrp_atlas.orchestration.planning import dependency_plan
 from qrp_atlas.orchestration.scheduler import JobScheduler
 from qrp_atlas.orchestration.store import JobRuntimeStore
 from qrp_atlas.pipeline.contract_validation import validate_contracts
@@ -22,6 +23,7 @@ from qrp_atlas.pipeline.production_jobs import (
     DEFAULT_PRODUCTION_JOBS_PATH,
     ProductionJobDefinition,
     load_production_jobs,
+    resolve_instance_dependencies,
     validate_production_jobs,
 )
 from qrp_atlas.pipeline.registry import default_registry
@@ -300,3 +302,103 @@ def test_manifest_reload_is_stable(tmp_path: Path) -> None:
     second = load_production_jobs(path)
     assert first == second
     assert first == load_production_jobs(path)
+
+
+def test_dependency_resolution_maps_pipeline_to_instance() -> None:
+    jobs = (
+        _job("market-daily-close", pipeline_id="market_daily_update"),
+        _job("daily-basic-close", pipeline_id="daily_basic_update"),
+    )
+    resolved = resolve_instance_dependencies(jobs, registry=_registry())
+    # daily_basic_update.dependencies = ("market_daily_update",) → 解析为实例 job_id
+    assert resolved["market-daily-close"] == ()
+    assert resolved["daily-basic-close"] == ("market-daily-close",)
+
+    contract = _registry().get("daily_basic_update")
+    downstream = runtime_definition_from_production_job(
+        jobs[1], contract, dependency_job_ids=resolved["daily-basic-close"]
+    )
+    assert downstream.dependencies == ("market-daily-close",)
+    assert downstream.pipeline_id == "daily_basic_update"
+
+
+def test_downstream_unblocks_after_upstream_success(tmp_path: Path) -> None:
+    store = JobRuntimeStore(tmp_path / "runtime" / "job_runtime.sqlite3")
+    store.initialize()
+    registry = _registry()
+    upstream_contract = registry.get("market_daily_update")
+    downstream_contract = registry.get("daily_basic_update")
+    upstream = runtime_definition_from_production_job(
+        _job("market-daily-close", pipeline_id="market_daily_update", enabled=True),
+        upstream_contract,
+    )
+    downstream = runtime_definition_from_production_job(
+        _job("daily-basic-close", pipeline_id="daily_basic_update", enabled=True),
+        downstream_contract,
+        dependency_job_ids=("market-daily-close",),
+    )
+    scheduled_at = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
+    up_run, _ = store.create_scheduled_run(upstream, scheduled_at=scheduled_at)
+    down_run, _ = store.create_scheduled_run(
+        downstream,
+        scheduled_at=scheduled_at,
+        status=JobStatus.BLOCKED,
+        error_summary="dependency market-daily-close has no completed run",
+    )
+    assert store.get_run(down_run.run_id).status is JobStatus.BLOCKED
+
+    store.claim_run(
+        up_run.run_id,
+        job_id=upstream.job_id,
+        definition_version=upstream.definition_version,
+        overlap_policy=upstream.overlap_policy,
+        resource_locks=upstream.resource_locks,
+        lease_seconds=60,
+    )
+    store.finish_run(
+        up_run.run_id,
+        status=JobStatus.SUCCESS,
+        exit_code=0,
+        timed_out=False,
+        error_summary=None,
+        wall_duration_ms=1,
+        user_cpu_ms=None,
+        system_cpu_ms=None,
+        peak_rss_kb=None,
+        result_payload={"status": "SUCCESS"},
+    )
+    scheduler = JobScheduler(store, (upstream, downstream))
+    scheduler.refresh_blocked_runs()
+
+    assert store.get_run(down_run.run_id).status is JobStatus.PENDING
+
+
+def test_dependency_plan_outputs_both_instances() -> None:
+    registry = _registry()
+    upstream = runtime_definition_from_production_job(
+        _job("market-daily-close", pipeline_id="market_daily_update"),
+        registry.get("market_daily_update"),
+    )
+    downstream = runtime_definition_from_production_job(
+        _job("daily-basic-close", pipeline_id="daily_basic_update"),
+        registry.get("daily_basic_update"),
+        dependency_job_ids=("market-daily-close",),
+    )
+    plan = dependency_plan((upstream, downstream), "daily-basic-close")
+    assert [item.job_id for item in plan] == ["market-daily-close", "daily-basic-close"]
+
+
+def test_missing_upstream_instance_fails_validation() -> None:
+    jobs = (_job("daily-basic-close", pipeline_id="daily_basic_update"),)
+    with pytest.raises(DefinitionValidationError, match="has no production job instance"):
+        validate_production_jobs(jobs, registry=_registry())
+
+
+def test_ambiguous_upstream_instance_fails_validation() -> None:
+    jobs = (
+        _job("market-daily-close", pipeline_id="market_daily_update"),
+        _job("market-daily-extra", pipeline_id="market_daily_update"),
+        _job("daily-basic-close", pipeline_id="daily_basic_update"),
+    )
+    with pytest.raises(DefinitionValidationError, match="ambiguous"):
+        validate_production_jobs(jobs, registry=_registry())

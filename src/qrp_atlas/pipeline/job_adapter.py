@@ -223,6 +223,7 @@ def runtime_definition_from_production_job(
     contract: PipelineContract,
     *,
     environment: dict[str, str] | None = None,
+    dependency_job_ids: tuple[str, ...] | None = None,
 ) -> JobDefinition:
     """Map one production job instance onto the existing runtime definition.
 
@@ -231,6 +232,11 @@ def runtime_definition_from_production_job(
     display name.  Every business rule (locks, dependencies, outputs,
     transaction, timeout, retry, completion, quality, date policy) comes
     from the referenced Contract.
+
+    ``dependency_job_ids`` carries the instance-resolved dependencies: the
+    Contract declares business dependencies as pipeline_id values, but the
+    runtime Scheduler and dependency plans query by job_id.  When omitted,
+    the raw Contract dependencies are kept (compatible fallback).
     """
 
     return JobDefinition(
@@ -248,7 +254,9 @@ def runtime_definition_from_production_job(
             job.job_id,
         ),
         working_directory=None,
-        dependencies=contract.dependencies,
+        dependencies=(
+            dependency_job_ids if dependency_job_ids is not None else contract.dependencies
+        ),
         timeout_seconds=contract.performance.hard_timeout_seconds,
         max_retries=contract.execution.max_retries,
         overlap_policy=contract.execution.overlap_policy,

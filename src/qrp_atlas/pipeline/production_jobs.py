@@ -155,7 +155,9 @@ def validate_production_jobs(
     - required Contract parameters missing from the job fail;
     - parameter values are parsed and typed exactly like runtime overrides
       (one interpretation source: ``parse_parameter_overrides``);
-    - one pipeline_id may be referenced by many distinct job_id values.
+    - one pipeline_id may be referenced by many distinct job_id values;
+    - every Contract dependency (a pipeline_id) must resolve to exactly one
+      production job instance (see :func:`resolve_instance_dependencies`).
     """
 
     effective_registry = registry or default_registry()
@@ -172,7 +174,85 @@ def validate_production_jobs(
             raise DefinitionValidationError(
                 f"{job.job_id} fixed parameters are invalid: {exc.code}: {exc.detail}"
             ) from exc
+    resolve_instance_dependencies(jobs, registry=effective_registry)
     return jobs
+
+
+def resolve_instance_dependencies(
+    jobs: tuple[ProductionJobDefinition, ...],
+    *,
+    registry: PipelineRegistry | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Resolve every Contract dependency (a pipeline_id) to a job_id.
+
+    The runtime Scheduler and dependency plans query dependencies by
+    ``job_id``, but a Contract declares its business dependencies as
+    ``pipeline_id`` values.  For each job, every declared dependency is
+    resolved against the production manifest:
+
+    - exactly one instance for that pipeline_id -> resolved to its job_id;
+    - no instance -> fail closed (the instance graph cannot be scheduled);
+    - multiple instances -> ambiguous, fail closed (the intended upstream
+      cannot be determined);
+    - resolved instance graphs must stay acyclic.
+
+    The Contract itself is never modified; only the runtime
+    ``JobDefinition.dependencies`` carries resolved job_id values.
+    """
+
+    effective_registry = registry or default_registry()
+    instances_by_pipeline: dict[str, list[str]] = {}
+    for job in jobs:
+        instances_by_pipeline.setdefault(job.pipeline_id, []).append(job.job_id)
+
+    resolved: dict[str, tuple[str, ...]] = {}
+    for job in jobs:
+        try:
+            contract = effective_registry.get(job.pipeline_id)
+        except KeyError as exc:
+            raise DefinitionValidationError(
+                f"{job.job_id} references unknown formal pipeline: {job.pipeline_id}"
+            ) from exc
+        dependency_job_ids: list[str] = []
+        for dependency_pipeline in contract.dependencies:
+            candidates = instances_by_pipeline.get(dependency_pipeline, [])
+            if not candidates:
+                raise DefinitionValidationError(
+                    f"{job.job_id} dependency pipeline {dependency_pipeline} "
+                    "has no production job instance"
+                )
+            if len(candidates) > 1:
+                raise DefinitionValidationError(
+                    f"{job.job_id} dependency pipeline {dependency_pipeline} is ambiguous: "
+                    f"{', '.join(sorted(candidates))}"
+                )
+            dependency_job_ids.append(candidates[0])
+        resolved[job.job_id] = tuple(dependency_job_ids)
+    _validate_resolved_acyclic(resolved)
+    return resolved
+
+
+def _validate_resolved_acyclic(resolved: Mapping[str, tuple[str, ...]]) -> None:
+    """Reject every directed dependency cycle among resolved job instances."""
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(job_id: str) -> None:
+        if job_id in visiting:
+            raise DefinitionValidationError(
+                f"production job dependency cycle detected at {job_id}"
+            )
+        if job_id in visited:
+            return
+        visiting.add(job_id)
+        for dependency_id in resolved.get(job_id, ()):
+            visit(dependency_id)
+        visiting.remove(job_id)
+        visited.add(job_id)
+
+    for job_id in resolved:
+        visit(job_id)
 
 
 def load_and_validate_production_jobs(
