@@ -212,6 +212,7 @@ class PathSettings:
     canonical_dir: Path
     db_dir: Path
     duckdb_path: Path
+    irm_qa_duckdb_path: Path
     state_dir: Path
     job_runtime_dir: Path
     backtest_runs_dir: Path
@@ -360,6 +361,13 @@ class AppSettings:
         duckdb_path = _resolve_path(
             "QRP_DUCKDB_PATH",
             reader.get("QRP_DUCKDB_PATH", str(db_dir / "quant.db")),
+            base=root,
+        )
+        irm_qa_duckdb_path = _resolve_path(
+            "QRP_IRM_QA_DUCKDB_PATH",
+            reader.get(
+                "QRP_IRM_QA_DUCKDB_PATH", str(db_dir / "irm_qa.duckdb")
+            ),
             base=root,
         )
         state_dir = _resolve_path(
@@ -534,6 +542,7 @@ class AppSettings:
             canonical_dir=canonical_dir,
             db_dir=db_dir,
             duckdb_path=duckdb_path,
+            irm_qa_duckdb_path=irm_qa_duckdb_path,
             state_dir=state_dir,
             job_runtime_dir=job_runtime_dir,
             backtest_runs_dir=backtest_runs_dir,
@@ -596,6 +605,7 @@ class AppSettings:
                 "home": str(self.paths.home),
                 "data_dir": str(self.paths.data_dir),
                 "duckdb_path": str(self.paths.duckdb_path),
+                "irm_qa_duckdb_path": str(self.paths.irm_qa_duckdb_path),
                 "state_dir": str(self.paths.state_dir),
                 "job_runtime_dir": str(self.paths.job_runtime_dir),
                 "backtest_runs_dir": str(self.paths.backtest_runs_dir),
@@ -743,6 +753,7 @@ SUPPORTED_ENV_VARS = frozenset(
         "QRP_HOME",
         "QRP_DATA_DIR",
         "QRP_DUCKDB_PATH",
+        "QRP_IRM_QA_DUCKDB_PATH",
         "QRP_STATE_DIR",
         "QRP_JOB_RUNTIME_DIR",
         "QRP_BACKTEST_RUNS_DIR",

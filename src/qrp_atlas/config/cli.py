@@ -95,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--home", help="non-secret QRP_HOME value")
     setup_parser.add_argument("--data-dir", help="non-secret QRP_DATA_DIR value")
     setup_parser.add_argument("--duckdb-path", help="non-secret QRP_DUCKDB_PATH value")
+    setup_parser.add_argument(
+        "--irm-qa-duckdb-path",
+        help="non-secret QRP_IRM_QA_DUCKDB_PATH value",
+    )
     setup_parser.add_argument("--api-host")
     setup_parser.add_argument("--api-port", type=int)
     setup_parser.add_argument("--cors-origin", action="append", default=[])
@@ -125,6 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             home=args.home,
             data_dir=args.data_dir,
             duckdb_path=args.duckdb_path,
+            irm_qa_duckdb_path=args.irm_qa_duckdb_path,
             api_host=args.api_host,
             api_port=args.api_port,
             cors_origins=tuple(args.cors_origin),

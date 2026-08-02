@@ -58,3 +58,13 @@
 ## 完成后汇报
 
 汇报真实增量算法、唯一键与幂等策略、分页完整性边界、锁与 overlap、ExecutionControl 传播、性能证据、测试结果、修改文件和仍未解决事实。不得部署或合并目标分支。
+
+## 后续变更（2026-08，fix/v1.1-irm-dedicated-db）
+
+IRM 已从共享主库 `quant.db` 完全迁移到独立数据库 `irm_qa.duckdb`：
+
+- 新配置项 `settings.paths.irm_qa_duckdb_path`（环境变量 `QRP_IRM_QA_DUCKDB_PATH`，默认 `<数据根目录>/db/irm_qa.duckdb`）；
+- Contract 输出资源改为 `irm_qa_db`，写锁改为 `irm_qa_writer`，location 为 `settings.paths.irm_qa_duckdb_path`；
+- 主库 bootstrap（`init_database`）不再创建可写 IRM 表，IRM 表由 `init_irm_database` 在独立库创建；
+- 一次性迁移工具 `scripts/migrate_irm_qa_to_dedicated_db.py`（幂等、fail-closed）；
+- 旧主库 `quant.db.irm_interaction_qa` 保留为迁移时点冻结回滚副本，不再写入。

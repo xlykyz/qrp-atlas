@@ -130,6 +130,7 @@
 | 物理资源键 | 统一排他锁 | 配置位置 |
 | --- | --- | --- |
 | `quant_db` | `quant_db_writer` | `settings.paths.duckdb_path` |
+| `irm_qa_db` | `irm_qa_writer` | `settings.paths.irm_qa_duckdb_path` |
 | `system_b_episode_db` | `system_b_episode_writer` | System B episode 数据库配置 |
 | `system_b_pools_db` | `system_b_pools_writer` | System B pools 数据库配置 |
 
@@ -251,7 +252,7 @@ qrp-atlas-jobs run job_id --set batch_size=500
 4. 为该合同补充公共验收测试和性能证据；
 5. 通过 `qrp-atlas-jobs validate-contracts` 后，才可在单独的部署选择清单中引用它。
 
-`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts`、`qrp_atlas.pipeline.irm_qa_contracts`、`qrp_atlas.pipeline.membership_contracts`、`qrp_atlas.pipeline.pit_fundamentals_contracts`、`qrp_atlas.pipeline.research_report_contracts` 和 `qrp_atlas.pipeline.research_industry_contracts`，共包含十五条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest`、`irm_qa_incremental`、`industry_membership_ingest`、`index_component_ingest`、`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`、`research_stock_report_ingest` 以及 `research_industry_report_ingest`。两个研究报告 Contract 使用显式日期范围、完整列表/详情响应、数据库事务、run-scoped CSV/PDF staging、`quant_db_writer` 和 `overlap_policy=FORBID`；行业报告分类直接使用 provider 字段，不读取行业成员历史或行情表，也不执行成员/价格聚合；历史晨间和晚间 Job 只是同一业务能力的调度事实。IRM 使用 P5W 最新 feed、`pid` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；成员关系 Contract 使用显式范围、`revision_id` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；Tushare 没有可靠的 total/page 证据，结果保留这一完整性边界。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
+`qrp_atlas.pipeline.examples.contract_template` 是无 I/O、无真实凭据、无部署选择的参考模板。它只演示 Contract、executor、NOOP、测试和 runtime 结果接口，不能被当作生产数据任务，也绝不加入默认 catalog。当前默认 catalog 显式导入 `qrp_atlas.pipeline.market_data_contracts`、`qrp_atlas.pipeline.cninfo_contracts`、`qrp_atlas.pipeline.irm_qa_contracts`、`qrp_atlas.pipeline.membership_contracts`、`qrp_atlas.pipeline.pit_fundamentals_contracts`、`qrp_atlas.pipeline.research_report_contracts` 和 `qrp_atlas.pipeline.research_industry_contracts`，共包含十五条通过正式验收的 Contract：六条基础市场数据 Contract、`cninfo_research_visit_ingest`、`irm_qa_incremental`、`industry_membership_ingest`、`index_component_ingest`、`pit_backfill`、`fundamentals_ingest`、`earnings_forecast_ingest`、`research_stock_report_ingest` 以及 `research_industry_report_ingest`。两个研究报告 Contract 使用显式日期范围、完整列表/详情响应、数据库事务、run-scoped CSV/PDF staging、`quant_db_writer` 和 `overlap_policy=FORBID`；行业报告分类直接使用 provider 字段，不读取行业成员历史或行情表，也不执行成员/价格聚合；历史晨间和晚间 Job 只是同一业务能力的调度事实。IRM 使用 P5W 最新 feed、`pid` 幂等追加、独立 `irm_qa.duckdb`（`irm_qa_db` 资源、`irm_qa_writer` 锁）和 `overlap_policy=FORBID`；成员关系 Contract 使用显式范围、`revision_id` 幂等追加、`quant_db_writer` 和 `overlap_policy=FORBID`；Tushare 没有可靠的 total/page 证据，结果保留这一完整性边界。其他既有 Pipeline 仍不会被默认 CLI 发现或进入 QRP 正式调度。源码 catalog 可发现不等于部署启用：本仓库没有为这些 Contract 新增部署选择、Production Definition、systemd 或 Hermes 变更。
 
 ### 6.1 Contract 与源码模块组织
 

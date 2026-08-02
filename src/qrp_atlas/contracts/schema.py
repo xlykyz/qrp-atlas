@@ -953,7 +953,10 @@ def get_table(name: str) -> TableSchema:
 
 
 def init_database(con) -> None:
-    """初始化数据库，创建所有表
+    """初始化主数据库，创建除 IRM 互动问答外的所有契约表。
+
+    IRM 互动问答表属于独立数据库 ``irm_qa.duckdb``（``irm_qa_db`` 资源），
+    由 :func:`init_irm_database` 创建；主库 bootstrap 不再创建可写 IRM 表。
 
     Args:
         con: DuckDB 连接对象
@@ -964,4 +967,20 @@ def init_database(con) -> None:
         init_database(con)
     """
     for table in ALL_TABLES:
+        if table is IRM_INTERACTION_QA:
+            continue
         con.execute(table.duckdb_create_sql())
+
+
+def init_irm_database(con) -> None:
+    """初始化 IRM 独立数据库，创建 ``irm_interaction_qa`` 契约表。
+
+    Args:
+        con: DuckDB 连接对象
+
+    Example:
+        import duckdb
+        con = duckdb.connect("irm_qa.duckdb")
+        init_irm_database(con)
+    """
+    con.execute(IRM_INTERACTION_QA.duckdb_create_sql())

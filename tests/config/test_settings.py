@@ -34,6 +34,7 @@ def test_default_configuration_preserves_repository_layout(tmp_path):
     assert settings.paths.home == root.resolve()
     assert settings.paths.data_dir == (root / "data").resolve()
     assert settings.paths.duckdb_path == (root / "data" / "db" / "quant.db").resolve()
+    assert settings.paths.irm_qa_duckdb_path == (root / "data" / "db" / "irm_qa.duckdb").resolve()
     assert settings.paths.backtest_runs_dir == (root / "data" / "backtest_runs").resolve()
     assert settings.database.read_only is False
     assert settings.authentication.mode.value == "local"
@@ -47,6 +48,7 @@ def test_environment_overrides_and_relative_paths_resolve_from_project_root(tmp_
             "QRP_HOME": "runtime-home",
             "QRP_DATA_DIR": "storage",
             "QRP_DUCKDB_PATH": "database/custom.duckdb",
+            "QRP_IRM_QA_DUCKDB_PATH": "database/irm_qa_custom.duckdb",
             "QRP_API_PORT": "9100",
             "QRP_READ_ONLY": "yes",
         },
@@ -56,6 +58,7 @@ def test_environment_overrides_and_relative_paths_resolve_from_project_root(tmp_
     assert settings.paths.home == (root / "runtime-home").resolve()
     assert settings.paths.data_dir == (root / "storage").resolve()
     assert settings.paths.duckdb_path == (root / "database" / "custom.duckdb").resolve()
+    assert settings.paths.irm_qa_duckdb_path == (root / "database" / "irm_qa_custom.duckdb").resolve()
     assert settings.api.port == 9100
     assert settings.runtime.read_only is True
 

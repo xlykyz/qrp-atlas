@@ -21,6 +21,7 @@ from qrp_atlas.contracts import (
     TICKER,
     TRADE_DATE,
     init_database,
+    init_irm_database,
 )
 
 
@@ -67,18 +68,35 @@ def test_all_tables_create_sql_executable_in_duckdb(tmp_path):
         con.close()
 
 
-def test_init_database_creates_all_tables(tmp_path):
-    """init_database() 在全新 DuckDB 上应能建出全部 contracts 表。"""
+def test_init_database_creates_main_tables_without_irm(tmp_path):
+    """init_database() 在全新 DuckDB 上建出除 IRM 外的全部契约表，且不创建可写 IRM 表。"""
     db_path = tmp_path / "init.duckdb"
     con = duckdb.connect(str(db_path))
     try:
         init_database(con)
-        expected = {t.name for t in ALL_TABLES}
+        expected = {t.name for t in ALL_TABLES} - {"irm_interaction_qa"}
         rows = con.execute("SHOW TABLES").fetchall()
         actual = {r[0] for r in rows}
         assert expected <= actual, (
             f"missing tables: {expected - actual}"
         )
+        assert "irm_interaction_qa" not in actual
+    finally:
+        con.close()
+
+
+def test_init_irm_database_creates_irm_table(tmp_path):
+    """init_irm_database() 在独立库创建 irm_interaction_qa 正式契约表。"""
+    db_path = tmp_path / "irm.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        init_irm_database(con)
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        assert tables == {"irm_interaction_qa"}
+        rows = con.execute("PRAGMA table_info('irm_interaction_qa')").fetchall()
+        names = {r[1] for r in rows}
+        for required in ("pid", "reply_time", "reply_date"):
+            assert required in names
     finally:
         con.close()
 

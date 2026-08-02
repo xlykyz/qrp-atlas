@@ -19,6 +19,7 @@ RAW_DIR = _EFFECTIVE.paths.raw_dir
 CANONICAL_DIR = _EFFECTIVE.paths.canonical_dir
 DB_DIR = _EFFECTIVE.paths.db_dir
 DB_PATH = _EFFECTIVE.paths.duckdb_path
+IRM_QA_DUCKDB_PATH = _EFFECTIVE.paths.irm_qa_duckdb_path
 STATE_DIR = _EFFECTIVE.paths.state_dir
 JOB_RUNTIME_DIR = _EFFECTIVE.paths.job_runtime_dir
 DAILY_SNAPSHOT_RAW_DIR = RAW_DIR / "daily_snapshot"

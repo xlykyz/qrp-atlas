@@ -10,7 +10,7 @@ import duckdb
 import pytest
 
 from qrp_atlas.config.settings import AppSettings
-from qrp_atlas.contracts import init_database
+from qrp_atlas.contracts import init_database, init_irm_database
 from qrp_atlas.orchestration.execution_control import ExecutionControl, ExecutionControlError
 from qrp_atlas.pipeline.contract_validation import validate_contracts
 from qrp_atlas.pipeline.contracts import ContractError, ResultStatus
@@ -46,6 +46,9 @@ def _settings(tmp_path: Path) -> AppSettings:
     settings.paths.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
     with duckdb.connect(str(settings.paths.duckdb_path)) as connection:
         init_database(connection)
+    settings.paths.irm_qa_duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(str(settings.paths.irm_qa_duckdb_path)) as connection:
+        init_irm_database(connection)
     return settings
 
 
@@ -74,7 +77,9 @@ def _run_contract(settings: AppSettings):
 
 
 def _count_rows(settings: AppSettings) -> int:
-    with duckdb.connect(str(settings.paths.duckdb_path), read_only=True) as connection:
+    with duckdb.connect(
+        str(settings.paths.irm_qa_duckdb_path), read_only=True
+    ) as connection:
         return int(connection.execute("SELECT COUNT(*) FROM irm_interaction_qa").fetchone()[0])
 
 
@@ -90,9 +95,22 @@ def test_irm_contract_is_registered_and_describes_latest_feed() -> None:
     description = contract.describe()
     assert description["pipeline_id"] == "irm_qa_incremental"
     assert description["execution"]["overlap_policy"] == "FORBID"
-    assert description["resource_locks"] == ["quant_db_writer"]
+    assert description["resource_locks"] == ["irm_qa_writer"]
     assert description["outputs"][0]["unique_key"] == ["pid"]
+    assert description["outputs"][0]["physical_resource"] == "irm_qa_db"
+    assert description["outputs"][0]["location"] == "settings.paths.irm_qa_duckdb_path"
     assert description["inputs"][0]["target_date_semantics"].startswith("latest provider feed")
+
+
+def test_irm_contract_does_not_use_quant_db_writer() -> None:
+    contract = default_registry().get("irm_qa_incremental")
+    assert "quant_db_writer" not in contract.resource_locks
+    assert "quant_db" not in {
+        output.physical_resource for output in contract.outputs
+    }
+    assert all(
+        output.location != "settings.paths.duckdb_path" for output in contract.outputs
+    )
 
 
 def test_contract_scans_multiple_pages_and_reports_actual_metrics(tmp_path, monkeypatch) -> None:
@@ -292,4 +310,70 @@ def test_write_failure_is_failed_and_does_not_report_success(tmp_path, monkeypat
 
     assert result.status is ResultStatus.FAILED
     assert "IRM_WRITE_FAILED" in _diagnostic_codes(result)
+    assert _count_rows(settings) == 0
+
+
+def _main_db_tables(settings: AppSettings) -> set[str]:
+    with duckdb.connect(str(settings.paths.duckdb_path), read_only=True) as connection:
+        return {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+
+
+def test_writes_happen_only_in_dedicated_database(tmp_path, monkeypatch) -> None:
+    page = {"success": True, "rows": [_raw_row(index) for index in range(3)]}
+    _install_pages(monkeypatch, {1: page})
+    settings = _settings(tmp_path)
+    main_tables_before = _main_db_tables(settings)
+
+    result = _run_contract(settings)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.rows_written == 3
+    # 独立库拿到数据
+    assert _count_rows(settings) == 3
+    # 主库没有被创建 IRM 表、也没有其他表集合变化
+    assert _main_db_tables(settings) == main_tables_before
+    assert "irm_interaction_qa" not in _main_db_tables(settings)
+
+
+def test_completion_and_quality_use_dedicated_database(tmp_path, monkeypatch) -> None:
+    """主库完全没有 irm_interaction_qa 表时，completion 与 quality check 仍成功，
+    证明二者查询的是独立库而非主库。"""
+    page = {"success": True, "rows": [_raw_row(1)]}
+    _install_pages(monkeypatch, {1: page})
+    settings = _settings(tmp_path)
+    assert "irm_interaction_qa" not in _main_db_tables(settings)
+
+    result = _run_contract(settings)
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.outputs[0].completed is True
+    assert all(check.passed for check in result.completion_checks)
+    assert any(
+        check.check_id == "irm_unique_key_quality" and check.passed
+        for check in result.completion_checks
+    )
+
+
+def test_transaction_failure_leaves_no_partial_rows(tmp_path, monkeypatch) -> None:
+    """写入事务失败必须完整回滚，独立库不残留半成品。"""
+    _install_pages(monkeypatch, {1: {"success": True, "rows": [_raw_row(1)]}})
+    settings = _settings(tmp_path)
+
+    def fail_commit(*_args, **_kwargs):
+        raise RuntimeError("commit unavailable")
+
+    real_append = contract_module.append_interaction_qa
+    calls: list[str] = []
+
+    def append_with_failing_commit(*args, **kwargs):
+        result = real_append(*args, **kwargs)
+        calls.append("appended")
+        fail_commit()
+        return result
+
+    monkeypatch.setattr(contract_module, "append_interaction_qa", append_with_failing_commit)
+    result = _run_contract(settings)
+
+    assert result.status is ResultStatus.FAILED
+    assert calls == ["appended"]
     assert _count_rows(settings) == 0
