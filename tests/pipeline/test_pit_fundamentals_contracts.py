@@ -173,14 +173,12 @@ def test_fundamentals_failure_before_write_leaves_all_selected_tables_empty(tmp_
     assert _count(settings, "balance_sheet") == 0
 
 
-def test_fundamentals_ticker_date_scope_is_endpoint_specific_and_atomic(tmp_path, monkeypatch) -> None:
+def test_fundamentals_ticker_date_scope_uses_provider_announcement_date(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     _initialise_database(settings)
 
-    def provider(table, *_args, **_kwargs):
-        if table == "income_statement":
-            return pd.DataFrame([_financial_row(period="20240331")])
-        return pd.DataFrame([_financial_row(period="20231231") | {"ann_date": "20240229", "f_ann_date": "20240229"}])
+    def provider(*_args, **_kwargs):
+        return pd.DataFrame([_financial_row(period="20231231") | {"f_ann_date": "20240320"}])
 
     monkeypatch.setattr(subject, "fetch_financial", provider)
     result = _run(
@@ -188,7 +186,7 @@ def test_fundamentals_ticker_date_scope_is_endpoint_specific_and_atomic(tmp_path
         settings,
         {
             "mode": "ticker",
-            "tables": "income_statement,cashflow_statement",
+            "tables": "income_statement,balance_sheet,cashflow_statement",
             "tickers": "000001.SZ",
             "start_date": "20240301",
             "end_date": "20240331",
@@ -196,10 +194,38 @@ def test_fundamentals_ticker_date_scope_is_endpoint_specific_and_atomic(tmp_path
         run_id="fund-date-scope",
     )
 
+    assert result.status is ResultStatus.SUCCESS
+    assert _count(settings, "income_statement") == 1
+    assert _count(settings, "balance_sheet") == 1
+    assert _count(settings, "cashflow_statement") == 1
+
+
+@pytest.mark.parametrize("table", ["income_statement", "balance_sheet", "cashflow_statement"])
+def test_fundamentals_ticker_announcement_date_out_of_range_fails_closed(tmp_path, monkeypatch, table) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    row = _financial_row(period="20240331") | {
+        "ann_date": "20240229",
+        "f_ann_date": "20240315",
+    }
+    monkeypatch.setattr(subject, "fetch_financial", lambda *_args, **_kwargs: pd.DataFrame([row]))
+
+    result = _run(
+        subject.FUNDAMENTALS_INGEST,
+        settings,
+        {
+            "mode": "ticker",
+            "tables": table,
+            "tickers": "000001.SZ",
+            "start_date": "20240301",
+            "end_date": "20240331",
+        },
+        run_id=f"fund-ann-date-out-{table}",
+    )
+
     assert result.status is ResultStatus.FAILED
     assert "FUNDAMENTALS_SCOPE_MISMATCH" in {item.code for item in result.diagnostics}
-    assert _count(settings, "income_statement") == 0
-    assert _count(settings, "cashflow_statement") == 0
+    assert _count(settings, table) == 0
 
 
 def test_financial_indicator_ticker_scope_uses_report_period_and_rejects_limit(tmp_path, monkeypatch) -> None:

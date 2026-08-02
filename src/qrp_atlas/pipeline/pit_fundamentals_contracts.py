@@ -122,8 +122,8 @@ EARNINGS_TABLE = EARNINGS_FORECAST_EVENT.name
 PIT_DATASETS = ("fundamentals", "industry", "index")
 PIT_STAGES = ("fetch", "clean", "load")
 FINANCIAL_TICKER_DATE_SCOPE = {
-    INCOME_STATEMENT.name: "report_period",
-    BALANCE_SHEET.name: "report_period",
+    INCOME_STATEMENT.name: "announcement_date",
+    BALANCE_SHEET.name: "announcement_date",
     CASHFLOW_STATEMENT.name: "announcement_date",
     FINANCIAL_INDICATOR.name: "report_period",
 }
@@ -499,7 +499,7 @@ def _fundamentals_provider_freshness(context: PipelineRunContext) -> CheckResult
         end_date=scope["end_date"].isoformat() if scope["end_date"] else None,
         ticker_date_scope={table: FINANCIAL_TICKER_DATE_SCOPE[table] for table in scope["tables"]},
         financial_indicator_page_limit=FINANCIAL_TICKER_ROW_LIMIT,
-        announcement_semantics="f_ann_date when present, otherwise ann_date; available_trade_date is strict next open date",
+        announcement_semantics="ann_date proves provider ticker request bounds; f_ann_date is used only for PIT availability when present; available_trade_date is strict next open date",
     )
 
 
@@ -637,13 +637,16 @@ def _validate_financial_frame(frame: object, scope: Mapping[str, Any], table: st
             raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number}") from exc
         if scope["periods"] and period not in set(scope["periods"]):
             raise ContractError("FUNDAMENTALS_SCOPE_MISMATCH", f"row {row_number} end_date")
-        announcement = row.get("ann_date")
+        provider_announcement = row.get("ann_date")
+        announcement = provider_announcement
         if _is_missing(announcement) and "f_ann_date" in frame.columns:
             announcement = row.get("f_ann_date")
         if _is_missing(announcement):
             raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number} ann_date")
         if scope["mode"] == "ticker" and start_date is not None and end_date is not None:
-            scoped_value = announcement if date_scope == "announcement_date" else row.get("end_date")
+            # f_ann_date is a PIT availability field and must not prove the
+            # provider's ann_date request scope.
+            scoped_value = provider_announcement if date_scope == "announcement_date" else row.get("end_date")
             try:
                 scoped_date = _date_value(scoped_value, date_scope)
             except ContractError as exc:
