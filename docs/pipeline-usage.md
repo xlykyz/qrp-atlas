@@ -77,7 +77,11 @@ Runtime 会拒绝将最终结果日志写到源码仓库、当前工作目录回
 
 ## 注册 Pipeline
 
-正式日常 Pipeline 应以源码 Contract 注册：
+正式日常 Pipeline 应以源码 Contract 注册。
+
+Contract 的能力划分和源码模块组织必须同时遵守 [`src/qrp_atlas/AGENTS.md`](../src/qrp_atlas/AGENTS.md) 与 [`QRP产品蓝图v1.1/12_Pipeline正式开发规则.md`](QRP产品蓝图v1.1/12_Pipeline正式开发规则.md)。新增生产能力默认采用“一项独立业务能力、一条 `PipelineContract`、一个独立 Contract 模块”；不同 schedule、参数模板、人工调用和定时调用可以共同引用同一条 Contract。
+
+注册步骤：
 
 1. 新建或修改 `PipelineContract`，声明稳定 `pipeline_id`、版本、输入、输出、依赖、读写资源、幂等性、事务和性能限制。
 2. 用 `TargetDatePolicy` 实现业务日期解析。市场日、休市日和显式目标日期均由该策略决定，调度器不猜测交易日逻辑。
