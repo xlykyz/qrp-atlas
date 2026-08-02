@@ -231,30 +231,60 @@ def test_pdf_is_staged_and_reused_on_repeat(tmp_path, monkeypatch) -> None:
         download_calls.append(url)
         control.check()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"%PDF" + b"x" * 1200)
+        destination.write_bytes(b"%PDF-1.7\n" + b"x" * 1200)
         control.check()
 
     monkeypatch.setattr(subject, "_download_pdf_to_stage", download)
     parameters = {"start_date": "2024-01-02", "end_date": "2024-01-02"}
-    first = _run(subject.RESEARCH_STOCK_REPORT_INGEST, settings, parameters, run_id="pdf-first")
-    assert first.status is ResultStatus.SUCCESS
-    assert download_calls == ["https://example.test/report.pdf"]
-    pdf_output = next(item for item in first.outputs if item.output_id == "research_report_stock_pdf")
-    assert pdf_output.detail["downloaded_files"] == 1
-    pdf_path = build_pdf_path(
+    invalid_existing = build_pdf_path(
         publish_date=datetime(2024, 1, 2).date(),
         title="A stock research report",
         stock_name="Test Stock",
         stock_code="000001",
         base_dir=settings.paths.research_pdfs_dir / "research_report",
     )
+    invalid_existing.parent.mkdir(parents=True, exist_ok=True)
+    invalid_existing.write_bytes(b"<html>" + b"blocked" * 200)
+    first = _run(subject.RESEARCH_STOCK_REPORT_INGEST, settings, parameters, run_id="pdf-first")
+    assert first.status is ResultStatus.SUCCESS
+    assert download_calls == ["https://example.test/report.pdf"]
+    pdf_output = next(item for item in first.outputs if item.output_id == "research_report_stock_pdf")
+    assert pdf_output.detail["downloaded_files"] == 1
+    pdf_path = invalid_existing
     assert pdf_path.is_file()
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
 
     second = _run(subject.RESEARCH_STOCK_REPORT_INGEST, settings, parameters, run_id="pdf-second")
     assert second.status is ResultStatus.SUCCESS
     assert download_calls == ["https://example.test/report.pdf"]
     second_pdf_output = next(item for item in second.outputs if item.output_id == "research_report_stock_pdf")
     assert second_pdf_output.detail["reused_files"] == 1
+
+
+def test_html_pdf_response_fails_closed_before_database_commit(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    monkeypatch.setattr(subject, "PDF_MAX_RETRIES", 0)
+
+    class HtmlResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return b"<html><body>blocked</body></html>" + b"x" * 1200
+
+    monkeypatch.setattr(subject.urllib.request, "urlopen", lambda *args, **kwargs: HtmlResponse())
+    destination = settings.paths.tmp_dir / "blocked.pdf"
+
+    with pytest.raises(subject.ContractError, match="RESEARCH_REPORT_PDF_PROVIDER_FAILED"):
+        subject._download_pdf_to_stage("https://example.test/report.pdf", destination, ExecutionControl())
+
+    assert not destination.exists()
 
 
 def test_write_failure_rolls_back_and_does_not_promote_files(tmp_path, monkeypatch) -> None:

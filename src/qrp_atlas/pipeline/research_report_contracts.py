@@ -90,6 +90,7 @@ PDF_LOCATION = "settings.paths.research_pdfs_dir/research_report"
 REPORT_TABLE = RESEARCH_REPORT_STOCK.name
 PDF_TIMEOUT_SECONDS = 30.0
 PDF_MIN_BYTES = 1000
+PDF_HEADER = b"%PDF-"
 PDF_MAX_RETRIES = 2
 STOCK_CODE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -378,9 +379,16 @@ def _stage_csv_outputs(
     control.check()
 
 
+def _valid_pdf_bytes(content: bytes) -> bool:
+    return len(content) >= PDF_MIN_BYTES and content.startswith(PDF_HEADER)
+
+
 def _valid_pdf(path: Path) -> bool:
     try:
-        return path.is_file() and path.stat().st_size >= PDF_MIN_BYTES
+        if not path.is_file() or path.stat().st_size < PDF_MIN_BYTES:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(len(PDF_HEADER)) == PDF_HEADER
     except OSError:
         return False
 
@@ -413,8 +421,8 @@ def _download_pdf_to_stage(url: str, destination: Path, control) -> tuple[int, i
                     raise RuntimeError(f"Eastmoney PDF returned HTTP {status}")
                 content = response.read()
             control.check()
-            if len(content) < PDF_MIN_BYTES:
-                raise ValueError("research report PDF is too small")
+            if not _valid_pdf_bytes(content):
+                raise ValueError("research report response is not a valid PDF")
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
             temporary.write_bytes(content)
