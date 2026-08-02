@@ -1,8 +1,7 @@
-"""Formal Pipeline contracts for the three CNINFO research-visit jobs.
+"""Formal Pipeline contract for CNINFO research-visit ingestion.
 
-The three historical job identities retain their different target-date
-semantics while sharing one provider, validation, and transactional writer.
-Deployment schedules remain outside this source module.
+CNINFO is one business data-production capability. Historical Hermes trigger
+times are deployment facts and intentionally do not appear in this module.
 """
 
 from __future__ import annotations
@@ -16,14 +15,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 import pandas as pd
 
-from qrp_atlas.contracts import (
-    CNINFO_RESEARCH_VISITS,
-    CREATED_AT,
-    SECU_CODE,
-    TRADING_CALENDAR,
-    align_to_schema,
-    quick_validate,
-)
+from qrp_atlas.contracts import CNINFO_RESEARCH_VISITS, CREATED_AT, SECU_CODE, align_to_schema, quick_validate
 from qrp_atlas.orchestration.execution_control import ExecutionControlError
 from qrp_atlas.orchestration.models import OverlapPolicy
 
@@ -68,7 +60,6 @@ CNINFO_TIMEZONE = ZoneInfo("Asia/Shanghai")
 QUANT_DB_RESOURCE = "quant_db"
 QUANT_DB_WRITER = "quant_db_writer"
 CNINFO_TABLE = CNINFO_RESEARCH_VISITS.name
-CNINFO_RESOURCE_READ = "duckdb://quant_db#trading_calendar"
 
 # These are the fields requested from and consumed from each Eastmoney record.
 # URL is requested by the legacy client but is optional in the table contract;
@@ -94,155 +85,17 @@ def _scheduled_local_date(invocation: PipelineInvocation) -> date:
     return scheduled_for.astimezone(CNINFO_TIMEZONE).date()
 
 
-def _calendar_connection(settings: Any, control: Any) -> duckdb.DuckDBPyConnection:
-    control.check()
-    return duckdb.connect(str(settings.paths.duckdb_path), read_only=True)
+def _target_date_resolver(invocation: PipelineInvocation) -> TargetWindow:
+    """Resolve the scheduled Shanghai natural date for automatic runs."""
 
-
-def _open_calendar_dates(
-    settings: Any,
-    control: Any,
-    start_date: date,
-    end_date: date,
-) -> tuple[date, ...]:
-    connection = _calendar_connection(settings, control)
-    try:
-        control.check()
-        rows = connection.execute(
-            """
-            SELECT trade_date
-            FROM trading_calendar
-            WHERE is_open IS TRUE
-              AND trade_date BETWEEN ? AND ?
-            ORDER BY trade_date
-            """,
-            [start_date, end_date],
-        ).fetchall()
-        control.check()
-        return tuple(
-            value.date() if isinstance(value, datetime) else value
-            for (value,) in rows
-            if isinstance(value, date)
-        )
-    finally:
-        connection.close()
-
-
-def _previous_open_calendar_date(settings: Any, control: Any, current_date: date) -> date:
-    connection = _calendar_connection(settings, control)
-    try:
-        control.check()
-        row = connection.execute(
-            """
-            SELECT trade_date
-            FROM trading_calendar
-            WHERE is_open IS TRUE AND trade_date < ?
-            ORDER BY trade_date DESC
-            LIMIT 1
-            """,
-            [current_date],
-        ).fetchone()
-        control.check()
-    finally:
-        connection.close()
-    if row is None:
-        raise ContractError("CNINFO_CALENDAR_STALE", "previous open trading date is unavailable")
-    value = row[0]
-    return value.date() if isinstance(value, datetime) else value
-
-
-def _main_target_resolver(invocation: PipelineInvocation) -> TargetWindow:
-    current_date = _scheduled_local_date(invocation)
-    previous_date = _previous_open_calendar_date(invocation.settings, invocation.execution_control, current_date)
-    # The legacy 08:00 wrapper explicitly fetched previous trading date and
-    # today. The executor later keeps only open dates present in the calendar.
-    return TargetWindow(start_date=previous_date, end_date=current_date)
-
-
-def _incremental_target_resolver(invocation: PipelineInvocation) -> TargetWindow:
     return TargetWindow.for_date(_scheduled_local_date(invocation))
 
 
-def _main_explicit_date_validator(target_date: date, invocation: PipelineInvocation) -> bool:
-    try:
-        return target_date in _open_calendar_dates(
-            invocation.settings,
-            invocation.execution_control,
-            target_date,
-            target_date,
-        )
-    except ExecutionControlError:
-        raise
-    except Exception:
-        return False
+def _explicit_date_validator(target_date: date, invocation: PipelineInvocation) -> bool:
+    """CNINFO dates are announcement dates, not exchange trading dates."""
 
-
-def _incremental_explicit_date_validator(target_date: date, invocation: PipelineInvocation) -> bool:
     invocation.execution_control.check()
     return isinstance(target_date, date)
-
-
-def _calendar_structure(context: PipelineRunContext) -> CheckResult:
-    context.execution_control.check()
-    connection = _calendar_connection(context.settings, context.execution_control)
-    try:
-        columns = {
-            row[0]
-            for row in connection.execute(f"DESCRIBE {TRADING_CALENDAR.name}").fetchall()
-        }
-        required = set(TRADING_CALENDAR.column_names())
-        missing = sorted(required - columns)
-        if missing:
-            return CheckResult.failure(
-                "cninfo_calendar_structure",
-                "CNINFO_CALENDAR_STRUCTURE_MISSING",
-                "trading_calendar is missing required columns",
-                missing=missing,
-            )
-        context.execution_control.check()
-        return CheckResult.success("cninfo_calendar_structure", table=TRADING_CALENDAR.name)
-    except ExecutionControlError:
-        raise
-    except Exception as exc:
-        return CheckResult.failure(
-            "cninfo_calendar_structure",
-            "CNINFO_CALENDAR_UNAVAILABLE",
-            "trading_calendar is unavailable",
-            exception=type(exc).__name__,
-        )
-    finally:
-        connection.close()
-
-
-def _main_calendar_freshness(context: PipelineRunContext) -> CheckResult:
-    try:
-        dates = _target_dates(context)
-    except ExecutionControlError:
-        raise
-    except ContractError as exc:
-        return CheckResult.failure(
-            "cninfo_calendar_freshness",
-            "CNINFO_CALENDAR_STALE",
-            "calendar cannot resolve a CNINFO target date",
-            reason=exc.code,
-        )
-    except Exception as exc:
-        return CheckResult.failure(
-            "cninfo_calendar_freshness",
-            "CNINFO_CALENDAR_STALE",
-            "calendar cannot resolve a CNINFO target date",
-            exception=type(exc).__name__,
-        )
-    if not dates:
-        return CheckResult.failure(
-            "cninfo_calendar_freshness",
-            "CNINFO_CALENDAR_STALE",
-            "calendar has no open target date",
-        )
-    return CheckResult.success(
-        "cninfo_calendar_freshness",
-        target_dates=[item.isoformat() for item in dates],
-    )
 
 
 def _provider_configuration(context: PipelineRunContext) -> CheckResult:
@@ -279,22 +132,7 @@ def _target_dates(context: PipelineRunContext) -> tuple[date, ...]:
     window = context.target_window
     if window.target_date is not None:
         return (window.target_date,)
-    if window.start_date is None or window.end_date is None:
-        raise ContractError("CNINFO_TARGET_DATE_REQUIRED")
-    try:
-        dates = _open_calendar_dates(
-            context.settings,
-            context.execution_control,
-            window.start_date,
-            window.end_date,
-        )
-    except ExecutionControlError:
-        raise
-    except Exception as exc:
-        raise ContractError("CNINFO_CALENDAR_UNAVAILABLE", type(exc).__name__) from exc
-    if not dates:
-        raise ContractError("CNINFO_CALENDAR_STALE", "no open target dates")
-    return dates
+    raise ContractError("CNINFO_TARGET_DATE_REQUIRED")
 
 
 def _parse_provider_date(value: object) -> date | None:
@@ -365,6 +203,19 @@ def _fetch_and_clean(
     context.execution_control.check()
     if report.date_str != target_date.isoformat():
         raise ContractError("CNINFO_PROVIDER_WRONG_DATE", "provider report date does not match request")
+    if report.consistency_error is not None:
+        raise ContractError("CNINFO_PROVIDER_TOTAL_MISMATCH", report.consistency_error)
+    if report.reported_total is not None and len(report.records) != report.reported_total:
+        raise ContractError(
+            "CNINFO_PROVIDER_TOTAL_MISMATCH",
+            f"reported total {report.reported_total} does not match {len(report.records)} fetched records",
+        )
+    empty_page_count = report.reported_total == 0 and report.reported_pages == 0 and report.pages_fetched == 1
+    if report.reported_pages is not None and report.pages_fetched != report.reported_pages and not empty_page_count:
+        raise ContractError(
+            "CNINFO_PROVIDER_TOTAL_MISMATCH",
+            f"reported page count {report.reported_pages} does not match {report.pages_fetched} fetched pages",
+        )
     if not report.complete:
         code = "CNINFO_PROVIDER_PARTIAL" if report.pages_fetched else "CNINFO_PROVIDER_ERROR"
         detail = f"failed pages: {','.join(str(item) for item in report.failed_pages)}"
@@ -488,6 +339,8 @@ def _execute_cninfo(context: PipelineRunContext) -> BusinessExecution:
     api_requests = 0
     batches = 0
     retries = 0
+    reported_total: int | None = None
+    reported_pages: int | None = None
     for target_date in target_dates:
         context.execution_control.check()
         cleaned, raw_count, report = _fetch_and_clean(target_date, context)
@@ -495,6 +348,8 @@ def _execute_cninfo(context: PipelineRunContext) -> BusinessExecution:
         api_requests += report.requests
         batches += report.pages_fetched
         retries += report.retries
+        reported_total = report.reported_total
+        reported_pages = report.reported_pages
         cleaned_records.extend(cleaned)
         context.execution_control.check()
 
@@ -521,6 +376,8 @@ def _execute_cninfo(context: PipelineRunContext) -> BusinessExecution:
             "api_requests": api_requests,
             "pages_fetched": batches,
             "retries": retries,
+            "reported_total": reported_total,
+            "reported_pages": reported_pages,
         },
     )
     return BusinessExecution.success(
@@ -546,7 +403,13 @@ def _cninfo_completion(context: PipelineRunContext) -> CheckResult:
         connection = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
         try:
             context.execution_control.check()
-            total = int(connection.execute(f"SELECT COUNT(*) FROM {CNINFO_TABLE}").fetchone()[0])
+            placeholders = ", ".join("?" for _ in target_dates)
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {CNINFO_TABLE} WHERE notice_date IN ({placeholders})",
+                    list(target_dates),
+                ).fetchone()[0]
+            )
             context.execution_control.check()
         finally:
             connection.close()
@@ -624,26 +487,6 @@ def _cninfo_unique_key_quality(context: PipelineRunContext) -> CheckResult:
         )
 
 
-def _calendar_input() -> InputContract:
-    return InputContract(
-        input_id="cninfo_trading_calendar",
-        kind=InputKind.TABLE,
-        source="quant.db.trading_calendar",
-        required_fields=tuple(TRADING_CALENDAR.column_names()),
-        target_date_semantics="main update resolves previous open date through scheduled local calendar date",
-        missing_error_code="CNINFO_CALENDAR_STRUCTURE_MISSING",
-        structure_check=_calendar_structure,
-        freshness=FreshnessContract(
-            check_id="cninfo_calendar_freshness",
-            target_date_semantics="resolved target range must contain at least one open calendar date",
-            maximum_lag_trading_days=0,
-            non_trading_day_policy=NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
-            error_code="CNINFO_CALENDAR_STALE",
-            checker=_main_calendar_freshness,
-        ),
-    )
-
-
 def _provider_input() -> InputContract:
     return InputContract(
         input_id="external_cninfo",
@@ -688,7 +531,7 @@ def _performance() -> PerformanceBudget:
         normal_budget_seconds=300.0,
         warning_threshold_seconds=180.0,
         hard_timeout_seconds=600,
-        benchmark_scope="one scheduled invocation, Eastmoney pagination and one quant.db transaction",
+        benchmark_scope="one natural-date invocation, complete Eastmoney pagination and one quant.db transaction",
         baseline_source=(
             "docs/QRP产品蓝图v1.1/09_Pipeline现状事实与迁移边界.md CNINFO rows and 600-second wrapper timeout; "
             "src/qrp_atlas/pipeline/cninfo/config.py request page and retry settings"
@@ -696,22 +539,13 @@ def _performance() -> PerformanceBudget:
     )
 
 
-CNINFO_MAIN_TARGET_DATE_POLICY = TargetDatePolicy(
-    policy_id="cninfo_main_previous_through_scheduled_date",
-    description="Resolve the legacy main window from the previous open date through the scheduled Shanghai date.",
-    trading_calendar_id=TRADING_CALENDAR.name,
-    non_trading_day_policy=NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
-    resolver=_main_target_resolver,
-    validate_explicit_date=_main_explicit_date_validator,
-)
-
-CNINFO_INCREMENTAL_TARGET_DATE_POLICY = TargetDatePolicy(
-    policy_id="cninfo_incremental_scheduled_local_date",
-    description="Use the scheduled Shanghai local calendar date for each historical incremental run.",
+CNINFO_TARGET_DATE_POLICY = TargetDatePolicy(
+    policy_id="cninfo_research_visit_ingest_natural_date",
+    description="Use the scheduled Asia/Shanghai natural date or an explicit target date for CNINFO notices.",
     trading_calendar_id="none",
     non_trading_day_policy=NonTradingDayPolicy.ALLOW_CALENDAR_DATE,
-    resolver=_incremental_target_resolver,
-    validate_explicit_date=_incremental_explicit_date_validator,
+    resolver=_target_date_resolver,
+    validate_explicit_date=_explicit_date_validator,
 )
 
 
@@ -726,66 +560,35 @@ def _idempotency() -> IdempotencyContract:
     )
 
 
-def _contract(
-    pipeline_id: str,
-    name: str,
-    description: str,
-    target_date_policy: TargetDatePolicy,
-    inputs: tuple[InputContract, ...],
-) -> PipelineContract:
-    return PipelineContract(
-        pipeline_id=pipeline_id,
-        name=name,
-        description=description,
-        contract_version="1.1.0",
-        kind=PipelineKind.ATOMIC,
-        executor=_execute_cninfo,
-        target_date_policy=target_date_policy,
-        parameters=(),
-        inputs=inputs,
-        outputs=(_output(),),
-        dependencies=(),
-        resource_locks=(QUANT_DB_WRITER,),
-        resource_reads=(CNINFO_RESOURCE_READ,) if target_date_policy is CNINFO_MAIN_TARGET_DATE_POLICY else (),
-        idempotency=_idempotency(),
-        transaction=TransactionContract(
-            mode=TransactionMode.DATABASE_TRANSACTION,
-            boundary="all resolved target dates are prepared before one cninfo_research_visits append transaction",
-            failure_visibility="any provider, validation, or database error returns failure and leaves no new rows",
-        ),
-        execution=ExecutionPolicy(overlap_policy=OverlapPolicy.FORBID, max_retries=1),
-        performance=_performance(),
-        manual_execution_allowed=True,
-    )
-
-
-CNINFO_MAIN_UPDATE = _contract(
-    "cninfo_main_update",
-    "CNINFO main update",
-    "Fetches the previous open trading date through the scheduled Shanghai date.",
-    CNINFO_MAIN_TARGET_DATE_POLICY,
-    (_calendar_input(), _provider_input()),
-)
-CNINFO_INCREMENTAL_NOON = _contract(
-    "cninfo_incremental_noon",
-    "CNINFO noon incremental update",
-    "Fetches the scheduled Shanghai date as the noon CNINFO increment.",
-    CNINFO_INCREMENTAL_TARGET_DATE_POLICY,
-    (_provider_input(),),
-)
-CNINFO_INCREMENTAL_AFTERNOON = _contract(
-    "cninfo_incremental_afternoon",
-    "CNINFO afternoon incremental update",
-    "Fetches the scheduled Shanghai date as the afternoon CNINFO increment.",
-    CNINFO_INCREMENTAL_TARGET_DATE_POLICY,
-    (_provider_input(),),
+CNINFO_RESEARCH_VISIT_INGEST = PipelineContract(
+    pipeline_id="cninfo_research_visit_ingest",
+    name="CNINFO research visit ingestion",
+    description=(
+        "Fetches one explicit CNINFO research-visit notice date from Eastmoney, validates the complete "
+        "paginated response, cleans records, and idempotently inserts them into cninfo_research_visits."
+    ),
+    contract_version="1.1.1",
+    kind=PipelineKind.ATOMIC,
+    executor=_execute_cninfo,
+    target_date_policy=CNINFO_TARGET_DATE_POLICY,
+    parameters=(),
+    inputs=(_provider_input(),),
+    outputs=(_output(),),
+    dependencies=(),
+    resource_locks=(QUANT_DB_WRITER,),
+    resource_reads=(),
+    idempotency=_idempotency(),
+    transaction=TransactionContract(
+        mode=TransactionMode.DATABASE_TRANSACTION,
+        boundary="one prepared natural-date batch committed in a single cninfo_research_visits transaction",
+        failure_visibility="any provider, validation, or database error returns failure and leaves no new rows",
+    ),
+    execution=ExecutionPolicy(overlap_policy=OverlapPolicy.FORBID, max_retries=1),
+    performance=_performance(),
+    manual_execution_allowed=True,
 )
 
-CNINFO_CONTRACTS: tuple[PipelineContract, ...] = (
-    CNINFO_MAIN_UPDATE,
-    CNINFO_INCREMENTAL_NOON,
-    CNINFO_INCREMENTAL_AFTERNOON,
-)
+CNINFO_CONTRACTS: tuple[PipelineContract, ...] = (CNINFO_RESEARCH_VISIT_INGEST,)
 
 for _contract_definition in CNINFO_CONTRACTS:
     register_pipeline(_contract_definition)
@@ -793,11 +596,8 @@ for _contract_definition in CNINFO_CONTRACTS:
 
 __all__ = [
     "CNINFO_CONTRACTS",
-    "CNINFO_INCREMENTAL_AFTERNOON",
-    "CNINFO_INCREMENTAL_NOON",
-    "CNINFO_INCREMENTAL_TARGET_DATE_POLICY",
-    "CNINFO_MAIN_TARGET_DATE_POLICY",
-    "CNINFO_MAIN_UPDATE",
+    "CNINFO_RESEARCH_VISIT_INGEST",
+    "CNINFO_TARGET_DATE_POLICY",
     "CNINFO_OPTIONAL_PROVIDER_FIELDS",
     "CNINFO_PROVIDER_FIELDS",
     "CNINFO_REQUIRED_PROVIDER_FIELDS",

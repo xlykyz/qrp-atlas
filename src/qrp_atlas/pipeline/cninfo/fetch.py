@@ -6,6 +6,7 @@ they can reject incomplete pagination before opening a database write.
 """
 
 from dataclasses import dataclass
+from math import ceil
 import json
 import threading
 import time
@@ -46,6 +47,9 @@ class EastmoneyFetchReport:
     failed_pages: tuple[int, ...]
     complete: bool
     last_error: str | None = None
+    reported_total: int | None = None
+    reported_pages: int | None = None
+    consistency_error: str | None = None
 
 
 def _controlled_wait(seconds: float, execution_control: ExecutionControl | None) -> None:
@@ -78,6 +82,10 @@ def fetch_from_eastmoney_report(
     consecutive_failures = 0
     last_error: str | None = None
     stopped_after_short_page = False
+    reported_total: int | None = None
+    reported_pages: int | None = None
+    consistency_error: str | None = None
+    page_signatures: set[str] = set()
 
     while page <= MAX_PAGES:
         if execution_control is not None:
@@ -130,6 +138,31 @@ def fetch_from_eastmoney_report(
                     not isinstance(record, dict) for record in raw_records
                 ):
                     raise RuntimeError("API response data must be a list of objects")
+                page_total = _parse_non_negative_int(result.get("count", result.get("total")))
+                page_count = _parse_non_negative_int(result.get("pages", result.get("pageCount")))
+                if page_total is None and result.get("count", result.get("total")) is not None:
+                    raise RuntimeError("API response count must be a non-negative integer")
+                if page_count is None and result.get("pages", result.get("pageCount")) is not None:
+                    raise RuntimeError("API response pages must be a non-negative integer")
+                if reported_total is not None and page_total is not None and page_total != reported_total:
+                    consistency_error = (
+                        f"reported total changed from {reported_total} to {page_total} on page {page}"
+                    )
+                    raise RuntimeError(consistency_error)
+                if reported_pages is not None and page_count is not None and page_count != reported_pages:
+                    consistency_error = (
+                        f"reported page count changed from {reported_pages} to {page_count} on page {page}"
+                    )
+                    raise RuntimeError(consistency_error)
+                if page_total is not None:
+                    reported_total = page_total
+                if page_count is not None:
+                    reported_pages = page_count
+                signature = _page_signature(raw_records)
+                if signature in page_signatures and raw_records:
+                    consistency_error = f"duplicate provider page {page}"
+                    raise RuntimeError(consistency_error)
+                page_signatures.add(signature)
                 page_records = raw_records
                 success = True
                 break
@@ -167,12 +200,45 @@ def fetch_from_eastmoney_report(
             f"Fetched page {page}, {len(page_records)} records",
             file=__import__("sys").stderr,
         )
+        expected_pages = (
+            max(1, ceil(reported_total / EASTMONEY_PAGE_SIZE))
+            if reported_total is not None
+            else reported_pages
+        )
+        if reported_total is not None and len(all_records) >= reported_total:
+            if len(all_records) > reported_total:
+                consistency_error = (
+                    f"reported total {reported_total} does not match {len(all_records)} fetched records"
+                )
+            stopped_after_short_page = len(all_records) == reported_total
+            break
+        if expected_pages is not None and page >= expected_pages:
+            stopped_after_short_page = True
+            break
         if len(page_records) < EASTMONEY_PAGE_SIZE:
             stopped_after_short_page = True
             break
         page += 1
         _controlled_wait(eastmoney_sleep_interval(), execution_control)
 
+    if reported_total is not None and len(all_records) != reported_total:
+        consistency_error = consistency_error or (
+            f"reported total {reported_total} does not match {len(all_records)} fetched records"
+        )
+    expected_pages = (
+        max(1, ceil(reported_total / EASTMONEY_PAGE_SIZE))
+        if reported_total is not None
+        else reported_pages
+    )
+    empty_page_count = reported_total == 0 and reported_pages == 0 and pages_fetched == 1
+    if reported_pages is not None and pages_fetched != reported_pages and not empty_page_count:
+        consistency_error = consistency_error or (
+            f"reported page count {reported_pages} does not match {pages_fetched} fetched pages"
+        )
+    if expected_pages is not None and pages_fetched != expected_pages and not empty_page_count:
+        consistency_error = consistency_error or (
+            f"expected {expected_pages} pages for {reported_total} records, fetched {pages_fetched}"
+        )
     return EastmoneyFetchReport(
         date_str=date_str,
         records=tuple(all_records),
@@ -180,9 +246,30 @@ def fetch_from_eastmoney_report(
         requests=requests,
         retries=retries,
         failed_pages=tuple(failed_pages),
-        complete=stopped_after_short_page and not failed_pages,
+        complete=stopped_after_short_page and not failed_pages and consistency_error is None,
         last_error=last_error,
+        reported_total=reported_total,
+        reported_pages=reported_pages,
+        consistency_error=consistency_error,
     )
+
+
+def _parse_non_negative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _page_signature(records: list[dict[str, Any]]) -> str:
+    """Build a stable signature for detecting a repeated provider page."""
+
+    return json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def fetch_from_eastmoney(date_str: str) -> list[dict]:

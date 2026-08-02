@@ -24,16 +24,16 @@
 
 | 状态 | 数量 | 含义 |
 | --- | ---: | --- |
-| `LEGACY_SCHEDULED` | 15 | 14 个 Hermes Job 映射出的可迁移能力；日更 Job 包含市场日更和 adj factor 两个阶段 |
+| `LEGACY_SCHEDULED` | 13 | 14 个 Hermes Job 映射出的可迁移能力；CNINFO 的三个历史 Job 归并为一项业务能力，日更 Job 包含市场日更和 adj factor 两个阶段 |
 | `READY_UNSCHEDULED` | 13 | 已有生产入口但当前未调度，包括 System B、手动回补和数据入口 |
 | `SHADOW` | 0 | 不把“仍由 Hermes 调度”的生产状态改写为 SHADOW；其禁用 Definition 由单独字段/文件表达 |
 | `PRODUCTION` | 0 | 尚无 QRP 正式调度 |
 | `PLANNED` | 4 | 边界明确、尚未实现的检查或确定性替代能力 |
 | `DEFERRED` | 0 | 无 |
 
-共注册 32 条，排除 29 个已核查候选项。15 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
+共注册 30 条，排除 29 个已核查候选项。13 条旧能力使用 14 个 Hermes Job ID；已实现但未调度的条目为 13 条；Shadow Definition 为 6 条。
 
-当前源码默认 catalog 中的九条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）以及三条 CNINFO 采集 Contract（`cninfo_main_update`、`cninfo_incremental_noon` 和 `cninfo_incremental_afternoon`）。CNINFO 合同化保留三条历史身份和 Hermes 调度事实，但不改写六条市场数据业务定义；所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
+当前源码默认 catalog 中的七条正式 Contract 包括六条已验收市场数据 Contract（`market_daily_update`、`adj_factor_daily`、`daily_basic_update`、`index_daily_update`、`zt_dt_pool_daily` 和 `suspend_d_ingest`）以及一条 CNINFO 采集 Contract（`cninfo_research_visit_ingest`）。CNINFO 的三个历史 Hermes Job（原 `main`、`noon`、`afternoon` 调度实例）只是同一业务能力的触发事实，不再作为正式 `pipeline_id`；不改写六条市场数据业务定义。所有写入 `quant.db` 的 Contract 均明确使用 `quant_db_writer`。本注册表中的 LEGACY/Shadow 状态描述历史生产或兼容 Definition，不等于 QRP 正式生产启用。
 
 `task_type=AGENT_ORCHESTRATED` 的现行条目只有每日总结和每周健康检查。研究报告的实际业务入口是仓库内确定性 Python Pipeline；它们当前缺少可移植的运行时日期参数包装，因此未建立 Shadow Definition，而不是因为其业务计算需要 LLM。任何 LLM 解释都不得作为数据 Pipeline 成功条件。
 
@@ -45,9 +45,7 @@
 | --- | --- | --- | --- | --- |
 | `market_daily_update` | LEGACY / DETERMINISTIC | 16:15 工作日 / Hermes `b8c670f02f9b` | `daily_update.run`; Tushare -> Q `daily_market_snapshot` | Tushare / `quant_db_writer` |
 | `adj_factor_daily` | LEGACY / DETERMINISTIC | 同上（同一 shell 后续阶段） | `pull_adj_factor_daily.py`; Q calendar/history + Tushare -> Q `adj_factor_changes` | market daily / `quant_db_writer` |
-| `cninfo_main_update` | LEGACY / DETERMINISTIC | 08:00 / `83895a6a24a7` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
-| `cninfo_incremental_noon` | LEGACY / DETERMINISTIC | 12:00、21:00 / `e56ff366b299` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
-| `cninfo_incremental_afternoon` | LEGACY / DETERMINISTIC | 15:15 / `053db3ea5a9f` | `cninfo.run --date`; CNINFO -> Q visits | CNINFO / `quant_db_writer` |
+| `cninfo_research_visit_ingest` | LEGACY / DETERMINISTIC | 历史 Hermes 调度事实：`83895a6a24a7`、`e56ff366b299`、`053db3ea5a9f` | `cninfo.run --date` 历史入口；CNINFO -> Q visits | CNINFO / `quant_db_writer` |
 | `research_stock_morning` | LEGACY / DETERMINISTIC | 07:00 / `2b3c60fc1bcc` | `research_report.run`; Q -> research tables/files | ? / `quant_db_writer` |
 | `research_stock_evening` | LEGACY / DETERMINISTIC | 19:00 / `cd3ce52ff14a` | `research_report.run`; Q -> research tables/files | ? / `quant_db_writer` |
 | `research_industry_morning` | LEGACY / DETERMINISTIC | 07:00 / `3591486225dc` | `research_industry.run`; Q -> research tables/files | ? / `quant_db_writer` |
@@ -128,7 +126,7 @@ Shadow 中 `/opt/qrp-atlas` 是现有 deploy 示例的目标安装路径，不�
 | --- | --- | --- | --- | --- |
 | 1 | `0450c10ccb5f`、`3c40deda0c79` | index、ZT/DT | 停 Hermes 后启用对应 QRP Definition | 对账表行数/新鲜度；关闭 QRP 并恢复 Hermes |
 | 2 | `b8c670f02f9b`、`4afb74bd0769` | market、adj、daily-basic | 以三条依赖 Definition 替换日更 shell 与 daily-basic | 日快照、adj、basic 原子性和依赖成功；恢复两个 Hermes Job |
-| 3 | `83895a6a24a7`、`e56ff366b299`、`053db3ea5a9f`、`3fdbd779c4da` | 三 CNINFO、IRM | 先提供运行时日期模板/包装后切换 | API 幂等和五分钟 overlap；恢复对应 Hermes Job |
+| 3 | `83895a6a24a7`、`e56ff366b299`、`053db3ea5a9f`、`3fdbd779c4da` | 一条 CNINFO 业务 Contract、IRM | 未来一个 Contract 对应多个调度 Job 的部署切换另行验收 | API 幂等和五分钟 overlap；恢复对应 Hermes Job |
 | 4 | 四个研究 Job | 四个 research Pipeline | 先将动态日期 shell 转入仓库并验证 | 报告与表输出对账；恢复原四个 Job |
 | 5 | `56d22829661c`、`eadada323c3c` | summary、health | 先实现确定性检查，再把 Agent 解释设为附加 | 报告不影响数据成功；恢复 Hermes Agent Job |
 

@@ -23,7 +23,6 @@ from qrp_atlas.pipeline.registry import default_registry
 
 
 TARGET = date(2026, 7, 29)
-PREVIOUS = date(2026, 7, 28)
 SCHEDULED_FOR = datetime(2026, 7, 29, 0, 0, tzinfo=UTC)
 
 
@@ -43,16 +42,6 @@ def initialise_database(item: AppSettings) -> None:
     connection = duckdb.connect(str(item.paths.duckdb_path))
     try:
         init_database(connection)
-        connection.executemany(
-            """
-            INSERT INTO trading_calendar (trade_date, is_open, year, month, quarter)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (PREVIOUS, True, PREVIOUS.year, PREVIOUS.month, 3),
-                (TARGET, True, TARGET.year, TARGET.month, 3),
-            ],
-        )
     finally:
         connection.close()
 
@@ -71,7 +60,15 @@ def record(target_date: date, *, secu_code: str = "000001.SZ") -> dict[str, str]
     }
 
 
-def report(target_date: date, records: tuple[dict, ...] = (), *, complete: bool = True) -> EastmoneyFetchReport:
+def report(
+    target_date: date,
+    records: tuple[dict, ...] = (),
+    *,
+    complete: bool = True,
+    reported_total: int | None = None,
+    reported_pages: int | None = None,
+) -> EastmoneyFetchReport:
+    total = len(records) if reported_total is None else reported_total
     return EastmoneyFetchReport(
         date_str=target_date.isoformat(),
         records=records,
@@ -81,6 +78,8 @@ def report(target_date: date, records: tuple[dict, ...] = (), *, complete: bool 
         failed_pages=() if complete else (2,),
         complete=complete,
         last_error=None if complete else "TimeoutError",
+        reported_total=total,
+        reported_pages=1 if reported_pages is None else reported_pages,
     )
 
 
@@ -127,45 +126,36 @@ def test_cninfo_contracts_are_registered_described_and_locked() -> None:
     assert {item.pipeline_id for item in subject.CNINFO_CONTRACTS} <= {
         item.pipeline_id for item in registered
     }
-    assert {item.pipeline_id for item in subject.CNINFO_CONTRACTS} == {
-        "cninfo_main_update",
-        "cninfo_incremental_noon",
-        "cninfo_incremental_afternoon",
-    }
+    assert {item.pipeline_id for item in subject.CNINFO_CONTRACTS} == {"cninfo_research_visit_ingest"}
     assert all(item.resource_locks == ("quant_db_writer",) for item in subject.CNINFO_CONTRACTS)
-    assert subject.CNINFO_MAIN_UPDATE.describe()["target_date_policy"]["policy_id"] == (
-        "cninfo_main_previous_through_scheduled_date"
-    )
-    assert subject.CNINFO_INCREMENTAL_NOON.describe()["target_date_policy"]["policy_id"] == (
-        "cninfo_incremental_scheduled_local_date"
-    )
+    described = subject.CNINFO_RESEARCH_VISIT_INGEST.describe()
+    assert described["pipeline_id"] == "cninfo_research_visit_ingest"
+    assert described["target_date_policy"]["policy_id"] == "cninfo_research_visit_ingest_natural_date"
+    assert described["target_date_policy"]["trading_calendar_id"] == "none"
+    assert described["inputs"][0]["input_id"] == "external_cninfo"
+    assert subject.CNINFO_RESEARCH_VISIT_INGEST.resource_reads == ()
 
 
-def test_main_resolves_previous_open_date_through_scheduled_date_and_incremental_is_one_date(
-    tmp_path: Path,
-) -> None:
+def test_scheduled_for_resolves_shanghai_natural_date_and_explicit_date_is_allowed(tmp_path: Path) -> None:
     item = settings(tmp_path)
     initialise_database(item)
     invocation = PipelineInvocation(
         run_id="date-policy-test",
-        pipeline_id=subject.CNINFO_MAIN_UPDATE.pipeline_id,
+        pipeline_id=subject.CNINFO_RESEARCH_VISIT_INGEST.pipeline_id,
         scheduled_for=SCHEDULED_FOR,
         attempt=1,
         settings=item,
     )
-    assert subject.CNINFO_MAIN_TARGET_DATE_POLICY.resolver(invocation).as_dict() == {
-        "target_date": None,
-        "start_date": PREVIOUS.isoformat(),
-        "end_date": TARGET.isoformat(),
+    assert subject.CNINFO_TARGET_DATE_POLICY.resolver(invocation).as_dict() == {
+        "target_date": TARGET.isoformat(),
+        "start_date": None,
+        "end_date": None,
     }
-    incremental = subject.CNINFO_INCREMENTAL_TARGET_DATE_POLICY.resolver(invocation)
-    assert incremental.target_date == TARGET
-    assert subject.CNINFO_MAIN_TARGET_DATE_POLICY.validate_explicit_date(TARGET, invocation)
-    assert not subject.CNINFO_MAIN_TARGET_DATE_POLICY.validate_explicit_date(date(2026, 8, 1), invocation)
-    assert subject.CNINFO_INCREMENTAL_TARGET_DATE_POLICY.validate_explicit_date(date(2026, 8, 1), invocation)
+    assert subject.CNINFO_TARGET_DATE_POLICY.validate_explicit_date(date(2026, 8, 1), invocation)
+    assert subject.CNINFO_TARGET_DATE_POLICY.non_trading_day_policy.value == "ALLOW_CALENDAR_DATE"
 
 
-def test_main_fetches_both_dates_and_uses_the_same_execution_control(
+def test_single_date_fetch_uses_the_same_execution_control_and_result_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -179,17 +169,45 @@ def test_main_fetches_both_dates_and_uses_the_same_execution_control(
         return report(target_date, (record(target_date),))
 
     control = ExecutionControl()
-    result = run(subject.CNINFO_MAIN_UPDATE, item, monkeypatch, provider, control=control)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider, control=control)
 
     assert result.status is ResultStatus.SUCCESS
-    assert [item[0] for item in calls] == [PREVIOUS, TARGET]
+    assert [item[0] for item in calls] == [TARGET]
     assert all(item[1] is control for item in calls)
-    assert result.metrics.rows_read == 2
-    assert result.metrics.rows_written == 2
-    assert row_count(item) == 2
+    assert result.metrics.rows_read == 1
+    assert result.metrics.rows_written == 1
+    assert result.outputs[0].rows_written == result.metrics.rows_written
+    assert row_count(item) == 1
 
 
-def test_incremental_empty_snapshot_is_success_and_writes_no_rows(
+def test_explicit_target_date_overrides_scheduled_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    requested: list[str] = []
+
+    def provider(date_text: str, *, execution_control: ExecutionControl):
+        execution_control.check()
+        requested.append(date_text)
+        target_date = date.fromisoformat(date_text)
+        return report(target_date, (record(target_date),))
+
+    override = date(2026, 8, 1)
+    result = run(
+        subject.CNINFO_RESEARCH_VISIT_INGEST,
+        item,
+        monkeypatch,
+        provider,
+        trade_date_override=override,
+    )
+
+    assert result.status is ResultStatus.SUCCESS
+    assert requested == [override.isoformat()]
+
+
+def test_empty_snapshot_is_success_and_writes_no_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -200,7 +218,7 @@ def test_incremental_empty_snapshot_is_success_and_writes_no_rows(
         execution_control.check()
         return report(date.fromisoformat(date_text))
 
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
 
     assert result.status is ResultStatus.SUCCESS
     assert result.metrics.rows_read == 0
@@ -221,8 +239,8 @@ def test_duplicate_provider_rows_and_same_day_rerun_are_idempotent(
         execution_control.check()
         return report(date.fromisoformat(date_text), (duplicate.copy(), duplicate.copy()))
 
-    first = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider)
-    second = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider)
+    first = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
+    second = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
 
     assert first.status is ResultStatus.SUCCESS
     assert first.metrics.rows_read == 2
@@ -261,16 +279,35 @@ def test_provider_validation_failures_do_not_open_a_write_transaction(
             del value["CONTENT"]
             return report(target_date, (value,))
         if case == "wrong_date":
-            return report(target_date, (record(PREVIOUS),))
+            return report(target_date, (record(date(2026, 7, 28)),))
         if case == "partial":
             return report(target_date, (record(target_date),), complete=False)
         raise RuntimeError("provider unavailable")
 
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
 
     assert result.status is ResultStatus.FAILED
     assert expected_code in diagnostic_codes(result)
     assert calls == 1
+    assert row_count(item) == 0
+
+
+def test_reported_total_mismatch_fails_closed_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+
+    def provider(date_text: str, *, execution_control: ExecutionControl):
+        execution_control.check()
+        target_date = date.fromisoformat(date_text)
+        return report(target_date, (record(target_date),), reported_total=2)
+
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
+
+    assert result.status is ResultStatus.FAILED
+    assert "CNINFO_PROVIDER_TOTAL_MISMATCH" in diagnostic_codes(result)
     assert row_count(item) == 0
 
 
@@ -293,7 +330,7 @@ def test_transaction_failure_rolls_back_rows_inserted_before_the_failure(
         raise RuntimeError("transaction failure after insert")
 
     monkeypatch.setattr(subject, "_insert_cninfo_rows", insert_then_fail)
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider)
 
     assert result.status is ResultStatus.FAILED
     assert "CNINFO_WRITE_FAILED" in diagnostic_codes(result)
@@ -315,7 +352,7 @@ def test_cancelled_before_provider_does_not_request_or_write(
 
     control = ExecutionControl()
     control.cancel("test cancellation before provider")
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider, control=control)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider, control=control)
 
     assert result.status is ResultStatus.FAILED
     assert calls == 0
@@ -336,7 +373,7 @@ def test_deadline_before_provider_does_not_request_or_write(
         return report(date.fromisoformat(date_text), (record(TARGET),))
 
     control = ExecutionControl(deadline=datetime.now(UTC) - timedelta(seconds=1))
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider, control=control)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider, control=control)
 
     assert result.status is ResultStatus.FAILED
     assert calls == 0
@@ -365,7 +402,7 @@ def test_cancelled_after_provider_response_does_not_enter_write_transaction(
         return real_append(context, rows)
 
     monkeypatch.setattr(subject, "_append_cninfo_rows", append_spy)
-    result = run(subject.CNINFO_INCREMENTAL_NOON, item, monkeypatch, provider, control=control)
+    result = run(subject.CNINFO_RESEARCH_VISIT_INGEST, item, monkeypatch, provider, control=control)
 
     assert result.status is ResultStatus.FAILED
     assert write_calls == 0
@@ -396,7 +433,9 @@ def test_eastmoney_fetch_report_requires_a_complete_short_page(monkeypatch: pyte
             rows = [{"SECUCODE": f"000{index:03d}.SZ"} for index in range(50)]
         else:
             rows = [{"SECUCODE": "000050.SZ"}]
-        return _FakeResponse({"success": True, "result": {"data": rows}})
+        return _FakeResponse(
+            {"success": True, "result": {"data": rows, "count": 51, "pages": 2}}
+        )
 
     monkeypatch.setattr(fetch_module.urllib.request, "urlopen", open_url)
     monkeypatch.setattr(fetch_module, "eastmoney_sleep_interval", lambda: 0.0)
@@ -406,6 +445,8 @@ def test_eastmoney_fetch_report_requires_a_complete_short_page(monkeypatch: pyte
     assert target_report.pages_fetched == 2
     assert target_report.requests == 2
     assert len(target_report.records) == 51
+    assert target_report.reported_total == 51
+    assert target_report.reported_pages == 2
     assert calls == [(1, 15.0), (2, 15.0)]
 
 
@@ -414,7 +455,9 @@ def test_eastmoney_fetch_report_marks_failed_pages_as_partial(monkeypatch: pytes
         page = int(parse_qs(urlparse(request.full_url).query)["pageNumber"][0])
         if page == 1:
             rows = [{"SECUCODE": f"000{index:03d}.SZ"} for index in range(50)]
-            return _FakeResponse({"success": True, "result": {"data": rows}})
+            return _FakeResponse(
+                {"success": True, "result": {"data": rows, "count": 51, "pages": 2}}
+            )
         raise TimeoutError("provider timeout")
 
     monkeypatch.setattr(fetch_module.urllib.request, "urlopen", open_url)
