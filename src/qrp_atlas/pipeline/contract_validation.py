@@ -43,6 +43,7 @@ DUCKDB_RESOURCE_PATTERN = re.compile(r"^duckdb://([^#\s]+)#([^#\s]+)$")
 # production paths in source or test fixtures.
 MANAGED_WRITER_LOCKS: dict[str, str] = {
     "quant_db": "quant_db_writer",
+    "irm_qa_db": "irm_qa_writer",
     "system_b_episode_db": "system_b_episode_writer",
     "system_b_pools_db": "system_b_pools_writer",
 }

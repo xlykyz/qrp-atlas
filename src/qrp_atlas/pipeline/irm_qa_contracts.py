@@ -67,8 +67,8 @@ from .registry import register_pipeline
 
 
 IRM_TIMEZONE = ZoneInfo("Asia/Shanghai")
-QUANT_DB_RESOURCE = "quant_db"
-QUANT_DB_WRITER = "quant_db_writer"
+IRM_QA_DB_RESOURCE = "irm_qa_db"
+IRM_QA_WRITER = "irm_qa_writer"
 IRM_TABLE = IRM_INTERACTION_QA.name
 
 
@@ -235,7 +235,7 @@ def _append_rows(
     transaction_open = False
     try:
         context.execution_control.check()
-        connection = duckdb.connect(str(context.settings.paths.duckdb_path))
+        connection = duckdb.connect(str(context.settings.paths.irm_qa_duckdb_path))
         context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         transaction_open = True
@@ -290,7 +290,7 @@ def _execute_irm(context: PipelineRunContext) -> BusinessExecution:
     output = OutputResult(
         output_id=IRM_TABLE,
         rows_written=inserted,
-        location="settings.paths.duckdb_path",
+        location="settings.paths.irm_qa_duckdb_path",
         completed=True,
         detail={
             "observation_date": observation_date.isoformat() if observation_date else None,
@@ -330,7 +330,9 @@ def _execute_irm(context: PipelineRunContext) -> BusinessExecution:
 def _irm_completion(context: PipelineRunContext) -> CheckResult:
     context.execution_control.check()
     try:
-        connection = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+        connection = duckdb.connect(
+            str(context.settings.paths.irm_qa_duckdb_path), read_only=True
+        )
         try:
             total_rows = int(connection.execute(f"SELECT COUNT(*) FROM {IRM_TABLE}").fetchone()[0])
             context.execution_control.check()
@@ -356,7 +358,9 @@ def _irm_completion(context: PipelineRunContext) -> CheckResult:
 def _irm_unique_key_quality(context: PipelineRunContext) -> CheckResult:
     context.execution_control.check()
     try:
-        connection = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+        connection = duckdb.connect(
+            str(context.settings.paths.irm_qa_duckdb_path), read_only=True
+        )
         try:
             duplicate = connection.execute(
                 f"""
@@ -414,14 +418,14 @@ def _provider_input() -> InputContract:
 def _output() -> OutputContract:
     return OutputContract(
         output_id=IRM_TABLE,
-        physical_resource=QUANT_DB_RESOURCE,
-        location="settings.paths.duckdb_path",
+        physical_resource=IRM_QA_DB_RESOURCE,
+        location="settings.paths.irm_qa_duckdb_path",
         object_name=IRM_TABLE,
         unique_key=IRM_INTERACTION_QA.primary_key,
         write_mode=WriteMode.APPEND,
         target_date_semantics="append records observed from the latest feed; no reply-date target filtering",
         completion=CompletionContract(
-            marker="committed transactional append is queryable in irm_interaction_qa",
+            marker="committed transactional append is queryable in irm_qa.duckdb.irm_interaction_qa",
             error_code="IRM_COMPLETION_MISSING",
             checker=_irm_completion,
         ),
@@ -470,7 +474,7 @@ IRM_QA_INCREMENTAL = register_pipeline(
         inputs=(_provider_input(),),
         outputs=(_output(),),
         dependencies=(),
-        resource_locks=(QUANT_DB_WRITER,),
+        resource_locks=(IRM_QA_WRITER,),
         resource_reads=(),
         idempotency=IdempotencyContract(
             idempotency_key="pid",

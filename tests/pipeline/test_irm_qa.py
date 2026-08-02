@@ -10,7 +10,7 @@ from qrp_atlas.contracts import (
     IRM_INTERACTION_QA,
     INTERACTION_PID,
     get_table,
-    init_database,
+    init_irm_database,
 )
 from qrp_atlas.pipeline.irm_qa.clean import clean_interaction_qa, clean_record
 from qrp_atlas.pipeline.irm_qa.fetch import fetch_interaction_qa
@@ -79,7 +79,7 @@ def test_upsert_interaction_qa(tmp_path):
     db = tmp_path / "irm.duckdb"
     con = duckdb.connect(str(db))
     try:
-        init_database(con)
+        init_irm_database(con)
         records = clean_interaction_qa([RAW_SAMPLE])
 
         # 默认增量：首次插入

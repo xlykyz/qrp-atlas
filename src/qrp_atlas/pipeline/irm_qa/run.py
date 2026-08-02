@@ -19,8 +19,8 @@ import sys
 
 import duckdb
 
-from qrp_atlas.config.paths import DB_PATH
-from qrp_atlas.contracts.schema import init_database
+from qrp_atlas.config.paths import IRM_QA_DUCKDB_PATH
+from qrp_atlas.contracts.schema import init_irm_database
 from qrp_atlas.pipeline.irm_qa.clean import clean_interaction_qa
 from qrp_atlas.pipeline.irm_qa.fetch import fetch_interaction_qa
 from qrp_atlas.pipeline.irm_qa.load import upsert_interaction_qa
@@ -65,9 +65,9 @@ def run(
 
     incremental = not replace
     print(f"[irm_qa] Loading to database ({mode})...")
-    con = duckdb.connect(str(DB_PATH))
+    con = duckdb.connect(str(IRM_QA_DUCKDB_PATH))
     try:
-        init_database(con)
+        init_irm_database(con)
         count = upsert_interaction_qa(con, cleaned, incremental=incremental)
         action = "Ignored existing / inserted" if incremental else "Replaced"
         print(f"[irm_qa] {action} {count} records")

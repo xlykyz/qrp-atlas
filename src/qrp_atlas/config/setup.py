@@ -91,6 +91,7 @@ MANAGED_ENV_VARS = frozenset(
         "QRP_HOME",
         "QRP_DATA_DIR",
         "QRP_DUCKDB_PATH",
+        "QRP_IRM_QA_DUCKDB_PATH",
         "QRP_API_HOST",
         "QRP_API_PORT",
         "QRP_API_CORS_ORIGINS",
@@ -168,6 +169,7 @@ class SetupOptions:
     home: str | None = None
     data_dir: str | None = None
     duckdb_path: str | None = None
+    irm_qa_duckdb_path: str | None = None
     api_host: str | None = None
     api_port: int | None = None
     cors_origins: Sequence[str] = ()
@@ -211,6 +213,7 @@ def profile_values(profile_name: str, *, project_root: Path = PROJECT_ROOT) -> d
             "QRP_HOME": home,
             "QRP_DATA_DIR": data_dir,
             "QRP_DUCKDB_PATH": str(Path(data_dir) / "db" / "quant.db"),
+            "QRP_IRM_QA_DUCKDB_PATH": str(Path(data_dir) / "db" / "irm_qa.duckdb"),
             "QRP_AUTH_SESSION_TTL_SECONDS": "604800",
             "QRP_LOCAL_USERNAME": "ryan",
             "QRP_LOCAL_DISPLAY_NAME": "Ryan",
@@ -446,6 +449,23 @@ def _interactive_values(
         database_default,
     )
 
+    default_irm_qa_database = str(
+        Path(values["QRP_DATA_DIR"]).expanduser() / "db" / "irm_qa.duckdb"
+    )
+    profile_irm_qa_database = profile_values(profile.name, project_root=project_root)[
+        "QRP_IRM_QA_DUCKDB_PATH"
+    ]
+    irm_qa_database_default = values.get(
+        "QRP_IRM_QA_DUCKDB_PATH", default_irm_qa_database
+    )
+    if irm_qa_database_default == profile_irm_qa_database:
+        irm_qa_database_default = default_irm_qa_database
+    values["QRP_IRM_QA_DUCKDB_PATH"] = _text(
+        io_adapter,
+        "IRM 独立 DuckDB 文件路径",
+        irm_qa_database_default,
+    )
+
     database_choice = _choice(
         io_adapter,
         "数据库处理",
@@ -616,6 +636,7 @@ def _non_interactive_values(
         "QRP_HOME": options.home,
         "QRP_DATA_DIR": options.data_dir,
         "QRP_DUCKDB_PATH": options.duckdb_path,
+        "QRP_IRM_QA_DUCKDB_PATH": options.irm_qa_duckdb_path,
         "QRP_API_HOST": options.api_host,
         "QRP_API_PORT": str(options.api_port) if options.api_port is not None else None,
         "QRP_API_CORS_ORIGINS": ",".join(options.cors_origins) if options.cors_origins else None,

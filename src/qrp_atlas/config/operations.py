@@ -91,6 +91,26 @@ def initialize_runtime(settings: AppSettings) -> list[InitResult]:
         status = InitStatus.SKIPPED
         message = "database not created; use the existing schema initializer when needed"
     results.append(InitResult(status, database, message))
+
+    irm_qa_database = settings.paths.irm_qa_duckdb_path
+    if irm_qa_database.exists():
+        status = (
+            InitStatus.EXISTS
+            if irm_qa_database.is_file()
+            else InitStatus.FAILURE
+        )
+        message = (
+            "IRM database preserved"
+            if irm_qa_database.is_file()
+            else "IRM database path is not a file"
+        )
+    else:
+        status = InitStatus.SKIPPED
+        message = (
+            "IRM database not created; create it with the IRM migration tool "
+            "or schema initializer when needed"
+        )
+    results.append(InitResult(status, irm_qa_database, message))
     return results
 
 
@@ -190,6 +210,49 @@ def doctor(settings: AppSettings) -> list[CheckResult]:
         else:
             results.append(
                 CheckResult(CheckLevel.OK, "duckdb", f"database is readable: {database}")
+            )
+
+    irm_qa_database = settings.paths.irm_qa_duckdb_path
+    if irm_qa_database.exists() and not irm_qa_database.is_file():
+        results.append(
+            CheckResult(
+                CheckLevel.FAILURE,
+                "irm_qa_duckdb",
+                f"IRM database path is not a file: {irm_qa_database}",
+            )
+        )
+    elif not irm_qa_database.exists():
+        results.append(
+            CheckResult(
+                CheckLevel.WARNING,
+                "irm_qa_duckdb",
+                f"IRM database file does not exist: {irm_qa_database}",
+            )
+        )
+    else:
+        try:
+            import duckdb
+
+            connection = duckdb.connect(str(irm_qa_database), read_only=True)
+            try:
+                connection.execute("SELECT 1").fetchone()
+            finally:
+                connection.close()
+        except Exception as exc:
+            results.append(
+                CheckResult(
+                    CheckLevel.FAILURE,
+                    "irm_qa_duckdb",
+                    f"IRM database could not be opened read-only: {type(exc).__name__}",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    CheckLevel.OK,
+                    "irm_qa_duckdb",
+                    f"IRM database is readable: {irm_qa_database}",
+                )
             )
 
     auth = settings.authentication

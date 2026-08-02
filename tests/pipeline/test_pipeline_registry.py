@@ -32,6 +32,7 @@ VALID_TASK_TYPES = {
 }
 DATABASE_LOCKS = {
     "quant.db": "quant_db_writer",
+    "irm_qa.duckdb": "irm_qa_writer",
     "system_b_episode.duckdb": "system_b_episode_writer",
     "system_b_pools.duckdb": "system_b_pools_writer",
 }
