@@ -60,22 +60,8 @@ def save_raw_csv(records: list[dict], date_tag: str) -> str:
     Returns:
         Path to the saved raw CSV file.
     """
-    out_dir = DATA_DIR / "raw" / "research_industry"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{date_tag}.csv"
-
-    if not records:
-        logger.warning("save_raw_csv: no records to save to %s", path)
-        return str(path)
-
-    # Use original keys from the first record as column headers
-    headers = list(records[0].keys())
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(records)
-
-    logger.info("Saved raw CSV: %s (%d rows)", path, len(records))
+    path = DATA_DIR / "raw" / "research_industry" / f"{date_tag}.csv"
+    write_raw_csv(records, path)
     return str(path)
 
 
@@ -89,20 +75,40 @@ def save_canonical_csv(records: list[dict], date_tag: str) -> str:
     Returns:
         Path to the saved canonical CSV file.
     """
-    out_dir = DATA_DIR / "canonical" / "research_industry"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{date_tag}.csv"
+    path = DATA_DIR / "canonical" / "research_industry" / f"{date_tag}.csv"
+    write_canonical_csv(records, path)
+    return str(path)
 
+
+def write_raw_csv(records: list[dict], path: Path) -> Path:
+    """Write raw records to an explicitly supplied path."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not records:
-        logger.warning("save_canonical_csv: no records to save to %s", path)
-        return str(path)
-
-    # Use DB column names from FIELD_MAP values as column order
-    ordered_keys = list(FIELD_MAP.values())
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=ordered_keys, extrasaction="ignore")
+        logger.warning("write_raw_csv: no records to save to %s", path)
+        return path
+    headers = list(records[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(records)
+    logger.info("Saved raw CSV: %s (%d rows)", path, len(records))
+    return path
 
+
+def write_canonical_csv(records: list[dict], path: Path) -> Path:
+    """Write canonical records to an explicitly supplied path."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not records:
+        logger.warning("write_canonical_csv: no records to save to %s", path)
+        return path
+    ordered_keys = list(FIELD_MAP.values())
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ordered_keys, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(records)
     logger.info("Saved canonical CSV: %s (%d rows)", path, len(records))
-    return str(path)
+    return path

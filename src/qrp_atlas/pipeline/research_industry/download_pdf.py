@@ -39,18 +39,20 @@ def build_pdf_path(
     publish_date,
     title: str,
     industry_name: str,
+    info_code: str,
     base_dir: Path,
 ) -> Path:
     """
     构建 PDF 本地存储路径。
 
     路径格式: data/pdfs/research_industry/{YYYY}/{MM}/{DD}/{filename}.pdf
-    文件名格式: {title}_{industryName}.pdf
+    文件名格式: {title}_{industryName}_{infoCode}.pdf
 
     Args:
         publish_date: 发布日期
         title: 研报标题
         industry_name: 行业名称
+        info_code: 研报唯一标识
         base_dir: PDF 存储根目录
 
     Returns:
@@ -63,12 +65,13 @@ def build_pdf_path(
     # 清理文件名中的非法字符
     safe_title = sanitize_filename(title)
     safe_industry_name = sanitize_filename(industry_name) if industry_name else ""
+    safe_info_code = sanitize_filename(info_code)
 
-    # 初始文件名: {title}_{industry_name}.pdf
+    # 初始文件名: {title}_{industry_name}_{info_code}.pdf
     if safe_industry_name:
-        filename_base = f"{safe_title}_{safe_industry_name}"
+        filename_base = f"{safe_title}_{safe_industry_name}_{safe_info_code}"
     else:
-        filename_base = safe_title
+        filename_base = f"{safe_title}_{safe_info_code}"
 
     # 构建完整路径并检查长度
     date_dir = base_dir / str(yyyy) / f"{mm:02d}" / f"{dd:02d}"
@@ -76,16 +79,20 @@ def build_pdf_path(
 
     # 如果路径超过最大长度限制，截断 title 部分
     if len(str(full_path)) > MAX_PATH_LENGTH:
-        # 预留给 industry_name、日期路径等的长度
-        reserved = len(str(date_dir / f"_{safe_industry_name}.pdf")) if safe_industry_name else len(str(date_dir / ".pdf"))
+        # 预留给 industry_name、info_code、日期路径等的长度
+        reserved = len(
+            str(date_dir / f"_{safe_industry_name}_{safe_info_code}.pdf")
+            if safe_industry_name
+            else str(date_dir / f"_{safe_info_code}.pdf")
+        )
         max_title_len = MAX_PATH_LENGTH - reserved - 1  # 减1避免边界
         if max_title_len < 10:
             max_title_len = 10  # 至少保留10个字符
         safe_title = safe_title[:max_title_len]
         if safe_industry_name:
-            filename_base = f"{safe_title}_{safe_industry_name}"
+            filename_base = f"{safe_title}_{safe_industry_name}_{safe_info_code}"
         else:
-            filename_base = safe_title
+            filename_base = f"{safe_title}_{safe_info_code}"
         full_path = date_dir / f"{filename_base}.pdf"
 
     return full_path
@@ -166,6 +173,7 @@ def query_reports(mode: str, pdf_base_dir: Path) -> list[tuple]:
             publish_date=publish_date,
             title=title,
             industry_name=effective_industry_name,
+            info_code=info_code,
             base_dir=pdf_base_dir,
         )
         if pdf_path.exists():
@@ -219,6 +227,7 @@ def main() -> None:
             publish_date=publish_date,
             title=title,
             industry_name=effective_industry_name,
+            info_code=info_code,
             base_dir=pdf_base_dir,
         )
 
