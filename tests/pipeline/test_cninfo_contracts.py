@@ -468,3 +468,44 @@ def test_eastmoney_fetch_report_marks_failed_pages_as_partial(monkeypatch: pytes
     assert target_report.pages_fetched == 1
     assert target_report.failed_pages == (2, 3, 4, 5, 6)
     assert target_report.requests == 16
+
+
+@pytest.mark.parametrize("code", [9201, "9201"])
+def test_eastmoney_empty_result_with_code_9201_is_legal_noop(
+    monkeypatch: pytest.MonkeyPatch, code,
+) -> None:
+    """真实东财对空结果返回 success=false + code 9201 + result=None，应视为合法空页。
+
+    int 与字符串形式的 9201 都必须放行。
+    """
+    def open_url(request, *, timeout):
+        return _FakeResponse(
+            {"success": False, "message": "返回数据为空", "code": code, "result": None}
+        )
+
+    monkeypatch.setattr(fetch_module.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(fetch_module, "_controlled_wait", lambda *_args: None)
+    target_report = fetch_module.fetch_from_eastmoney_report(TARGET.isoformat())
+
+    assert target_report.complete is True
+    assert target_report.failed_pages == ()
+    assert len(target_report.records) == 0
+    assert target_report.pages_fetched == 1
+
+
+def test_eastmoney_error_message_containing_empty_word_is_not_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 9201 错误（如参数错误）即使消息含“空”也必须保持失败/不完整，禁止静默漏采。"""
+    def open_url(request, *, timeout):
+        return _FakeResponse(
+            {"success": False, "message": "请求参数不能为空", "code": 500, "result": None}
+        )
+
+    monkeypatch.setattr(fetch_module.urllib.request, "urlopen", open_url)
+    monkeypatch.setattr(fetch_module, "_controlled_wait", lambda *_args: None)
+    target_report = fetch_module.fetch_from_eastmoney_report(TARGET.isoformat())
+
+    assert target_report.complete is False
+    assert len(target_report.records) == 0
+    assert target_report.failed_pages != ()

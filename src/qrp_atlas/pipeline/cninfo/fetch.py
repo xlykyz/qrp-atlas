@@ -129,7 +129,19 @@ def fetch_from_eastmoney_report(
                     execution_control.check()
 
                 if data.get("success") is not True:
-                    raise RuntimeError(f"API error: {data.get('message', 'unknown error')}")
+                    message = data.get("message") or "unknown error"
+                    # Eastmoney reports a legal empty result set as
+                    # success=false with result=None and code 9201
+                    # ("返回数据为空").  Only this explicit provider code
+                    # may be treated as an empty page; any other failure
+                    # (parameter, auth, or server errors) must stay visible
+                    # so the Contract fails closed instead of silently
+                    # dropping a day's records.
+                    if data.get("result") is None and str(data.get("code")) == "9201":
+                        raw_records = []
+                        success = True
+                        break
+                    raise RuntimeError(f"API error: {message}")
                 result = data.get("result")
                 if not isinstance(result, dict):
                     raise RuntimeError("API response missing result object")
