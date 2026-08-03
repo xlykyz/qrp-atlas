@@ -29,6 +29,7 @@ from qrp_atlas.pipeline.market_data_contracts import (
     SUSPEND_D_TARGET_DATE_POLICY,
     ZT_DT_POOL_DAILY,
 )
+from qrp_atlas.pipeline.index_basic_contracts import INDEX_BASIC_CONTRACTS
 from qrp_atlas.pipeline.cninfo_contracts import CNINFO_CONTRACTS
 from qrp_atlas.pipeline.irm_qa_contracts import IRM_CONTRACTS
 from qrp_atlas.pipeline.membership_contracts import MEMBERSHIP_CONTRACTS
@@ -52,6 +53,11 @@ class FakeTushare:
         self.daily_basic_frame = daily_basic_frame()
         self.adj_factor_frame = adj_factor_frame()
         self.suspend_frame = suspend_frame()
+        self.index_daily_frames = {
+            code: index_frame(code)
+            for code in ("000001.SH", "399001.SZ", "399006.SZ", "000688.SH")
+        }
+        self.index_calls: list[tuple[str, str]] = []
 
     def daily(self, **_kwargs) -> pd.DataFrame:
         return self.daily_frame.copy()
@@ -64,6 +70,10 @@ class FakeTushare:
 
     def suspend_d(self, **_kwargs) -> pd.DataFrame:
         return self.suspend_frame.copy()
+
+    def index_daily(self, *, ts_code: str, trade_date: str) -> pd.DataFrame:
+        self.index_calls.append((ts_code, trade_date))
+        return self.index_daily_frames[ts_code].copy()
 
 
 def settings(tmp_path: Path) -> AppSettings:
@@ -144,15 +154,20 @@ def suspend_frame() -> pd.DataFrame:
     )
 
 
-def index_frame() -> pd.DataFrame:
+def index_frame(index_code: str = "000001.SH", *, trade_date: date = TARGET) -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "date": ["2026-07-28", "2026-07-29"],
-            "open": [100.0, 101.0],
-            "high": [101.0, 102.0],
-            "low": [99.0, 100.0],
-            "close": [100.5, 101.5],
-            "volume": [1000, 1200],
+            "ts_code": [index_code],
+            "trade_date": [trade_date.strftime("%Y%m%d")],
+            "open": [101.0],
+            "high": [102.0],
+            "low": [100.0],
+            "close": [101.5],
+            "pre_close": [100.5],
+            "change": [1.0],
+            "pct_chg": [1.0],
+            "vol": [1200],
+            "amount": [12345.0],
         }
     )
 
@@ -257,6 +272,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
     }
     assert {contract.pipeline_id for contract in registered} == {
         *(contract.pipeline_id for contract in MARKET_DATA_CONTRACTS),
+        *(contract.pipeline_id for contract in INDEX_BASIC_CONTRACTS),
         *(contract.pipeline_id for contract in CNINFO_CONTRACTS),
         *(contract.pipeline_id for contract in IRM_CONTRACTS),
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),
@@ -528,10 +544,8 @@ def test_adj_factor_blocks_when_market_target_is_not_complete(tmp_path: Path, mo
 def test_index_daily_requires_all_series_and_upserts_exact_target(tmp_path: Path, monkeypatch) -> None:
     item = settings(tmp_path)
     initialise_database(item)
-    monkeypatch.setattr(
-        "qrp_atlas.pipeline.market_data_contracts.ak.stock_zh_index_daily",
-        lambda **_kwargs: index_frame(),
-    )
+    client = FakeTushare()
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
 
     result = run(INDEX_DAILY_UPDATE, item)
 
@@ -540,16 +554,18 @@ def test_index_daily_requires_all_series_and_upserts_exact_target(tmp_path: Path
     connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
     try:
         assert connection.execute("SELECT COUNT(*) FROM index_daily WHERE trade_date = ?", [TARGET]).fetchone()[0] == 4
+        assert connection.execute(
+            "SELECT index_code, pre_close, change, pct_change, amount FROM index_daily "
+            "WHERE trade_date = ? ORDER BY index_code LIMIT 1",
+            [TARGET],
+        ).fetchone() == ("000001.SH", 100.5, 1.0, 1.0, 12345.0)
     finally:
         connection.close()
 
     repeated = run(INDEX_DAILY_UPDATE, item)
     assert repeated.status is ResultStatus.SUCCESS
 
-    monkeypatch.setattr(
-        "qrp_atlas.pipeline.market_data_contracts.ak.stock_zh_index_daily",
-        lambda **_kwargs: index_frame().iloc[:1],
-    )
+    client.index_daily_frames["000001.SH"] = index_frame("000001.SH", trade_date=PREVIOUS)
     failed = run(INDEX_DAILY_UPDATE, item)
     assert failed.status is ResultStatus.FAILED
     assert "INDEX_DAILY_API_PARTIAL" in diagnostics(failed)
@@ -1050,10 +1066,6 @@ def test_equivalent_daily_scale_benchmark_records_metrics_for_all_six_contracts(
         }
     )
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
-    monkeypatch.setattr(
-        "qrp_atlas.pipeline.market_data_contracts.ak.stock_zh_index_daily",
-        lambda **_kwargs: index_frame(),
-    )
     pool_records = [{"c": f"{value:06d}", "n": "Sample", "p": 10000, "zdp": 10.0} for value in range(200)]
     monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts._fetch_eastmoney_pool", lambda *_args, **_kwargs: (pool_records, 1))
 

@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import akshare as ak
 import duckdb
 import pandas as pd
 
@@ -31,6 +30,7 @@ from qrp_atlas.contracts import (
     INDEX_DAILY,
     SUSPEND_D,
     TRADING_CALENDAR,
+    TUSHARE_INDEX_DAILY,
     ZT_POOL,
     align_to_schema,
     normalize_ticker,
@@ -73,10 +73,10 @@ DATA_AVAILABLE_AFTER = clock_time(16, 0)
 QUANT_DB_RESOURCE = "quant_db"
 QUANT_DB_WRITER = "quant_db_writer"
 INDEX_SERIES: tuple[tuple[str, str], ...] = (
-    ("sh000001", "上证综指"),
-    ("sz399001", "深证成指"),
-    ("sz399006", "创业板指"),
-    ("sh000688", "科创50"),
+    ("000001.SH", "上证综指"),
+    ("399001.SZ", "深证成指"),
+    ("399006.SZ", "创业板指"),
+    ("000688.SH", "科创50"),
 )
 
 
@@ -277,8 +277,8 @@ def _tushare_configuration(context: PipelineRunContext) -> CheckResult:
     return CheckResult.success("tushare_configuration", configured=True)
 
 
-def _akshare_configuration(_context: PipelineRunContext) -> CheckResult:
-    return CheckResult.success("akshare_configuration", client="akshare")
+def _external_api_configuration(_context: PipelineRunContext) -> CheckResult:
+    return CheckResult.success("external_api_configuration", configured=True)
 
 
 def _eastmoney_configuration(_context: PipelineRunContext) -> CheckResult:
@@ -568,7 +568,23 @@ def _non_empty_completion(table_name: str, error_code: str):
 
 def _index_completion(context: PipelineRunContext) -> CheckResult:
     try:
-        rows = _target_row_count(context, INDEX_DAILY.name)
+        connection = _connect(context, read_only=True)
+        try:
+            rows = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM index_daily WHERE trade_date = ?",
+                    [_target_date(context)],
+                ).fetchone()[0]
+            )
+            codes = {
+                str(row[0]).strip().upper()
+                for row in connection.execute(
+                    "SELECT index_code FROM index_daily WHERE trade_date = ?",
+                    [_target_date(context)],
+                ).fetchall()
+            }
+        finally:
+            connection.close()
     except Exception as exc:
         return CheckResult.failure(
             "index_daily_completion",
@@ -576,13 +592,16 @@ def _index_completion(context: PipelineRunContext) -> CheckResult:
             "index output table could not be read after write",
             exception=type(exc).__name__,
         )
-    if rows != len(INDEX_SERIES):
+    expected_codes = {code for code, _ in INDEX_SERIES}
+    if rows != len(INDEX_SERIES) or codes != expected_codes:
         return CheckResult.failure(
             "index_daily_completion",
             "INDEX_DAILY_COMPLETION_MISSING",
-            "target date does not contain all required index series",
+            "target date does not contain exactly all required Tushare index series",
             expected=len(INDEX_SERIES),
             actual=rows,
+            expected_codes=sorted(expected_codes),
+            actual_codes=sorted(codes),
         )
     return CheckResult.success("index_daily_completion", rows=rows)
 
@@ -945,22 +964,68 @@ def execute_index_daily_update(context: PipelineRunContext) -> BusinessExecution
     started = time.monotonic()
     frames: list[pd.DataFrame] = []
     try:
+        client = get_tushare_pro(settings=context.settings, execution_control=context.execution_control)
         for index_code, index_name in INDEX_SERIES:
             context.execution_control.check()
-            raw = ak.stock_zh_index_daily(symbol=index_code)
+            raw = client.index_daily(
+                ts_code=index_code,
+                trade_date=target.strftime("%Y%m%d"),
+            )
             context.execution_control.check()
             if raw is None or raw.empty:
                 raise ContractError("INDEX_DAILY_API_EMPTY", index_code)
-            _required_columns(raw, ("date", "open", "high", "low", "close", "volume"), "INDEX_DAILY_API_PARTIAL")
-            frame = raw.rename(columns={"date": "trade_date"}).copy()
-            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="raise").dt.date
+            _required_columns(
+                raw,
+                (
+                    "ts_code",
+                    "trade_date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "change",
+                    "pct_chg",
+                    "vol",
+                    "amount",
+                ),
+                "INDEX_DAILY_API_PARTIAL",
+            )
+            received_codes = set(raw["ts_code"].dropna().astype(str).str.strip().str.upper())
+            if received_codes != {index_code}:
+                raise ContractError("INDEX_DAILY_API_PARTIAL", f"{index_code} response codes={sorted(received_codes)}")
+            frame = raw.rename(columns=TUSHARE_INDEX_DAILY).copy()
+            parsed_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date
+            if parsed_dates.isna().any():
+                raise ContractError("INDEX_DAILY_API_PARTIAL", f"{index_code} contains invalid trade_date")
+            frame["trade_date"] = parsed_dates
             frame = frame.loc[frame["trade_date"] == target].copy()
             if len(frame) != 1:
                 raise ContractError("INDEX_DAILY_API_PARTIAL", f"{index_code} target rows={len(frame)}")
-            frame["index_code"] = index_code
+            frame["index_code"] = frame["index_code"].astype(str).str.strip().str.upper()
             frame["index_name"] = index_name
             frame["volume"] = pd.to_numeric(frame["volume"], errors="raise").astype("int64")
-            frames.append(frame.loc[:, ["trade_date", "index_code", "index_name", "open", "high", "low", "close", "volume"]])
+            for column in ("open", "high", "low", "close", "pre_close", "change", "pct_change", "amount"):
+                frame[column] = pd.to_numeric(frame[column], errors="raise")
+            frames.append(
+                frame.loc[
+                    :,
+                    [
+                        "trade_date",
+                        "index_code",
+                        "index_name",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "pre_close",
+                        "change",
+                        "pct_change",
+                        "volume",
+                        "amount",
+                    ],
+                ]
+            )
     except ContractError:
         raise
     except Exception as exc:
@@ -1353,7 +1418,7 @@ def _external_input(input_id: str, source: str, fields: tuple[str, ...], *, tush
         required_fields=fields,
         target_date_semantics="provider response must be scoped to the resolved target trading date",
         missing_error_code="TUSHARE_CONFIGURATION_MISSING" if tushare else "EXTERNAL_API_CONFIGURATION_MISSING",
-        structure_check=_tushare_configuration if tushare else (checker or _akshare_configuration),
+        structure_check=_tushare_configuration if tushare else (checker or _external_api_configuration),
         freshness=FreshnessContract(
             check_id=f"{input_id}_target_freshness",
             target_date_semantics="target-date response is validated by the executor before any transaction",
@@ -1622,7 +1687,7 @@ INDEX_DAILY_UPDATE = register_pipeline(
         pipeline_id="index_daily_update",
         name="Core index daily bars",
         description="Upserts the four existing core index series for one trading date only after all provider responses are complete.",
-        contract_version="1.1.0",
+        contract_version="1.2.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_index_daily_update,
         target_date_policy=MARKET_TARGET_DATE_POLICY,
@@ -1630,9 +1695,22 @@ INDEX_DAILY_UPDATE = register_pipeline(
         inputs=(
             _calendar_input(),
             _external_input(
-                "akshare_index_daily",
-                "akshare.stock_zh_index_daily(symbol) for sh000001, sz399001, sz399006, sh000688",
-                ("date", "open", "high", "low", "close", "volume"),
+                "tushare_index_daily",
+                "tushare.pro.index_daily(ts_code=..., trade_date=YYYYMMDD) for the four core indices",
+                (
+                    "ts_code",
+                    "trade_date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "change",
+                    "pct_chg",
+                    "vol",
+                    "amount",
+                ),
+                tushare=True,
             ),
         ),
         outputs=(
@@ -1732,7 +1810,7 @@ SUSPEND_D_INGEST = register_pipeline(
         pipeline_id="suspend_d_ingest",
         name="A-share daily suspension events",
         description="Fetches and atomically replaces one target-date suspend_d snapshot; an empty provider snapshot is valid.",
-        contract_version="1.2.0",
+        contract_version="1.1.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_suspend_d_ingest,
         target_date_policy=SUSPEND_D_TARGET_DATE_POLICY,

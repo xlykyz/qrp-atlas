@@ -13,10 +13,10 @@ from qrp_atlas.config import DB_PATH, RAW_DIR
 
 # CSV 文件名 → (index_code, index_name)
 INDEX_FILES = {
-    "sh000001_上证综指.csv": ("sh000001", "上证综指"),
-    "sz399001_深证成指.csv": ("sz399001", "深证成指"),
-    "sz399006_创业板指.csv": ("sz399006", "创业板指"),
-    "sh000688_科创50.csv":   ("sh000688", "科创50"),
+    "sh000001_上证综指.csv": ("000001.SH", "上证综指"),
+    "sz399001_深证成指.csv": ("399001.SZ", "深证成指"),
+    "sz399006_创业板指.csv": ("399006.SZ", "创业板指"),
+    "sh000688_科创50.csv":   ("000688.SH", "科创50"),
 }
 
 EXPECTED_COLUMNS = ["trade_date", "index_code", "index_name", "open", "high", "low", "close", "volume"]

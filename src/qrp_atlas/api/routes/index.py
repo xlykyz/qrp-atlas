@@ -6,26 +6,18 @@ from fastapi import APIRouter, Query
 
 from qrp_atlas.api.db import get_db
 from qrp_atlas.api.utils import row_to_dict
+from qrp_atlas.contracts import normalize_index_code
 
 router = APIRouter(prefix="/api/index-daily", tags=["指数行情"])
 
 
 def _normalize_index_code(code: str) -> str:
-    """把用户输入的指数代码规整为库中存储的格式（如 sh000001）。
+    """把用户输入的指数代码规整为 Tushare ``ts_code`` 格式。
 
     接受: 000001 / 000001.SH / sh000001 / SH000001
-    若不含交易所前缀，则默认按上交所处理（沪深指数代码段不重叠时也能命中）。
+    若不含交易所后缀，则 399 开头按深交所处理，其余默认按上交所处理。
     """
-    raw = str(code).strip().lower()
-    if "." in raw:
-        prefix, num = raw.split(".", 1)
-        return f"{prefix}{num}"
-    if raw.startswith(("sh", "sz", "bj")):
-        return raw
-    # 纯数字：000001/399001 等，按代码段补交易所前缀
-    if raw.startswith("399"):
-        return f"sz{raw}"
-    return f"sh{raw}"
+    return normalize_index_code(code)
 
 
 @router.get("")

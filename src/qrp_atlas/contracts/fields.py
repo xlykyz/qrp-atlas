@@ -37,6 +37,7 @@ AMOUNT = "amount"
 
 PCT_CHANGE = "pct_change"
 PRE_CLOSE = "pre_close"
+CHANGE = "change"
 
 TURNOVER = "turnover"
 MARKET_CAP = "market_cap"
@@ -70,7 +71,7 @@ PRICE_FIELDS = (OPEN, HIGH, LOW, CLOSE, PRE_CLOSE, ENTRY_PRICE, EXIT_PRICE, HALF
 
 NUMERIC_FIELDS = (
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
+    PCT_CHANGE, CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
     ENTRY_PRICE, EXIT_PRICE, HALF_SELL_PRICE,
     HALF_SELL_TRIGGER, POSITION_PCT
 )
@@ -97,6 +98,15 @@ IDENTIFIER_FIELDS = (TICKER, TRADE_ID)
 # ── 指数字段 ──
 INDEX_CODE = "index_code"
 INDEX_NAME = "index_name"
+FULL_NAME = "full_name"
+PUBLISHER = "publisher"
+INDEX_TYPE = "index_type"
+CATEGORY = "category"
+BASE_DATE = "base_date"
+BASE_POINT = "base_point"
+WEIGHT_RULE = "weight_rule"
+DESCRIPTION = "description"
+EXP_DATE = "exp_date"
 
 # ── 每日基本面指标字段（daily_basic） ──
 TURNOVER_RATE = "turnover_rate"

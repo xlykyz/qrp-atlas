@@ -31,6 +31,8 @@ from .fields import (
     PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
     INFO_CODE, TITLE, STOCK_CODE, STOCK_NAME, PUBLISH_DATE,
     MARKET, REPORT_COLUMN, REPORT_TYPE, ENCODE_URL,
+    FULL_NAME, PUBLISHER, INDEX_TYPE, CATEGORY, BASE_DATE, BASE_POINT,
+    LIST_DATE, WEIGHT_RULE, DESCRIPTION, EXP_DATE, CHANGE,
     EM_RATING_CODE, EM_RATING_VALUE, EM_RATING_NAME,
     LAST_EM_RATING_CODE, LAST_EM_RATING_VALUE, LAST_EM_RATING_NAME,
     S_RATING_CODE, S_RATING_NAME, RATING_CHANGE,
@@ -131,6 +133,36 @@ TUSHARE_DAILY: Dict[str, str] = {
     "pct_chg": PCT_CHANGE,
     "vol": VOLUME,
     "amount": AMOUNT,
+}
+
+TUSHARE_INDEX_DAILY: Dict[str, str] = {
+    "ts_code": INDEX_CODE,
+    "trade_date": TRADE_DATE,
+    "open": OPEN,
+    "high": HIGH,
+    "low": LOW,
+    "close": CLOSE,
+    "pre_close": PRE_CLOSE,
+    "change": CHANGE,
+    "pct_chg": PCT_CHANGE,
+    "vol": VOLUME,
+    "amount": AMOUNT,
+}
+
+TUSHARE_INDEX_BASIC: Dict[str, str] = {
+    "ts_code": INDEX_CODE,
+    "name": NAME,
+    "fullname": FULL_NAME,
+    "market": MARKET,
+    "publisher": PUBLISHER,
+    "index_type": INDEX_TYPE,
+    "category": CATEGORY,
+    "base_date": BASE_DATE,
+    "base_point": BASE_POINT,
+    "list_date": LIST_DATE,
+    "weight_rule": WEIGHT_RULE,
+    "desc": DESCRIPTION,
+    "exp_date": EXP_DATE,
 }
 
 EASTMONEY_RESEARCH_REPORT: Dict[str, str] = {
@@ -334,6 +366,8 @@ SOURCE_MAPPINGS = {
     "akshare_realtime": AKSHARE_REALTIME,
     "sina_realtime": SINA_REALTIME,
     "tushare_daily": TUSHARE_DAILY,
+    "tushare_index_daily": TUSHARE_INDEX_DAILY,
+    "tushare_index_basic": TUSHARE_INDEX_BASIC,
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,

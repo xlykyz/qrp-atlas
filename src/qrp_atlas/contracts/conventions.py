@@ -30,6 +30,7 @@ conventions.py - 通用约定
     - 字段类型集合: NUMERIC_COLUMNS, BOOLEAN_COLUMNS, DATE_COLUMNS
 """
 
+import re
 from datetime import date, datetime
 from typing import Tuple
 
@@ -61,18 +62,19 @@ MARKET_CAP_UNIT = "元"
 
 from .fields import (
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
+    PCT_CHANGE, CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
     ENTRY_PRICE, EXIT_PRICE, HALF_SELL_PRICE,
     HALF_SELL_TRIGGER, POSITION_PCT,
     IS_ST, IS_LIMIT_UP, IS_LIMIT_DOWN,
     M1_CORE, M2_FRONT, M3_IDENTIFIABLE, V_TRIGGERED,
     TRADE_DATE, ENTRY_DATE, EXIT_DATE, HALF_SELL_DATE,
+    BASE_DATE, LIST_DATE, EXP_DATE,
     TICKER, TRADE_ID, NAME,
 )
 
 NUMERIC_COLUMNS: Tuple[str, ...] = (
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
+    PCT_CHANGE, CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
     ENTRY_PRICE, EXIT_PRICE, HALF_SELL_PRICE,
     HALF_SELL_TRIGGER, POSITION_PCT,
 )
@@ -83,7 +85,7 @@ BOOLEAN_COLUMNS: Tuple[str, ...] = (
 )
 
 DATE_COLUMNS: Tuple[str, ...] = (
-    TRADE_DATE, ENTRY_DATE, EXIT_DATE, HALF_SELL_DATE,
+    TRADE_DATE, ENTRY_DATE, EXIT_DATE, HALF_SELL_DATE, BASE_DATE, LIST_DATE, EXP_DATE,
 )
 
 STRING_COLUMNS: Tuple[str, ...] = (
@@ -193,6 +195,22 @@ def normalize_ticker(raw: str) -> str:
     if exchange == "UNKNOWN":
         return code  # 无法识别时原样返回
     return f"{code}.{exchange}"
+
+
+def normalize_index_code(raw: str) -> str:
+    """将指数代码统一为 Tushare ``ts_code`` 格式。"""
+
+    value = str(raw).strip().upper()
+    if re.fullmatch(r"\d{6}\.[A-Z]{2,4}", value):
+        return value
+    if re.fullmatch(r"[A-Z]{2}\d{6}", value):
+        exchange = value[:2]
+        if exchange in {"SH", "SZ", "BJ"}:
+            return f"{value[2:]}.{exchange}"
+    if re.fullmatch(r"\d{6}", value):
+        exchange = "SZ" if value.startswith("399") else "SH"
+        return f"{value}.{exchange}"
+    raise ValueError(f"invalid index code: {raw}")
 
 
 def is_sh_ticker(ticker: str) -> bool:

@@ -1,35 +1,43 @@
-"""
-fetch_index_daily.py — 指数日更脚本
+"""Tushare index daily bars -> DuckDB incremental loader."""
 
-每日运行：从 AKshare 拉取指数最新数据并 upsert 到 DuckDB。
-"""
-
-import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
-import akshare as ak
 
-from qrp_atlas.config import DB_PATH
+from qrp_atlas.config import get_settings
+from qrp_atlas.config.tushare_client import get_tushare_pro
 
 INDICES = [
-    ("sh000001", "上证综指"),
-    ("sz399001", "深证成指"),
-    ("sz399006", "创业板指"),
-    ("sh000688", "科创50"),
+    ("000001.SH", "上证综指"),
+    ("399001.SZ", "深证成指"),
+    ("399006.SZ", "创业板指"),
+    ("000688.SH", "科创50"),
 ]
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 UPSERT_SQL = """
-INSERT INTO index_daily (trade_date, index_code, index_name, open, high, low, close, volume)
-SELECT trade_date, index_code, index_name, open, high, low, close, volume FROM df
+INSERT INTO index_daily (
+    trade_date, index_code, index_name, open, high, low, close,
+    pre_close, change, pct_change, volume, amount
+)
+SELECT
+    trade_date, index_code, index_name, open, high, low, close,
+    pre_close, change, pct_change, volume, amount
+FROM df
 ON CONFLICT (trade_date, index_code) DO UPDATE SET
     index_name = excluded.index_name,
     open = excluded.open,
     high = excluded.high,
     low = excluded.low,
     close = excluded.close,
-    volume = excluded.volume
+    pre_close = excluded.pre_close,
+    change = excluded.change,
+    pct_change = excluded.pct_change,
+    volume = excluded.volume,
+    amount = excluded.amount
 """
 
 
@@ -41,41 +49,81 @@ def get_latest_date_in_db(con, index_code: str) -> str | None:
     return str(row[0]) if row[0] else None
 
 
-def fetch_and_update():
-    total_new = 0
-    with duckdb.connect(str(DB_PATH)) as con:
+def fetch_and_update(db_path: Path | None = None) -> int:
+    settings = get_settings()
+    effective_db_path = Path(db_path or settings.paths.duckdb_path)
+    target_date = datetime.now(CHINA_TZ).date()
+    client = get_tushare_pro(settings=settings)
+    frames: list[pd.DataFrame] = []
+
+    with duckdb.connect(str(effective_db_path), read_only=True) as con:
+        latest_dates = {
+            index_code: get_latest_date_in_db(con, index_code)
+            for index_code, _ in INDICES
+        }
+
+    for index_code, index_name in INDICES:
+        latest = latest_dates[index_code]
+        print(f"  [{index_name}] 库里最新日期: {latest}")
+        request = {"ts_code": index_code, "end_date": target_date.strftime("%Y%m%d")}
+        if latest:
+            request["start_date"] = (
+                date.fromisoformat(latest) + timedelta(days=1)
+            ).strftime("%Y%m%d")
+        raw = client.index_daily(**request)
+        if raw is None or raw.empty:
+            print("  ✓ 无新增数据")
+            continue
+        required = {
+            "ts_code", "trade_date", "open", "high", "low", "close",
+            "pre_close", "change", "pct_chg", "vol", "amount",
+        }
+        missing = sorted(required - set(raw.columns))
+        if missing:
+            raise RuntimeError(f"{index_code} index_daily missing fields: {missing}")
+        df = raw.rename(
+            columns={"ts_code": "index_code", "pct_chg": "pct_change", "vol": "volume"}
+        ).copy()
+        df["trade_date"] = pd.to_datetime(df["trade_date"], errors="raise").dt.date
+        df["index_code"] = df["index_code"].astype(str).str.strip().str.upper()
+        df = df.loc[(df["trade_date"] <= target_date) & (df["index_code"] == index_code)].copy()
+        if latest:
+            df = df.loc[df["trade_date"] > date.fromisoformat(latest)].copy()
+        if df.empty:
+            print("  ✓ 无新增数据")
+            continue
+        df["index_name"] = index_name
+        df["volume"] = pd.to_numeric(df["volume"], errors="raise").astype("int64")
+        for column in ("open", "high", "low", "close", "pre_close", "change", "pct_change", "amount"):
+            df[column] = pd.to_numeric(df[column], errors="raise")
+        frames.append(
+            df[
+                [
+                    "trade_date", "index_code", "index_name", "open", "high", "low", "close",
+                    "pre_close", "change", "pct_change", "volume", "amount",
+                ]
+            ]
+        )
+        print(f"  ✓ 新增 {len(df)} 条")
+
+    total_new = sum(len(frame) for frame in frames)
+    if not frames:
+        return 0
+    prepared = pd.concat(frames, ignore_index=True)
+    with duckdb.connect(str(effective_db_path)) as con:
         con.execute("BEGIN TRANSACTION")
         try:
-            for index_code, index_name in INDICES:
-                latest = get_latest_date_in_db(con, index_code)
-                print(f"  [{index_name}] 库里最新日期: {latest}")
-
-                df = ak.stock_zh_index_daily(symbol=index_code)
-                df = df.rename(columns={"date": "trade_date"})
-                df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
-                df["index_code"] = index_code
-                df["index_name"] = index_name
-                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
-
-                if latest:
-                    df = df[df["trade_date"] > pd.Timestamp(latest).date()]
-
-                if df.empty:
-                    print(f"  ✓ 无新增数据")
-                    continue
-
-                df = df[["trade_date", "index_code", "index_name", "open", "high", "low", "close", "volume"]]
-                con.register("df", df)
-                con.execute(UPSERT_SQL)
-                con.unregister("df")
-                print(f"  ✓ 新增 {len(df)} 条")
-                total_new += len(df)
-
+            con.register("df", prepared)
+            con.execute(UPSERT_SQL)
+            con.unregister("df")
             con.execute("COMMIT")
         except Exception:
+            try:
+                con.unregister("df")
+            except Exception:
+                pass
             con.execute("ROLLBACK")
             raise
-
     return total_new
 
 
