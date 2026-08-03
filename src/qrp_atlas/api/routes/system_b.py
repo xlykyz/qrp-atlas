@@ -8,7 +8,17 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from qrp_atlas.api.db import get_db
+from qrp_atlas.api.db import (
+    detach_database_if_attached,
+    get_db,
+    require_episode_db,
+)
+from qrp_atlas.api.schemas.system_b import (
+    ActiveEpisodeDto,
+    ProductionRunDto,
+    SystemBSummaryDto,
+)
+from qrp_atlas.api.system_b_serialization import serialize_system_b_value
 from qrp_atlas.contracts import (
     SYSTEM_B_2_0_PARAMETER_SET_ID,
     SYSTEM_B_2_0_RULE_VERSION_SET_ID,
@@ -28,11 +38,10 @@ router = APIRouter(prefix="/api/v1/system-b", tags=["System B"])
 def _normalize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         for key, value in tuple(row.items()):
-            if hasattr(value, "isoformat"):
-                row[key] = value.isoformat()
-            elif key in {"source_rule_ids", "diagnostics", "metrics"} and isinstance(value, str):
+            row[key] = serialize_system_b_value(value)
+            if key in {"source_rule_ids", "diagnostics", "metrics"} and isinstance(row[key], str):
                 try:
-                    row[key] = json.loads(value)
+                    row[key] = json.loads(row[key])
                 except json.JSONDecodeError:
                     pass
     return rows
@@ -174,7 +183,7 @@ def transitions(
         connection.close()
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=SystemBSummaryDto)
 def summary(
     trade_date: date,
     rule_version_set_id: str = Query(SYSTEM_B_2_0_RULE_VERSION_SET_ID),
@@ -215,12 +224,15 @@ def summary(
             [trade_date, rule_version_set_id, parameter_set_id],
         )
         rows = _fetch_dicts(cursor)
-        return rows[0] if rows else {}
+        if not rows or not rows[0].get("production_run_id"):
+            raise HTTPException(status_code=404, detail="SYSTEM_B_SUMMARY_NOT_READY")
+        rows[0]["trade_date"] = trade_date.isoformat()
+        return rows[0]
     finally:
         connection.close()
 
 
-@router.get("/production-runs/latest")
+@router.get("/production-runs/latest", response_model=ProductionRunDto | None)
 def latest_production_run():
     connection = get_db()
     try:
@@ -238,18 +250,16 @@ def latest_production_run():
 # ── P0-3 / P0-4 / P0-5: Active episodes (灵魂清单) ──────────────────────────
 
 
-def _episode_db_available(connection) -> bool:
-    """Check whether episode_db is attached and the observation table exists."""
+def _require_episode_schema(connection) -> None:
+    """Ensure both tables needed by the active-episode query are present."""
     try:
-        connection.execute(
-            f"SELECT count(*) FROM episode_db.{SYSTEM_B_EPISODE_OBSERVATION_TABLE} LIMIT 1"
-        ).fetchone()
-        return True
-    except Exception:
-        return False
+        for table in (SYSTEM_B_EPISODE_OBSERVATION_TABLE, SYSTEM_B_EPISODE_TABLE):
+            connection.execute(f"SELECT 1 FROM episode_db.{table} LIMIT 0")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="EPISODE_DB_SCHEMA_NOT_DEPLOYED") from exc
 
 
-@router.get("/active-episodes")
+@router.get("/active-episodes", response_model=list[ActiveEpisodeDto])
 def active_episodes(
     trade_date: date,
     rule_version: str = Query(SYSTEM_B_EPISODE_RULE_VERSION),
@@ -264,16 +274,13 @@ def active_episodes(
     ``stock_info`` (stock display name).
 
     Requires ``QRP_EPISODE_DB_PATH`` to be configured on the server so that
-    ``episode_db`` is ATTACH'd by ``get_db()``.
+    ``episode_db`` can be attached for this request.
     """
     connection = get_db()
+    attached_alias: str | None = None
     try:
-        if not _episode_db_available(connection):
-            raise HTTPException(
-                status_code=503,
-                detail="EPISODE_DB_NOT_AVAILABLE: episode_db is not attached. "
-                "Configure QRP_EPISODE_DB_PATH on the server.",
-            )
+        attached_alias = require_episode_db(connection)
+        _require_episode_schema(connection)
         cursor = connection.execute(
             f"""
             SELECT
@@ -308,4 +315,6 @@ def active_episodes(
         )
         return _fetch_dicts(cursor)
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(connection, attached_alias)
         connection.close()

@@ -17,12 +17,18 @@ via the ``QRP_POOL_DB_PATH`` environment variable.  See ``.env.example``.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from qrp_atlas.api.db import get_db
+from qrp_atlas.api.db import (
+    detach_database_if_attached,
+    get_db,
+    require_pool_db,
+)
+from qrp_atlas.api.schemas.system_b import PoolSnapshotResponse
+from qrp_atlas.api.system_b_serialization import serialize_system_b_value
 from qrp_atlas.contracts import (
     IN_POOL,
     POOL_CAPACITY,
@@ -37,15 +43,13 @@ router = APIRouter(prefix="/api/v1/system-b", tags=["System B Pools"])
 POOL_TYPES: tuple[str, ...] = (POOL_HEIGHT, POOL_CAPACITY, POOL_RECOGNITION)
 
 
-def _pool_db_available(connection) -> bool:
-    """Check whether pool_db is attached and the membership table exists."""
+def _require_pool_schema(connection) -> None:
+    """Ensure both tables needed by the snapshot query are present."""
     try:
-        connection.execute(
-            f"SELECT count(*) FROM pool_db.{SYSTEM_B_POOL_MEMBERSHIP_TABLE} LIMIT 1"
-        ).fetchone()
-        return True
-    except Exception:
-        return False
+        for table in (SYSTEM_B_POOL_MEMBERSHIP_TABLE, SYSTEM_B_POOL_RUN_TABLE):
+            connection.execute(f"SELECT 1 FROM pool_db.{table} LIMIT 0")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="POOL_DB_SCHEMA_NOT_DEPLOYED") from exc
 
 
 def _fetch_dicts(cursor) -> list[dict[str, Any]]:
@@ -55,10 +59,7 @@ def _fetch_dicts(cursor) -> list[dict[str, Any]]:
     for row in cursor.fetchall():
         record: dict[str, Any] = {}
         for key, value in zip(columns, row, strict=True):
-            if hasattr(value, "isoformat"):
-                record[key] = value.isoformat()
-            else:
-                record[key] = value
+            record[key] = serialize_system_b_value(value)
         rows.append(record)
     return rows
 
@@ -103,69 +104,88 @@ def _build_snapshot(connection, trade_date: date) -> dict[str, Any]:
     return {"trade_date": trade_date.isoformat(), "pools": pools}
 
 
-@router.get("/pools/snapshot")
+def _require_completed_pool_snapshot(connection, trade_date: date) -> None:
+    """Require one completed run for each of the three pool types."""
+    try:
+        row = connection.execute(
+            f"""
+            SELECT count(DISTINCT pool_type)
+            FROM pool_db.{SYSTEM_B_POOL_RUN_TABLE}
+            WHERE trade_date = ?
+              AND status = 'COMPLETED'
+              AND pool_type IN (?, ?, ?)
+            """,
+            [trade_date, *POOL_TYPES],
+        ).fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="POOL_RUN_TABLE_NOT_AVAILABLE") from exc
+    if not row or row[0] != len(POOL_TYPES):
+        raise HTTPException(status_code=404, detail="POOL_SNAPSHOT_NOT_READY")
+
+
+def _latest_completed_pool_date(connection) -> date | None:
+    """Return the latest date with all three completed pool runs."""
+    try:
+        row = connection.execute(
+            f"""
+            SELECT trade_date
+            FROM pool_db.{SYSTEM_B_POOL_RUN_TABLE}
+            WHERE status = 'COMPLETED'
+              AND pool_type IN (?, ?, ?)
+            GROUP BY trade_date
+            HAVING count(DISTINCT pool_type) = ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """,
+            [*POOL_TYPES, len(POOL_TYPES)],
+        ).fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="POOL_RUN_TABLE_NOT_AVAILABLE") from exc
+    if not row:
+        return None
+    latest_date = row[0]
+    if isinstance(latest_date, datetime):
+        return latest_date.date()
+    if isinstance(latest_date, date):
+        return latest_date
+    return date.fromisoformat(str(latest_date))
+
+
+@router.get("/pools/snapshot", response_model=PoolSnapshotResponse)
 def pool_snapshot(
     trade_date: date,
 ) -> dict[str, Any]:
     """Return the three-pool snapshot for the given trade date (P0-6)."""
     connection = get_db()
+    attached_alias: str | None = None
     try:
-        if not _pool_db_available(connection):
-            raise HTTPException(
-                status_code=503,
-                detail="POOL_DB_NOT_AVAILABLE: pool_db is not attached. "
-                "Configure QRP_POOL_DB_PATH on the server.",
-            )
+        attached_alias = require_pool_db(connection)
+        _require_pool_schema(connection)
+        _require_completed_pool_snapshot(connection, trade_date)
         return _build_snapshot(connection, trade_date)
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(connection, attached_alias)
         connection.close()
 
 
-@router.get("/pools/snapshot/latest")
+@router.get("/pools/snapshot/latest", response_model=PoolSnapshotResponse)
 def latest_pool_snapshot() -> dict[str, Any]:
     """Return the snapshot for the latest date where all three pools completed."""
     connection = get_db()
+    attached_alias: str | None = None
     try:
-        if not _pool_db_available(connection):
-            raise HTTPException(
-                status_code=503,
-                detail="POOL_DB_NOT_AVAILABLE: pool_db is not attached. "
-                "Configure QRP_POOL_DB_PATH on the server.",
-            )
-
-        # Find the latest trade_date where all three pool types have
-        # COMPLETED status in pool_db.system_b_pool_run.
-        try:
-            row = connection.execute(
-                f"""
-                SELECT trade_date
-                FROM pool_db.{SYSTEM_B_POOL_RUN_TABLE}
-                WHERE status = 'COMPLETED'
-                  AND pool_type IN ('{POOL_HEIGHT}', '{POOL_CAPACITY}', '{POOL_RECOGNITION}')
-                GROUP BY trade_date
-                HAVING count(DISTINCT pool_type) = 3
-                ORDER BY trade_date DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=f"POOL_RUN_TABLE_NOT_AVAILABLE: {exc}",
-            ) from exc
-
-        if not row:
+        attached_alias = require_pool_db(connection)
+        _require_pool_schema(connection)
+        latest_date = _latest_completed_pool_date(connection)
+        if latest_date is None:
             raise HTTPException(
                 status_code=404,
                 detail="NO_COMPLETED_POOL_RUN: no trade date has all three "
                 "pools completed.",
             )
-
-        latest_date = row[0]
-        # DuckDB returns datetime.date for DATE columns; normalise just in case.
-        if not isinstance(latest_date, date):
-            latest_date = date.fromisoformat(str(latest_date))
-
         return _build_snapshot(connection, latest_date)
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(connection, attached_alias)
         connection.close()

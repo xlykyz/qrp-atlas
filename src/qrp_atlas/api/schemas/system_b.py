@@ -8,14 +8,16 @@ Key data conventions (see system-design-v0.1 §8):
   - ``episode_return`` / ``peak_return`` are decimals (0.186 = +18.6%).
   - ``drawdown_from_peak`` is a negative decimal or zero (-0.032 = -3.2%).
   - Date fields are ISO 8601 strings ("2026-07-27").
-  - Datetime fields are ISO 8601 strings ("2026-07-27T18:30:22").
+  - Datetime fields are ISO 8601 strings with an explicit UTC offset
+    ("2026-07-27T18:30:22Z").
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from datetime import date
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 
 # ── P0-1 / P0-2 / P0-7: Summary & production run ───────────────────────────
@@ -24,7 +26,7 @@ from pydantic import BaseModel, Field
 class SystemBSummaryDto(BaseModel):
     """Aggregated state counts and transition counts for one trade date."""
 
-    trade_date: str
+    trade_date: date
     base_count: int = 0
     candidate_count: int = 0
     active_count: int = 0
@@ -34,7 +36,10 @@ class SystemBSummaryDto(BaseModel):
     candidate_to_active_count: int = 0
     active_to_base_count: int = 0
     active_held_count: int = 0
-    calculation_completed_at: Optional[str] = None
+    explicit_non_trading_count: int = 0
+    unresolved_missing_count: int = 0
+    diagnostic_count: int = 0
+    calculation_completed_at: AwareDatetime | None = None
     production_run_id: Optional[str] = None
 
 
@@ -42,10 +47,23 @@ class ProductionRunDto(BaseModel):
     """Latest System B production run metadata (P0-7 data freshness)."""
 
     production_run_id: str
+    run_type: str
     status: str
-    calculation_version: Optional[str] = None
-    asset_count: Optional[int] = None
-    completed_at: Optional[str] = None
+    target_start_date: date | None = None
+    target_end_date: date | None = None
+    rule_version_set_id: str
+    parameter_set_id: str
+    input_snapshot_id: str | None = None
+    calculation_version: str
+    asset_count: int
+    input_row_count: int
+    output_row_count: int
+    error_count: int
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    error_code: str | None = None
+    error_detail: str | None = None
+    created_at: AwareDatetime
+    completed_at: AwareDatetime | None = None
 
 
 # ── P0-3 / P0-4 / P0-5: Active episodes (灵魂清单) ─────────────────────────
@@ -61,7 +79,7 @@ class ActiveEpisodeDto(BaseModel):
 
     asset_id: str
     name: Optional[str] = None
-    trade_date: str
+    trade_date: date
     close: float
     episode_id: str
     episode_no: int
@@ -71,8 +89,8 @@ class ActiveEpisodeDto(BaseModel):
     peak_return: float
     drawdown_from_peak: float
     ma5_reentry_count: int
-    episode_start_date: Optional[str] = None
-    episode_confirmed_date: Optional[str] = None
+    episode_start_date: date | None = None
+    episode_confirmed_date: date | None = None
     trend_state: str
     previous_trend_state: Optional[str] = None
 
@@ -87,8 +105,8 @@ class PoolMemberDto(BaseModel):
     pool_type: str
     membership_state: str
     pool_cycle_no: int
-    entry_date: Optional[str] = None
-    exit_date: Optional[str] = None
+    entry_date: date | None = None
+    exit_date: date | None = None
     episode_id: Optional[str] = None
 
 
@@ -103,5 +121,5 @@ class PoolTypeSnapshot(BaseModel):
 class PoolSnapshotResponse(BaseModel):
     """Three-pool snapshot response for ``/pools/snapshot`` endpoints."""
 
-    trade_date: str
+    trade_date: date
     pools: list[PoolTypeSnapshot] = Field(default_factory=list)
