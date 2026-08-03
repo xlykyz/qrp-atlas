@@ -225,6 +225,11 @@ class PathSettings:
     remote_access_runtime_dir: Path
     web_dir: Path
     backtest_fixture_runs_dir: Path
+    # Optional cross-database paths for episode/pool data (ATTACH'd read-only).
+    # Actual paths must be configured on the Linux server via environment
+    # variables QRP_EPISODE_DB_PATH / QRP_POOL_DB_PATH.
+    episode_db_path: Path | None
+    pool_db_path: Path | None
 
     def persistent_directories(self) -> tuple[Path, ...]:
         return (
@@ -428,6 +433,24 @@ class AppSettings:
         )
         research_pdfs_dir = data_dir / "pdfs"
         remote_access_runtime_dir = home / ".runtime" / "remote_access"
+
+        # ── Episode / Pool database paths (optional, for cross-db ATTACH) ──
+        # These are separate DuckDB files produced by the episode and pool
+        # pipelines.  On the Linux server, configure via environment variables.
+        # If not set or file missing, the API gracefully degrades (endpoints
+        # return 503 with a clear message).
+        episode_db_path_raw = reader.optional("QRP_EPISODE_DB_PATH")
+        episode_db_path: Path | None = (
+            _resolve_path("QRP_EPISODE_DB_PATH", episode_db_path_raw, base=root)
+            if episode_db_path_raw
+            else None
+        )
+        pool_db_path_raw = reader.optional("QRP_POOL_DB_PATH")
+        pool_db_path: Path | None = (
+            _resolve_path("QRP_POOL_DB_PATH", pool_db_path_raw, base=root)
+            if pool_db_path_raw
+            else None
+        )
         remote_access_token_file = _resolve_path(
             "QRP_REMOTE_ACCESS_TOKEN_FILE",
             reader.get(
@@ -555,6 +578,8 @@ class AppSettings:
             remote_access_runtime_dir=remote_access_runtime_dir,
             web_dir=root / "web",
             backtest_fixture_runs_dir=root / "tests" / "fixtures" / "backtest_runs",
+            episode_db_path=episode_db_path,
+            pool_db_path=pool_db_path,
         )
         return cls(
             project_root=root,
@@ -616,6 +641,8 @@ class AppSettings:
                 ),
                 "log_dir": str(self.paths.log_dir),
                 "tmp_dir": str(self.paths.tmp_dir),
+                "episode_db_path": str(self.paths.episode_db_path) if self.paths.episode_db_path else None,
+                "pool_db_path": str(self.paths.pool_db_path) if self.paths.pool_db_path else None,
             },
             "database": {
                 "backend": "duckdb",
@@ -785,6 +812,8 @@ SUPPORTED_ENV_VARS = frozenset(
         "QRP_REMOTE_ACCESS_TOKEN_FILE",
         "QRP_REMOTE_ACCESS_DB_PATH",
         "QRP_REMOTE_ACCESS_PORT",
+        "QRP_EPISODE_DB_PATH",
+        "QRP_POOL_DB_PATH",
     }
 )
 

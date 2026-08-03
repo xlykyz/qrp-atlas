@@ -21,6 +21,7 @@ from qrp_atlas.api.routes import (
     research,
     stock,
     system_b,
+    system_b_pools,
     tables,
     trades,
     zt_pool,
@@ -74,6 +75,7 @@ app.include_router(backtest_tasks.router)
 app.include_router(catalog.router)
 app.include_router(declarative_strategies.router)
 app.include_router(system_b.router)
+app.include_router(system_b_pools.router)
 
 
 # ── 系统端点 ──────────────────────────────────

@@ -8,10 +8,23 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from qrp_atlas.api.db import get_db
+from qrp_atlas.api.db import (
+    detach_database_if_attached,
+    get_db,
+    require_episode_db,
+)
+from qrp_atlas.api.schemas.system_b import (
+    ActiveEpisodeDto,
+    ProductionRunDto,
+    SystemBSummaryDto,
+)
+from qrp_atlas.api.system_b_serialization import serialize_system_b_value
 from qrp_atlas.contracts import (
     SYSTEM_B_2_0_PARAMETER_SET_ID,
     SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+    SYSTEM_B_EPISODE_OBSERVATION_TABLE,
+    SYSTEM_B_EPISODE_RULE_VERSION,
+    SYSTEM_B_EPISODE_TABLE,
     SYSTEM_B_LATEST_STATE_VIEW,
     SYSTEM_B_PRODUCTION_RUN_TABLE,
     SYSTEM_B_STATE_OBSERVATION_TABLE,
@@ -25,11 +38,10 @@ router = APIRouter(prefix="/api/v1/system-b", tags=["System B"])
 def _normalize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         for key, value in tuple(row.items()):
-            if hasattr(value, "isoformat"):
-                row[key] = value.isoformat()
-            elif key in {"source_rule_ids", "diagnostics", "metrics"} and isinstance(value, str):
+            row[key] = serialize_system_b_value(value)
+            if key in {"source_rule_ids", "diagnostics", "metrics"} and isinstance(row[key], str):
                 try:
-                    row[key] = json.loads(value)
+                    row[key] = json.loads(row[key])
                 except json.JSONDecodeError:
                     pass
     return rows
@@ -171,7 +183,7 @@ def transitions(
         connection.close()
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=SystemBSummaryDto)
 def summary(
     trade_date: date,
     rule_version_set_id: str = Query(SYSTEM_B_2_0_RULE_VERSION_SET_ID),
@@ -212,12 +224,15 @@ def summary(
             [trade_date, rule_version_set_id, parameter_set_id],
         )
         rows = _fetch_dicts(cursor)
-        return rows[0] if rows else {}
+        if not rows or not rows[0].get("production_run_id"):
+            raise HTTPException(status_code=404, detail="SYSTEM_B_SUMMARY_NOT_READY")
+        rows[0]["trade_date"] = trade_date.isoformat()
+        return rows[0]
     finally:
         connection.close()
 
 
-@router.get("/production-runs/latest")
+@router.get("/production-runs/latest", response_model=ProductionRunDto | None)
 def latest_production_run():
     connection = get_db()
     try:
@@ -229,4 +244,77 @@ def latest_production_run():
         rows = _fetch_dicts(cursor)
         return rows[0] if rows else None
     finally:
+        connection.close()
+
+
+# ── P0-3 / P0-4 / P0-5: Active episodes (灵魂清单) ──────────────────────────
+
+
+def _require_episode_schema(connection) -> None:
+    """Ensure both tables needed by the active-episode query are present."""
+    try:
+        for table in (SYSTEM_B_EPISODE_OBSERVATION_TABLE, SYSTEM_B_EPISODE_TABLE):
+            connection.execute(f"SELECT 1 FROM episode_db.{table} LIMIT 0")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="EPISODE_DB_SCHEMA_NOT_DEPLOYED") from exc
+
+
+@router.get("/active-episodes", response_model=list[ActiveEpisodeDto])
+def active_episodes(
+    trade_date: date,
+    rule_version: str = Query(SYSTEM_B_EPISODE_RULE_VERSION),
+    limit: int = Query(10000, ge=1, le=20000),
+    offset: int = Query(0, ge=0),
+):
+    """Return ACTIVE stocks with episode metrics for the given trade date.
+
+    Joins ``episode_db.system_b_episode_observation`` (episode_return,
+    drawdown, days_since_start, etc.) with ``episode_db.system_b_episode``
+    (episode_no, start/confirmed dates) and the main database's
+    ``stock_info`` (stock display name).
+
+    Requires ``QRP_EPISODE_DB_PATH`` to be configured on the server so that
+    ``episode_db`` can be attached for this request.
+    """
+    connection = get_db()
+    attached_alias: str | None = None
+    try:
+        attached_alias = require_episode_db(connection)
+        _require_episode_schema(connection)
+        cursor = connection.execute(
+            f"""
+            SELECT
+                eo.asset_id,
+                si.name AS name,
+                eo.trade_date,
+                eo.close,
+                eo.episode_id,
+                e.episode_no,
+                eo.days_since_start,
+                eo.days_since_confirmed,
+                eo.episode_return,
+                eo.peak_return,
+                eo.drawdown_from_peak,
+                eo.ma5_reentry_count,
+                e.episode_start_date,
+                e.episode_confirmed_date,
+                eo.trend_state,
+                eo.previous_trend_state
+            FROM episode_db.{SYSTEM_B_EPISODE_OBSERVATION_TABLE} AS eo
+            JOIN episode_db.{SYSTEM_B_EPISODE_TABLE} AS e
+              ON e.episode_id = eo.episode_id
+            LEFT JOIN stock_info AS si
+              ON si.ticker = eo.asset_id
+            WHERE eo.trend_state = 'ACTIVE'
+              AND eo.trade_date = ?
+              AND eo.rule_version = ?
+            ORDER BY eo.episode_return DESC
+            LIMIT ? OFFSET ?
+            """,
+            [trade_date, rule_version, limit, offset],
+        )
+        return _fetch_dicts(cursor)
+    finally:
+        if attached_alias is not None:
+            detach_database_if_attached(connection, attached_alias)
         connection.close()
