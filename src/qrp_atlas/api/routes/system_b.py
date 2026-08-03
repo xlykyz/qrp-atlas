@@ -12,6 +12,9 @@ from qrp_atlas.api.db import get_db
 from qrp_atlas.contracts import (
     SYSTEM_B_2_0_PARAMETER_SET_ID,
     SYSTEM_B_2_0_RULE_VERSION_SET_ID,
+    SYSTEM_B_EPISODE_OBSERVATION_TABLE,
+    SYSTEM_B_EPISODE_RULE_VERSION,
+    SYSTEM_B_EPISODE_TABLE,
     SYSTEM_B_LATEST_STATE_VIEW,
     SYSTEM_B_PRODUCTION_RUN_TABLE,
     SYSTEM_B_STATE_OBSERVATION_TABLE,
@@ -228,5 +231,81 @@ def latest_production_run():
         )
         rows = _fetch_dicts(cursor)
         return rows[0] if rows else None
+    finally:
+        connection.close()
+
+
+# ── P0-3 / P0-4 / P0-5: Active episodes (灵魂清单) ──────────────────────────
+
+
+def _episode_db_available(connection) -> bool:
+    """Check whether episode_db is attached and the observation table exists."""
+    try:
+        connection.execute(
+            f"SELECT count(*) FROM episode_db.{SYSTEM_B_EPISODE_OBSERVATION_TABLE} LIMIT 1"
+        ).fetchone()
+        return True
+    except Exception:
+        return False
+
+
+@router.get("/active-episodes")
+def active_episodes(
+    trade_date: date,
+    rule_version: str = Query(SYSTEM_B_EPISODE_RULE_VERSION),
+    limit: int = Query(10000, ge=1, le=20000),
+    offset: int = Query(0, ge=0),
+):
+    """Return ACTIVE stocks with episode metrics for the given trade date.
+
+    Joins ``episode_db.system_b_episode_observation`` (episode_return,
+    drawdown, days_since_start, etc.) with ``episode_db.system_b_episode``
+    (episode_no, start/confirmed dates) and the main database's
+    ``stock_info`` (stock display name).
+
+    Requires ``QRP_EPISODE_DB_PATH`` to be configured on the server so that
+    ``episode_db`` is ATTACH'd by ``get_db()``.
+    """
+    connection = get_db()
+    try:
+        if not _episode_db_available(connection):
+            raise HTTPException(
+                status_code=503,
+                detail="EPISODE_DB_NOT_AVAILABLE: episode_db is not attached. "
+                "Configure QRP_EPISODE_DB_PATH on the server.",
+            )
+        cursor = connection.execute(
+            f"""
+            SELECT
+                eo.asset_id,
+                si.name AS name,
+                eo.trade_date,
+                eo.close,
+                eo.episode_id,
+                e.episode_no,
+                eo.days_since_start,
+                eo.days_since_confirmed,
+                eo.episode_return,
+                eo.peak_return,
+                eo.drawdown_from_peak,
+                eo.ma5_reentry_count,
+                e.episode_start_date,
+                e.episode_confirmed_date,
+                eo.trend_state,
+                eo.previous_trend_state
+            FROM episode_db.{SYSTEM_B_EPISODE_OBSERVATION_TABLE} AS eo
+            JOIN episode_db.{SYSTEM_B_EPISODE_TABLE} AS e
+              ON e.episode_id = eo.episode_id
+            LEFT JOIN stock_info AS si
+              ON si.ticker = eo.asset_id
+            WHERE eo.trend_state = 'ACTIVE'
+              AND eo.trade_date = ?
+              AND eo.rule_version = ?
+            ORDER BY eo.episode_return DESC
+            LIMIT ? OFFSET ?
+            """,
+            [trade_date, rule_version, limit, offset],
+        )
+        return _fetch_dicts(cursor)
     finally:
         connection.close()
