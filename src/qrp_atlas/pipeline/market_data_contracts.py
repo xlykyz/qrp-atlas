@@ -230,6 +230,43 @@ MARKET_TARGET_DATE_POLICY = TargetDatePolicy(
 )
 
 
+def _resolve_suspend_d_target_date(invocation) -> TargetWindow:
+    """Resolve suspend_d to the scheduled trading date without close-date fallback."""
+
+    invocation.execution_control.check()
+    target = invocation.scheduled_for.astimezone(CHINA_TZ).date()
+    try:
+        connection = duckdb.connect(str(invocation.settings.paths.duckdb_path), read_only=True)
+        try:
+            calendar_row = connection.execute(
+                "SELECT is_open FROM trading_calendar WHERE trade_date = ?",
+                [target],
+            ).fetchone()
+        finally:
+            connection.close()
+        invocation.execution_control.check()
+    except Exception as exc:
+        raise ContractError("TRADING_CALENDAR_UNAVAILABLE", type(exc).__name__) from exc
+    if calendar_row is None:
+        raise ContractError("TRADING_CALENDAR_STALE", target.isoformat())
+    if calendar_row[0] is not True:
+        raise ContractError("SUSPEND_D_NON_TRADING_DAY", target.isoformat())
+    return TargetWindow.for_date(target)
+
+
+SUSPEND_D_TARGET_DATE_POLICY = TargetDatePolicy(
+    policy_id="suspend_d_scheduled_trading_date_v1",
+    description=(
+        "Uses the scheduled Asia/Shanghai calendar date directly. The target must be an open trading date; "
+        "this Contract does not fall back to the previous trading date."
+    ),
+    trading_calendar_id="quant_db.trading_calendar",
+    non_trading_day_policy=NonTradingDayPolicy.REJECT,
+    resolver=_resolve_suspend_d_target_date,
+    validate_explicit_date=_valid_explicit_market_date,
+)
+
+
 def _tushare_configuration(context: PipelineRunContext) -> CheckResult:
     if not context.settings.external_services.tushare_token:
         return CheckResult.failure(
@@ -1284,7 +1321,10 @@ def execute_suspend_d_ingest(context: PipelineRunContext) -> BusinessExecution:
     )
 
 
-def _calendar_input() -> InputContract:
+def _calendar_input(
+    *,
+    non_trading_day_policy: NonTradingDayPolicy = NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
+) -> InputContract:
     return InputContract(
         input_id="trading_calendar",
         kind=InputKind.TABLE,
@@ -1297,7 +1337,7 @@ def _calendar_input() -> InputContract:
             check_id="trading_calendar_target_freshness",
             target_date_semantics="target open date is present with zero trading-day lag",
             maximum_lag_trading_days=0,
-            non_trading_day_policy=NonTradingDayPolicy.PREVIOUS_TRADING_DAY,
+            non_trading_day_policy=non_trading_day_policy,
             error_code="TRADING_CALENDAR_STALE",
             checker=_calendar_freshness,
         ),
@@ -1692,13 +1732,13 @@ SUSPEND_D_INGEST = register_pipeline(
         pipeline_id="suspend_d_ingest",
         name="A-share daily suspension events",
         description="Fetches and atomically replaces one target-date suspend_d snapshot; an empty provider snapshot is valid.",
-        contract_version="1.1.0",
+        contract_version="1.2.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_suspend_d_ingest,
-        target_date_policy=MARKET_TARGET_DATE_POLICY,
+        target_date_policy=SUSPEND_D_TARGET_DATE_POLICY,
         parameters=(),
         inputs=(
-            _calendar_input(),
+            _calendar_input(non_trading_day_policy=NonTradingDayPolicy.REJECT),
             _external_input(
                 "tushare_suspend_d",
                 "tushare.pro.suspend_d(start_date=YYYYMMDD, end_date=YYYYMMDD)",

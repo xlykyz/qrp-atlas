@@ -16,7 +16,7 @@ from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import init_database
 from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.contract_validation import validate_contracts
-from qrp_atlas.pipeline.contracts import CheckResult, CompletionContract, PipelineInvocation, ResultStatus
+from qrp_atlas.pipeline.contracts import CheckResult, CompletionContract, ContractError, PipelineInvocation, ResultStatus
 from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.market_data_contracts import (
     ADJ_FACTOR_DAILY,
@@ -26,6 +26,7 @@ from qrp_atlas.pipeline.market_data_contracts import (
     MARKET_DATA_CONTRACTS,
     MARKET_TARGET_DATE_POLICY,
     SUSPEND_D_INGEST,
+    SUSPEND_D_TARGET_DATE_POLICY,
     ZT_DT_POOL_DAILY,
 )
 from qrp_atlas.pipeline.cninfo_contracts import CNINFO_CONTRACTS
@@ -288,6 +289,26 @@ def test_target_policy_uses_calendar_close_time_weekends_and_explicit_dates(tmp_
     assert MARKET_TARGET_DATE_POLICY.resolver(weekend).target_date == date(2026, 7, 30)
     assert MARKET_TARGET_DATE_POLICY.validate_explicit_date(TARGET, after_close)
     assert not MARKET_TARGET_DATE_POLICY.validate_explicit_date(date(2026, 8, 1), after_close)
+
+
+def test_suspend_d_target_policy_uses_scheduled_open_date_without_previous_day_fallback(tmp_path: Path) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    scheduled = PipelineInvocation(
+        run_id="suspend-d-target-date",
+        pipeline_id=SUSPEND_D_INGEST.pipeline_id,
+        scheduled_for=datetime(2026, 7, 29, 0, 15, tzinfo=UTC),
+        attempt=1,
+        settings=item,
+    )
+    weekend = replace(scheduled, scheduled_for=datetime(2026, 8, 1, 1, 15, tzinfo=UTC))
+
+    assert SUSPEND_D_INGEST.target_date_policy is SUSPEND_D_TARGET_DATE_POLICY
+    assert SUSPEND_D_TARGET_DATE_POLICY.resolver(scheduled).target_date == TARGET
+    assert SUSPEND_D_TARGET_DATE_POLICY.validate_explicit_date(TARGET, scheduled)
+    with pytest.raises(ContractError) as error:
+        SUSPEND_D_TARGET_DATE_POLICY.resolver(weekend)
+    assert error.value.code == "SUSPEND_D_NON_TRADING_DAY"
 
 
 def test_market_daily_real_executor_writes_completion_and_metrics(tmp_path: Path, monkeypatch) -> None:
