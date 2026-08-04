@@ -224,6 +224,7 @@ Boolean、整数、浮点数、URL、UUID、enum 和路径均严格解析，非�
 ```bash
 qrp-atlas-config show
 qrp-atlas-config doctor
+qrp-atlas-config database-audit
 qrp-atlas-config init
 
 python -m qrp_atlas.config show
@@ -240,7 +241,19 @@ qrp-atlas-config --set QRP_DATA_DIR=runtime-data show
 
 - `show` 输出最终解析值、运行模式、数据库模式、外部服务配置状态和每项来源；秘密已脱敏。`--compact` 输出单行 JSON。
 - `doctor` 不创建文件，检查目录可读写/可创建性、只读约束、DuckDB 状态、认证配置、Tushare 凭证、平台路径和生产 CORS/本地认证警告。阻塞失败返回 1，配置解析失败返回 2。支持 `--json`。
+- `database-audit` 只读检查主库、IRM、System B episode/pool 数据库和 Job Runtime SQLite 的有效路径、可读性及契约表；同时列出疑似旧库/备份文件，但不会删除。阻塞失败返回 1，支持 `--json`。
 - `init` 幂等创建必要目录，保留已有目录和数据库，不创建数据库、不写秘密。只读模式下缺失目录是失败。支持 `--json`。
+
+主库 schema 迁移必须使用显式的仓库脚本；默认是 dry-run，只有带 `--apply` 才会写入：
+
+```bash
+python scripts/migrate_canonical_schema.py \
+  --env-file /etc/qrp-atlas/qrp-atlas.env
+python scripts/migrate_canonical_schema.py \
+  --env-file /etc/qrp-atlas/qrp-atlas.env --apply
+```
+
+迁移只补建缺失的 contract 表，执行前创建并验证不覆盖的 DuckDB 回滚备份，完成后再次验证表清单；不会搬迁、合并或删除现有数据库。
 
 API 通过统一入口启动：
 
@@ -330,7 +343,7 @@ QRP_AUTH_SESSION_TTL_SECONDS=86400
 - setup 不迁移已有数据，不下载行情，不执行 pipeline，不部署 PostgreSQL schema，不管理用户。
 - setup 不提供网页设置页、远程配置中心或远程秘密管理。
 - Windows 上配置文件保护依赖用户账户和 ACL；setup 只在 POSIX 上执行 `0600`。
-- 本改动不提供数据迁移工具、动态配置中心、Vault/Consul、Docker 或 Kubernetes 编排。
+- 本改动不提供动态配置中心、Vault/Consul、Docker 或 Kubernetes 编排；主库缺表迁移仅由显式 schema migration 脚本完成。
 - 配置在进程内通过 `get_settings()` 缓存；修改环境后应重启进程。测试可调用 `reset_settings_cache()`。
 - doctor 验证 PostgreSQL DSN 的格式和存在性，不主动连接远程 PostgreSQL，避免诊断命令产生外部副作用。
 - doctor 不调用第三方数据服务；Tushare token 缺失只表示相关 pipeline 不可用。

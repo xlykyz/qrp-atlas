@@ -28,10 +28,11 @@ from .store import JobRuntimeStore
 class JobRuntimePaths:
     runtime_dir: Path
     result_logs_dir_override: Path | None = None
+    database_path_override: Path | None = None
 
     @property
     def database_path(self) -> Path:
-        return self.runtime_dir / "job_runtime.sqlite3"
+        return self.database_path_override or self.runtime_dir / "job_runtime.sqlite3"
 
     @property
     def logs_dir(self) -> Path:
@@ -51,6 +52,7 @@ class JobRuntimePaths:
     def from_settings(cls, settings) -> "JobRuntimePaths":
         return cls(
             runtime_dir=settings.paths.job_runtime_dir,
+            database_path_override=settings.paths.job_runtime_db_path,
             result_logs_dir_override=settings.paths.log_dir / "job",
         )
 

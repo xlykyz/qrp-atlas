@@ -28,7 +28,7 @@ from typing import Dict
 from .fields import (
     TICKER, TS_CODE, SYMBOL, TRADE_DATE, NAME,
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
+    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE, ADJ_FACTOR,
     INFO_CODE, TITLE, STOCK_CODE, STOCK_NAME, PUBLISH_DATE,
     MARKET, EXCHANGE, AREA, INDUSTRY, FULLNAME, ENNAME, CNSPELL,
     CURR_TYPE, LIST_STATUS, IS_HS, ACT_NAME, ACT_ENT_TYPE,
@@ -149,6 +149,26 @@ TUSHARE_INDEX_DAILY: Dict[str, str] = {
     "pct_chg": PCT_CHANGE,
     "vol": VOLUME,
     "amount": AMOUNT,
+}
+
+TUSHARE_FUND_DAILY: Dict[str, str] = {
+    "ts_code": TICKER,
+    "trade_date": TRADE_DATE,
+    "open": OPEN,
+    "high": HIGH,
+    "low": LOW,
+    "close": CLOSE,
+    "pre_close": PRE_CLOSE,
+    "change": CHANGE,
+    "pct_chg": PCT_CHANGE,
+    "vol": VOLUME,
+    "amount": AMOUNT,
+}
+
+TUSHARE_FUND_ADJ: Dict[str, str] = {
+    "ts_code": TICKER,
+    "trade_date": TRADE_DATE,
+    "adj_factor": ADJ_FACTOR,
 }
 
 TUSHARE_INDEX_BASIC: Dict[str, str] = {
@@ -389,6 +409,8 @@ SOURCE_MAPPINGS = {
     "sina_realtime": SINA_REALTIME,
     "tushare_daily": TUSHARE_DAILY,
     "tushare_index_daily": TUSHARE_INDEX_DAILY,
+    "tushare_fund_daily": TUSHARE_FUND_DAILY,
+    "tushare_fund_adj": TUSHARE_FUND_ADJ,
     "tushare_index_basic": TUSHARE_INDEX_BASIC,
     "tushare_stock_basic": TUSHARE_STOCK_BASIC,
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,

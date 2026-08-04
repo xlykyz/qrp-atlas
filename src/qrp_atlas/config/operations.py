@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import os
 import platform
+import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
 from qrp_atlas.config.settings import AppSettings, AuthMode, RuntimeEnvironment
+from qrp_atlas.contracts import (
+    ALL_TABLES,
+    IRM_INTERACTION_QA,
+    SYSTEM_B_EPISODE_OBSERVATION_TABLE,
+    SYSTEM_B_EPISODE_TABLE,
+    SYSTEM_B_POOL_MEMBERSHIP_TABLE,
+    SYSTEM_B_POOL_RUN_TABLE,
+)
 
 
 class CheckLevel(StrEnum):
@@ -38,6 +47,34 @@ class InitResult:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class DatabaseAuditResult:
+    """Read-only schema and path evidence for one configured database."""
+
+    level: CheckLevel
+    database_id: str
+    backend: str
+    path: Path | None
+    source: str
+    expected_tables: tuple[str, ...]
+    actual_tables: tuple[str, ...]
+    missing_tables: tuple[str, ...]
+    message: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "level": self.level.value,
+            "database_id": self.database_id,
+            "backend": self.backend,
+            "path": str(self.path) if self.path is not None else None,
+            "source": self.source,
+            "expected_tables": list(self.expected_tables),
+            "actual_tables": list(self.actual_tables),
+            "missing_tables": list(self.missing_tables),
+            "message": self.message,
+        }
+
+
 def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
     seen: set[Path] = set()
     result: list[Path] = []
@@ -46,6 +83,278 @@ def _unique_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
             seen.add(path)
             result.append(path)
     return tuple(result)
+
+
+_MAIN_DATABASE_TABLES = tuple(
+    table.name for table in ALL_TABLES if table is not IRM_INTERACTION_QA
+)
+_IRM_DATABASE_TABLES = (IRM_INTERACTION_QA.name,)
+_EPISODE_DATABASE_TABLES = (
+    SYSTEM_B_EPISODE_TABLE,
+    SYSTEM_B_EPISODE_OBSERVATION_TABLE,
+)
+_POOL_DATABASE_TABLES = (
+    SYSTEM_B_POOL_MEMBERSHIP_TABLE,
+    SYSTEM_B_POOL_RUN_TABLE,
+)
+_JOB_RUNTIME_TABLES = (
+    "job_run",
+    "stage_run",
+    "resource_lock",
+    "resource_read_lease",
+    "scheduler_cursor",
+    "job_result",
+    "job_service_lease",
+)
+
+
+def _audit_duckdb(
+    database_id: str,
+    path: Path | None,
+    *,
+    source: str,
+    expected_tables: tuple[str, ...],
+    required: bool,
+) -> DatabaseAuditResult:
+    if path is None:
+        return DatabaseAuditResult(
+            CheckLevel.WARNING,
+            database_id,
+            "duckdb",
+            None,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            "database path is not configured",
+        )
+    if not path.exists():
+        level = CheckLevel.FAILURE if required else CheckLevel.WARNING
+        return DatabaseAuditResult(
+            level,
+            database_id,
+            "duckdb",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            "database file does not exist",
+        )
+    if not path.is_file():
+        return DatabaseAuditResult(
+            CheckLevel.FAILURE,
+            database_id,
+            "duckdb",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            "database path is not a regular file",
+        )
+
+    try:
+        import duckdb
+
+        connection = duckdb.connect(str(path), read_only=True)
+        try:
+            actual_tables = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'main' ORDER BY table_name"
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+    except Exception as exc:
+        return DatabaseAuditResult(
+            CheckLevel.FAILURE,
+            database_id,
+            "duckdb",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            f"database could not be opened read-only: {type(exc).__name__}",
+        )
+
+    missing_tables = tuple(table for table in expected_tables if table not in actual_tables)
+    level = CheckLevel.FAILURE if missing_tables else CheckLevel.OK
+    message = (
+        f"readable; missing tables: {', '.join(missing_tables)}"
+        if missing_tables
+        else f"readable; {len(actual_tables)} tables present"
+    )
+    return DatabaseAuditResult(
+        level,
+        database_id,
+        "duckdb",
+        path,
+        source,
+        expected_tables,
+        actual_tables,
+        missing_tables,
+        message,
+    )
+
+
+def _audit_sqlite(
+    database_id: str,
+    path: Path,
+    *,
+    source: str,
+    expected_tables: tuple[str, ...],
+) -> DatabaseAuditResult:
+    if not path.exists():
+        return DatabaseAuditResult(
+            CheckLevel.WARNING,
+            database_id,
+            "sqlite",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            "runtime database file does not exist yet",
+        )
+    if not path.is_file():
+        return DatabaseAuditResult(
+            CheckLevel.FAILURE,
+            database_id,
+            "sqlite",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            "runtime database path is not a regular file",
+        )
+
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            actual_tables = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' ORDER BY name"
+                ).fetchall()
+            )
+        finally:
+            connection.close()
+    except Exception as exc:
+        return DatabaseAuditResult(
+            CheckLevel.FAILURE,
+            database_id,
+            "sqlite",
+            path,
+            source,
+            expected_tables,
+            (),
+            expected_tables,
+            f"runtime database could not be opened read-only: {type(exc).__name__}",
+        )
+
+    missing_tables = tuple(table for table in expected_tables if table not in actual_tables)
+    level = CheckLevel.FAILURE if missing_tables else CheckLevel.OK
+    message = (
+        f"readable; missing tables: {', '.join(missing_tables)}"
+        if missing_tables
+        else f"readable; {len(actual_tables)} tables present"
+    )
+    return DatabaseAuditResult(
+        level,
+        database_id,
+        "sqlite",
+        path,
+        source,
+        expected_tables,
+        actual_tables,
+        missing_tables,
+        message,
+    )
+
+
+def audit_databases(settings: AppSettings) -> list[DatabaseAuditResult]:
+    """Audit configured database paths and required contract tables read-only."""
+
+    sources = settings.sources
+    return [
+        _audit_duckdb(
+            "canonical",
+            settings.paths.duckdb_path,
+            source=sources.get("QRP_DUCKDB_PATH", "default"),
+            expected_tables=_MAIN_DATABASE_TABLES,
+            required=True,
+        ),
+        _audit_duckdb(
+            "irm_qa",
+            settings.paths.irm_qa_duckdb_path,
+            source=sources.get("QRP_IRM_QA_DUCKDB_PATH", "default"),
+            expected_tables=_IRM_DATABASE_TABLES,
+            required=False,
+        ),
+        _audit_duckdb(
+            "system_b_episode",
+            settings.paths.episode_db_path,
+            source=sources.get("QRP_EPISODE_DB_PATH", "default"),
+            expected_tables=_EPISODE_DATABASE_TABLES,
+            required=settings.paths.episode_db_path is not None,
+        ),
+        _audit_duckdb(
+            "system_b_pools",
+            settings.paths.pool_db_path,
+            source=sources.get("QRP_POOL_DB_PATH", "default"),
+            expected_tables=_POOL_DATABASE_TABLES,
+            required=settings.paths.pool_db_path is not None,
+        ),
+        _audit_sqlite(
+            "job_runtime",
+            settings.paths.job_runtime_db_path,
+            source=sources.get("QRP_JOB_RUNTIME_DB_PATH", "default"),
+            expected_tables=_JOB_RUNTIME_TABLES,
+        ),
+    ]
+
+
+def database_cleanup_candidates(settings: AppSettings) -> tuple[Path, ...]:
+    """List stale database-looking files without deleting or changing them."""
+
+    active_paths = {
+        path.resolve(strict=False)
+        for path in (
+            settings.paths.duckdb_path,
+            settings.paths.irm_qa_duckdb_path,
+            settings.paths.episode_db_path,
+            settings.paths.pool_db_path,
+            settings.paths.job_runtime_db_path,
+        )
+        if path is not None
+    }
+    candidates: set[Path] = set()
+    stale_paths = (
+        settings.paths.data_dir / "quant.db",
+        settings.paths.canonical_dir / "quant.db",
+    )
+    for path in stale_paths:
+        if path.is_file() and path.resolve(strict=False) not in active_paths:
+            candidates.add(path)
+
+    db_dir = settings.paths.db_dir
+    if db_dir.is_dir():
+        for path in db_dir.iterdir():
+            if not path.is_file() or path.resolve(strict=False) in active_paths:
+                continue
+            lower_name = path.name.lower()
+            if (
+                "backup" in lower_name
+                or lower_name.endswith((".bak", ".old", ".orig", "~"))
+            ) and "schema_migration_backup_" not in lower_name:
+                candidates.add(path)
+    return tuple(sorted(candidates))
 
 
 def initialize_runtime(settings: AppSettings) -> list[InitResult]:

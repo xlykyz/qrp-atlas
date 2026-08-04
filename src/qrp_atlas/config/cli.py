@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from qrp_atlas.config.operations import (
     CheckLevel,
     InitStatus,
+    audit_databases,
+    database_cleanup_candidates,
     doctor,
     has_failures,
     initialize_runtime,
@@ -66,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", help="run non-destructive deployment diagnostics"
     )
     doctor_parser.add_argument("--json", action="store_true", help="emit JSON")
+    audit_parser = subparsers.add_parser(
+        "database-audit", help="audit configured database paths and schemas read-only"
+    )
+    audit_parser.add_argument("--json", action="store_true", help="emit JSON")
     init_parser = subparsers.add_parser(
         "init", help="create configured directories without creating databases"
     )
@@ -194,6 +200,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             for item in results:
                 print(f"[{labels[item.level]}] {item.name}: {item.message}")
+        return 1 if has_failures(results) else 0
+
+    if args.command == "database-audit":
+        results = audit_databases(settings)
+        candidates = database_cleanup_candidates(settings)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "databases": [item.as_dict() for item in results],
+                        "cleanup_candidates": [str(path) for path in candidates],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            labels = {
+                CheckLevel.OK: "OK",
+                CheckLevel.WARNING: "WARN",
+                CheckLevel.FAILURE: "FAIL",
+            }
+            for item in results:
+                path = str(item.path) if item.path is not None else "<not configured>"
+                print(f"[{labels[item.level]}] {item.database_id}: {path}; {item.message}")
+            if candidates:
+                print("[INFO] cleanup candidates (not deleted):")
+                for path in candidates:
+                    print(f"  {path}")
+            else:
+                print("[INFO] cleanup candidates (not deleted): none")
         return 1 if has_failures(results) else 0
 
     results = initialize_runtime(settings)

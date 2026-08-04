@@ -49,6 +49,7 @@ timeout、cancel、skip、stale recovery 或 Runner 异常没有业务载荷时�
 ```dotenv
 QRP_DATA_DIR=/srv/qrp-atlas/data
 QRP_JOB_RUNTIME_DIR=/srv/qrp-atlas/runtime/job
+QRP_JOB_RUNTIME_DB_PATH=/srv/qrp-atlas/runtime/job/job_runtime.sqlite3
 QRP_LOG_DIR=/srv/qrp-atlas/logs
 ```
 
@@ -61,7 +62,10 @@ $QRP_LOG_DIR/job/job-results-YYYY-MM-DD.jsonl
 运行状态库位于：
 
 ```text
-$QRP_JOB_RUNTIME_DIR/job_runtime.sqlite3
+$QRP_JOB_RUNTIME_DB_PATH
+
+未设置 `QRP_JOB_RUNTIME_DB_PATH` 时，默认值为
+`$QRP_JOB_RUNTIME_DIR/job_runtime.sqlite3`。
 ```
 
 命令支持受控覆盖，主要用于临时验收环境：

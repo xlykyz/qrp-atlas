@@ -35,6 +35,9 @@ def test_default_configuration_preserves_repository_layout(tmp_path):
     assert settings.paths.data_dir == (root / "data").resolve()
     assert settings.paths.duckdb_path == (root / "data" / "db" / "quant.db").resolve()
     assert settings.paths.irm_qa_duckdb_path == (root / "data" / "db" / "irm_qa.duckdb").resolve()
+    assert settings.paths.job_runtime_db_path == (
+        root / "data" / "runtime" / "job" / "job_runtime.sqlite3"
+    ).resolve()
     assert settings.paths.backtest_runs_dir == (root / "data" / "backtest_runs").resolve()
     assert settings.database.read_only is False
     assert settings.authentication.mode.value == "local"
@@ -59,8 +62,22 @@ def test_environment_overrides_and_relative_paths_resolve_from_project_root(tmp_
     assert settings.paths.data_dir == (root / "storage").resolve()
     assert settings.paths.duckdb_path == (root / "database" / "custom.duckdb").resolve()
     assert settings.paths.irm_qa_duckdb_path == (root / "database" / "irm_qa_custom.duckdb").resolve()
+    assert settings.paths.job_runtime_db_path == (
+        root / "storage" / "runtime" / "job" / "job_runtime.sqlite3"
+    ).resolve()
     assert settings.api.port == 9100
     assert settings.runtime.read_only is True
+
+
+def test_job_runtime_database_path_can_be_configured_independently(tmp_path):
+    settings = AppSettings.load(
+        environ={
+            "QRP_JOB_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "QRP_JOB_RUNTIME_DB_PATH": str(tmp_path / "state" / "jobs.sqlite3"),
+        },
+        project_root=tmp_path,
+    )
+    assert settings.paths.job_runtime_db_path == (tmp_path / "state" / "jobs.sqlite3").resolve()
 
 
 def test_precedence_explicit_over_environment_over_dotenv_over_default(tmp_path):
