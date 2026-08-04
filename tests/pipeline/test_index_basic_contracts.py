@@ -143,3 +143,28 @@ def test_index_basic_rejects_conflicting_duplicate_without_writing(tmp_path: Pat
         assert connection.execute("SELECT COUNT(*) FROM index_basic").fetchone()[0] == 0
     finally:
         connection.close()
+
+
+def test_index_basic_accepts_provider_specific_code_forms(tmp_path: Path, monkeypatch) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    client = FakeIndexBasic()
+    client.frames["SSE"] = index_basic_frame("000680CNY020.SH", "SSE", "特殊指数")
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.index_basic_contracts.get_tushare_pro",
+        lambda **_kwargs: client,
+    )
+
+    result = ContractTestHarness(INDEX_BASIC_UPDATE, item).run(
+        trade_date=TARGET,
+        parameter_overrides={"markets": "SSE"},
+    )
+
+    assert result.status is ResultStatus.SUCCESS
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT index_code FROM index_basic").fetchone() == (
+            "000680CNY020.SH",
+        )
+    finally:
+        connection.close()

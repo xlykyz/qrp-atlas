@@ -60,7 +60,9 @@ QUANT_DB_RESOURCE = "quant_db"
 QUANT_DB_WRITER = "quant_db_writer"
 INDEX_BASIC_MARKETS: tuple[str, ...] = ("SSE", "SZSE", "CSI", "CICC", "MSCI", "SW", "OTH")
 INDEX_BASIC_DEFAULT_MARKETS = ",".join(INDEX_BASIC_MARKETS)
-INDEX_BASIC_CODE_PATTERN = re.compile(r"^\d{6}\.[A-Z]{2,4}$")
+# Tushare also exposes currency, strategy, and other provider-specific index
+# codes whose code body contains letters or is longer than six characters.
+INDEX_BASIC_CODE_PATTERN = re.compile(r"^[A-Z0-9]{1,32}\.[A-Z]{2,4}$")
 INDEX_BASIC_REQUIRED_FIELDS = (
     "ts_code",
     "name",
