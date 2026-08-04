@@ -8,9 +8,10 @@ business identity and Contract registration remain in each endpoint module.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -34,10 +35,10 @@ from .contracts import (
     TargetWindow,
 )
 
-
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 QUANT_DB_RESOURCE = "quant_db"
 QUANT_DB_WRITER = "quant_db_writer"
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_scope_date(value: object, field_name: str) -> date | None:
@@ -54,7 +55,7 @@ def parse_scope_date(value: object, field_name: str) -> date | None:
         return None
     for fmt in ("%Y-%m-%d", "%Y%m%d"):
         try:
-            return datetime.strptime(text, fmt).date()
+            return datetime.strptime(text, fmt).replace(tzinfo=CHINA_TZ).date()
         except ValueError:
             continue
     raise ContractError(
@@ -103,33 +104,6 @@ def target_dates(window: TargetWindow) -> tuple[date, ...]:
         raise ContractError("INVALID_TARGET_WINDOW")
     count = (window.end_date - window.start_date).days + 1
     return tuple(window.start_date + timedelta(days=offset) for offset in range(count))
-
-
-def optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text.upper() if text else None
-
-
-def parse_nums(value: object) -> tuple[int, ...]:
-    """Parse the provider's comma-separated consecutive-board filter."""
-
-    text = "" if value is None else str(value).strip()
-    if not text:
-        return ()
-    result: list[int] = []
-    for item in text.split(","):
-        token = item.strip()
-        try:
-            number = int(token)
-        except (TypeError, ValueError) as exc:
-            raise ContractError("INVALID_PARAMETER", "nums") from exc
-        if number <= 0 or str(number) != token:
-            raise ContractError("INVALID_PARAMETER", "nums")
-        if number not in result:
-            result.append(number)
-    return tuple(result)
 
 
 def provider_configuration(context: PipelineRunContext) -> CheckResult:
@@ -182,13 +156,16 @@ def validate_provider_frame(
     *,
     required_fields: tuple[str, ...],
     target_window: TargetWindow,
-    requested_code: str | None,
+    requested_date: date,
     endpoint: str,
 ) -> pd.DataFrame:
-    """Validate provider shape, date scope, and an optional code filter."""
+    """Validate one complete provider response for one requested date."""
 
     if frame is None:
-        return pd.DataFrame(columns=list(required_fields))
+        raise ContractError(
+            "PROVIDER_RESPONSE_INVALID",
+            f"{endpoint} returned None instead of a DataFrame",
+        )
     if not isinstance(frame, pd.DataFrame):
         raise ContractError(
             "PROVIDER_RESPONSE_INVALID",
@@ -209,25 +186,20 @@ def validate_provider_frame(
             raise ContractError("PROVIDER_DATE_INVALID", endpoint) from exc
     out["trade_date"] = parsed_dates
 
-    if target_window.target_date is not None:
-        allowed = {target_window.target_date}
-    else:
-        if target_window.start_date is None or target_window.end_date is None:
-            raise ContractError("INVALID_TARGET_WINDOW")
-        allowed = None
     for row_number, row_date in enumerate(parsed_dates):
-        if allowed is not None:
-            in_scope = row_date in allowed
-        else:
-            in_scope = target_window.start_date <= row_date <= target_window.end_date
-        if not in_scope:
-            raise ContractError("PROVIDER_SCOPE_MISMATCH", f"row {row_number} trade_date")
+        if row_date != requested_date:
+            raise ContractError(
+                "PROVIDER_SCOPE_MISMATCH",
+                f"row {row_number} trade_date is not {requested_date.isoformat()}",
+            )
+    if target_window.target_date is not None and requested_date != target_window.target_date:
+        raise ContractError("INVALID_TARGET_WINDOW", "requested date is outside target date")
+    if target_window.start_date is not None and not (
+        target_window.start_date <= requested_date <= target_window.end_date
+    ):
+        raise ContractError("INVALID_TARGET_WINDOW", "requested date is outside target range")
 
     out["ts_code"] = out["ts_code"].astype("string").str.strip().str.upper()
-    if requested_code is not None:
-        response_codes = out["ts_code"].dropna().unique().tolist()
-        if any(code != requested_code for code in response_codes):
-            raise ContractError("PROVIDER_SCOPE_MISMATCH", "ts_code")
     return out.reset_index(drop=True)
 
 
@@ -237,9 +209,7 @@ def fetch_by_calendar_date(
     client: object,
     endpoint: str,
     required_fields: tuple[str, ...],
-    requested_code: str | None,
-    extra_parameters: Mapping[str, str] | None = None,
-) -> tuple[pd.DataFrame, int, int]:
+ ) -> tuple[pd.DataFrame, int, int, tuple[date, ...]]:
     """Fetch a date-bounded endpoint once per calendar date."""
 
     method = getattr(client, endpoint, None)
@@ -247,17 +217,14 @@ def fetch_by_calendar_date(
         raise ContractError("PROVIDER_API_UNAVAILABLE", f"client missing {endpoint}")
 
     frames: list[pd.DataFrame] = []
+    empty_dates: list[date] = []
     rows_read = 0
     requests = 0
-    params = dict(extra_parameters or {})
     for requested_date in target_dates(context.target_window):
         context.execution_control.check()
         kwargs: dict[str, str] = {
             "trade_date": requested_date.strftime("%Y%m%d"),
         }
-        if requested_code is not None:
-            kwargs["ts_code"] = requested_code
-        kwargs.update(params)
         try:
             raw = method(**kwargs)
         except ExecutionControlError:
@@ -269,16 +236,18 @@ def fetch_by_calendar_date(
             raw,
             required_fields=required_fields,
             target_window=context.target_window,
-            requested_code=requested_code,
+            requested_date=requested_date,
             endpoint=endpoint,
         )
         rows_read += len(checked)
         requests += 1
-        if not checked.empty:
+        if checked.empty:
+            empty_dates.append(requested_date)
+        else:
             frames.append(checked)
     if not frames:
-        return pd.DataFrame(columns=list(required_fields)), rows_read, requests
-    return pd.concat(frames, ignore_index=True, sort=False), rows_read, requests
+        return pd.DataFrame(columns=list(required_fields)), rows_read, requests, tuple(empty_dates)
+    return pd.concat(frames, ignore_index=True, sort=False), rows_read, requests, tuple(empty_dates)
 
 
 def _normalise_text_column(
@@ -372,17 +341,17 @@ def replace_target_window(
     *,
     table_name: str,
     prepared: pd.DataFrame,
+    empty_dates: Iterable[date],
+    empty_response_error_code: str,
 ) -> tuple[int, float]:
-    """Replace all rows in the resolved date target in one DuckDB transaction."""
+    """Replace complete non-empty dates after protecting empty-date snapshots."""
 
     table = get_table(table_name)
-    if context.target_window.target_date is not None:
-        start_date = end_date = context.target_window.target_date
-    elif context.target_window.start_date is not None and context.target_window.end_date is not None:
-        start_date = context.target_window.start_date
-        end_date = context.target_window.end_date
-    else:
-        raise ContractError("INVALID_TARGET_WINDOW")
+    requested_dates = target_dates(context.target_window)
+    requested_date_set = set(requested_dates)
+    empty_date_set = set(empty_dates)
+    if not empty_date_set <= requested_date_set:
+        raise ContractError("INVALID_EMPTY_DATE_SCOPE", table_name)
 
     started = time.monotonic()
     connection: duckdb.DuckDBPyConnection | None = None
@@ -392,14 +361,33 @@ def replace_target_window(
         context.execution_control.check()
         connection = duckdb.connect(str(context.settings.paths.duckdb_path))
         connection.execute(table.duckdb_create_sql())
+        for empty_date in requested_dates:
+            if empty_date not in empty_date_set:
+                continue
+            context.execution_control.check()
+            existing = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table.name} WHERE trade_date = ?",
+                    [empty_date],
+                ).fetchone()[0]
+            )
+            if existing:
+                raise ContractError(
+                    empty_response_error_code,
+                    f"{table.name} returned an empty response for {empty_date.isoformat()} "
+                    f"but {existing} existing rows would be removed",
+                )
         context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         transaction_open = True
-        connection.execute(
-            f"DELETE FROM {table.name} WHERE trade_date BETWEEN ? AND ?",
-            [start_date, end_date],
-        )
-        context.execution_control.check()
+        for requested_date in requested_dates:
+            if requested_date in empty_date_set:
+                continue
+            connection.execute(
+                f"DELETE FROM {table.name} WHERE trade_date = ?",
+                [requested_date],
+            )
+            context.execution_control.check()
         if not prepared.empty:
             columns = [column for column in table.column_names() if column != CREATED_AT]
             connection.register("_tushare_snapshot_rows", prepared)
@@ -418,16 +406,16 @@ def replace_target_window(
         if connection is not None and transaction_open:
             try:
                 connection.execute("ROLLBACK")
-            except Exception:
-                pass
+            except duckdb.Error as rollback_error:
+                LOGGER.debug("failed to roll back snapshot replacement", exc_info=rollback_error)
         raise
     finally:
         if connection is not None:
             if registered:
                 try:
                     connection.unregister("_tushare_snapshot_rows")
-                except Exception:
-                    pass
+                except duckdb.Error as unregister_error:
+                    LOGGER.debug("failed to unregister snapshot rows", exc_info=unregister_error)
             connection.close()
 
 
@@ -457,7 +445,7 @@ def range_completion(table_name: str, error_code: str):
                 )
             finally:
                 connection.close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - convert any read failure to a CheckResult
             return CheckResult.failure(
                 f"{table_name}_completion",
                 error_code,
@@ -503,7 +491,7 @@ def range_unique_key_quality(table_name: str, primary_key: tuple[str, ...], erro
                 )
             finally:
                 connection.close()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - convert any read failure to a CheckResult
             return CheckResult.failure(
                 f"{table_name}_unique_key_quality",
                 error_code,

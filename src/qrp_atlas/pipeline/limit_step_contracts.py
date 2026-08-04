@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import time
-from datetime import date
-
-import pandas as pd
 
 from qrp_atlas.config.tushare_client import get_tushare_pro
 from qrp_atlas.contracts import (
@@ -47,18 +44,15 @@ from .tushare_snapshot_support import (
     QUANT_DB_RESOURCE,
     QUANT_DB_WRITER,
     fetch_by_calendar_date,
-    optional_text,
-    parse_nums,
     prepare_canonical_frame,
     provider_configuration,
     provider_freshness,
-    replace_target_window,
-    resolve_date_or_range_target,
     range_completion,
     range_unique_key_quality,
+    replace_target_window,
+    resolve_date_or_range_target,
     validate_single_date_override,
 )
-
 
 LIMIT_STEP_REQUIRED_FIELDS = ("ts_code", "name", "trade_date", "nums")
 LIMIT_STEP_TARGET_DATE_POLICY = TargetDatePolicy(
@@ -78,22 +72,6 @@ def _freshness(context: PipelineRunContext):
     return provider_freshness(context, "tushare_limit_step")
 
 
-def _scope(context: PipelineRunContext) -> tuple[str | None, tuple[int, ...]]:
-    context.execution_control.check()
-    values = context.parameter_overrides
-    return optional_text(values.get("ts_code")), parse_nums(values.get("nums"))
-
-
-def _validate_nums_filter(raw: pd.DataFrame, requested_nums: tuple[int, ...]) -> None:
-    if not requested_nums or raw.empty:
-        return
-    values = pd.to_numeric(raw["nums"], errors="coerce")
-    if values.isna().any() or (values % 1 != 0).any():
-        raise ContractError("LIMIT_STEP_API_PARTIAL", "nums contains a non-integer value")
-    if not values.astype(int).isin(requested_nums).all():
-        raise ContractError("LIMIT_STEP_API_PARTIAL", "provider returned a nums value outside the requested filter")
-
-
 def _translate_provider_error(exc: ContractError) -> ContractError:
     if exc.code in {
         "PROVIDER_RESPONSE_INVALID",
@@ -109,21 +87,17 @@ def _translate_provider_error(exc: ContractError) -> ContractError:
 
 def execute_limit_step_ingest(context: PipelineRunContext) -> BusinessExecution:
     started = time.monotonic()
-    requested_code, nums = _scope(context)
     try:
         client = get_tushare_pro(
             settings=context.settings,
             execution_control=context.execution_control,
         )
-        raw, rows_read, api_requests = fetch_by_calendar_date(
+        raw, rows_read, api_requests, empty_dates = fetch_by_calendar_date(
             context,
             client=client,
             endpoint="limit_step",
             required_fields=LIMIT_STEP_REQUIRED_FIELDS,
-            requested_code=requested_code,
-            extra_parameters={"nums": ",".join(str(item) for item in nums)} if nums else None,
         )
-        _validate_nums_filter(raw, nums)
     except ExecutionControlError:
         raise
     except ContractError as exc:
@@ -152,6 +126,8 @@ def execute_limit_step_ingest(context: PipelineRunContext) -> BusinessExecution:
             context,
             table_name=LIMIT_STEP.name,
             prepared=prepared,
+            empty_dates=empty_dates,
+            empty_response_error_code="LIMIT_STEP_API_PARTIAL",
         )
     except ExecutionControlError:
         raise
@@ -185,9 +161,8 @@ def execute_limit_step_ingest(context: PipelineRunContext) -> BusinessExecution:
                 location="settings.paths.duckdb_path",
                 completed=True,
                 detail={
-                    "requested_ts_code": requested_code,
-                    "requested_nums": list(nums),
                     "scope": context.target_window.as_dict(),
+                    "complete_date_snapshot": True,
                     "request_granularity": "one trade_date request per calendar date",
                 },
             ),
@@ -210,12 +185,6 @@ LIMIT_STEP_INGEST = register_pipeline(
         target_date_policy=LIMIT_STEP_TARGET_DATE_POLICY,
         parameters=(
             ParameterContract(
-                "ts_code",
-                ParameterType.STRING,
-                "Optional Tushare stock code filter, for example 000833.SZ.",
-                default="",
-            ),
-            ParameterContract(
                 "start_date",
                 ParameterType.STRING,
                 "Optional inclusive provider range start, in YYYY-MM-DD or YYYYMMDD form.",
@@ -227,18 +196,12 @@ LIMIT_STEP_INGEST = register_pipeline(
                 "Optional inclusive provider range end, in YYYY-MM-DD or YYYYMMDD form.",
                 default="",
             ),
-            ParameterContract(
-                "nums",
-                ParameterType.STRING,
-                "Optional comma-separated consecutive-board counts, for example 2,3.",
-                default="",
-            ),
         ),
         inputs=(
             InputContract(
                 input_id="tushare_limit_step",
                 kind=InputKind.EXTERNAL_API,
-                source="tushare.pro.limit_step(trade_date=YYYYMMDD, ts_code=..., nums=...)",
+                source="tushare.pro.limit_step(trade_date=YYYYMMDD)",
                 required_fields=LIMIT_STEP_REQUIRED_FIELDS,
                 target_date_semantics=(
                     "provider rows must fall inside the resolved target date or inclusive date range"
@@ -284,16 +247,19 @@ LIMIT_STEP_INGEST = register_pipeline(
         idempotency=IdempotencyContract(
             idempotency_key="limit_step.(trade_date, ticker, consecutive_boards)",
             repeat_run_semantics=(
-                "repeating the same date scope replaces only that scope and produces no duplicate keys"
+                "repeating the same complete date scope replaces that complete scope and produces no duplicate keys"
             ),
-            existing_target_handling="delete and insert the complete validated target range in one transaction",
+            existing_target_handling="delete and insert only dates with complete non-empty responses in one transaction; empty dates with existing rows fail before deletion",
             failure_recovery="provider and normalization failures happen before the write; a failed transaction rolls back the target range",
             uses_staging=False,
-            atomic_replace_boundary="one quant.db transaction replaces every target-date row",
+            atomic_replace_boundary=(
+                "preflight checks every requested date; one quant.db transaction replaces "
+                "non-empty complete dates and leaves valid empty dates untouched"
+            ),
         ),
         transaction=TransactionContract(
             mode=TransactionMode.DATABASE_TRANSACTION,
-            boundary="validated limit_step rows for the complete resolved date scope",
+            boundary="validated complete limit_step date snapshots for the resolved date scope",
             failure_visibility="failed target replacement is rolled back and prior target rows remain visible",
         ),
         execution=ExecutionPolicy(overlap_policy=OverlapPolicy.FORBID, max_retries=1),

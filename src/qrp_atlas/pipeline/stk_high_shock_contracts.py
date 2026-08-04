@@ -46,7 +46,6 @@ from .tushare_snapshot_support import (
     QUANT_DB_RESOURCE,
     QUANT_DB_WRITER,
     fetch_by_calendar_date,
-    optional_text,
     prepare_canonical_frame,
     provider_configuration,
     provider_freshness,
@@ -56,7 +55,6 @@ from .tushare_snapshot_support import (
     resolve_date_or_range_target,
     validate_single_date_override,
 )
-
 
 STK_HIGH_SHOCK_REQUIRED_FIELDS = (
     "ts_code",
@@ -83,11 +81,6 @@ def _freshness(context: PipelineRunContext):
     return provider_freshness(context, "tushare_stk_high_shock")
 
 
-def _scope(context: PipelineRunContext) -> str | None:
-    context.execution_control.check()
-    return optional_text(context.parameter_overrides.get("ts_code"))
-
-
 def _translate_provider_error(exc: ContractError) -> ContractError:
     if exc.code in {
         "PROVIDER_RESPONSE_INVALID",
@@ -103,18 +96,16 @@ def _translate_provider_error(exc: ContractError) -> ContractError:
 
 def execute_stk_high_shock_ingest(context: PipelineRunContext) -> BusinessExecution:
     started = time.monotonic()
-    requested_code = _scope(context)
     try:
         client = get_tushare_pro(
             settings=context.settings,
             execution_control=context.execution_control,
         )
-        raw, rows_read, api_requests = fetch_by_calendar_date(
+        raw, rows_read, api_requests, empty_dates = fetch_by_calendar_date(
             context,
             client=client,
             endpoint="stk_high_shock",
             required_fields=STK_HIGH_SHOCK_REQUIRED_FIELDS,
-            requested_code=requested_code,
         )
     except ExecutionControlError:
         raise
@@ -143,6 +134,8 @@ def execute_stk_high_shock_ingest(context: PipelineRunContext) -> BusinessExecut
             context,
             table_name=STK_HIGH_SHOCK.name,
             prepared=prepared,
+            empty_dates=empty_dates,
+            empty_response_error_code="STK_HIGH_SHOCK_API_PARTIAL",
         )
     except ExecutionControlError:
         raise
@@ -176,8 +169,8 @@ def execute_stk_high_shock_ingest(context: PipelineRunContext) -> BusinessExecut
                 location="settings.paths.duckdb_path",
                 completed=True,
                 detail={
-                    "requested_ts_code": requested_code,
                     "scope": context.target_window.as_dict(),
+                    "complete_date_snapshot": True,
                     "request_granularity": "one trade_date request per calendar date",
                     "primary_key_semantics": "(trade_date, ticker, reason, period)",
                 },
@@ -200,12 +193,6 @@ STK_HIGH_SHOCK_INGEST = register_pipeline(
         target_date_policy=STK_HIGH_SHOCK_TARGET_DATE_POLICY,
         parameters=(
             ParameterContract(
-                "ts_code",
-                ParameterType.STRING,
-                "Optional Tushare stock code filter, for example 002015.SZ.",
-                default="",
-            ),
-            ParameterContract(
                 "start_date",
                 ParameterType.STRING,
                 "Optional inclusive provider range start, in YYYY-MM-DD or YYYYMMDD form.",
@@ -222,7 +209,7 @@ STK_HIGH_SHOCK_INGEST = register_pipeline(
             InputContract(
                 input_id="tushare_stk_high_shock",
                 kind=InputKind.EXTERNAL_API,
-                source="tushare.pro.stk_high_shock(ts_code=..., trade_date=YYYYMMDD)",
+                source="tushare.pro.stk_high_shock(trade_date=YYYYMMDD)",
                 required_fields=STK_HIGH_SHOCK_REQUIRED_FIELDS,
                 target_date_semantics=(
                     "provider rows must fall inside the resolved target date or inclusive date range"
@@ -271,16 +258,19 @@ STK_HIGH_SHOCK_INGEST = register_pipeline(
         idempotency=IdempotencyContract(
             idempotency_key="stk_high_shock.(trade_date, ticker, reason, period)",
             repeat_run_semantics=(
-                "repeating the same date scope replaces only that scope and produces no duplicate events"
+                "repeating the same complete date scope replaces that complete scope and produces no duplicate events"
             ),
-            existing_target_handling="delete and insert the complete validated target range in one transaction",
+            existing_target_handling="delete and insert only dates with complete non-empty responses in one transaction; empty dates with existing rows fail before deletion",
             failure_recovery="provider and normalization failures happen before the write; a failed transaction rolls back the target range",
             uses_staging=False,
-            atomic_replace_boundary="one quant.db transaction replaces every target-date row",
+            atomic_replace_boundary=(
+                "preflight checks every requested date; one quant.db transaction replaces "
+                "non-empty complete dates and leaves valid empty dates untouched"
+            ),
         ),
         transaction=TransactionContract(
             mode=TransactionMode.DATABASE_TRANSACTION,
-            boundary="validated stk_high_shock rows for the complete resolved date scope",
+            boundary="validated complete stk_high_shock date snapshots for the resolved date scope",
             failure_visibility="failed target replacement is rolled back and prior target rows remain visible",
         ),
         execution=ExecutionPolicy(overlap_policy=OverlapPolicy.FORBID, max_retries=1),
