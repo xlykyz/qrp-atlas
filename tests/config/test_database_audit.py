@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import duckdb
+import pytest
 
 from qrp_atlas.config.operations import (
     CheckLevel,
@@ -32,6 +33,24 @@ def load_migration_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def database_snapshot(path: Path) -> dict[str, tuple[tuple[object, ...], int]]:
+    connection = duckdb.connect(str(path), read_only=True)
+    try:
+        result: dict[str, tuple[tuple[object, ...], int]] = {}
+        for row in connection.execute("SHOW TABLES").fetchall():
+            table_name = str(row[0])
+            description = tuple(connection.execute(f'DESCRIBE "{table_name}"').fetchall())
+            count = int(connection.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0])
+            result[table_name] = (description, count)
+        return result
+    finally:
+        connection.close()
+
+
+def migration_backups(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f"{path.stem}.schema_migration_backup_*"))
 
 
 def test_database_audit_reports_configured_paths_and_cleanup_candidates(tmp_path):
@@ -107,3 +126,98 @@ def test_schema_migration_dry_run_and_apply_are_fail_closed(tmp_path):
     second = module.migrate(settings, apply=True, backup_path=tmp_path / "unused.db")
     assert second["status"] == "NOOP"
     assert second["backup"] is None
+
+
+def test_schema_migration_default_backup_captures_uncheckpointed_data_and_structure(
+    tmp_path: Path,
+) -> None:
+    module = load_migration_module()
+    target = tmp_path / "quant.db"
+    writer = duckdb.connect(str(target))
+    try:
+        writer.execute("PRAGMA disable_checkpoint_on_shutdown")
+        writer.execute("CREATE TABLE uncheckpointed_source (value INTEGER, label VARCHAR)")
+        writer.execute("INSERT INTO uncheckpointed_source VALUES (99, 'wal-data')")
+    finally:
+        writer.close()
+    assert Path(f"{target}.wal").is_file()
+    before = database_snapshot(target)
+
+    settings = load_settings(tmp_path, QRP_DUCKDB_PATH=str(target))
+    result = module.migrate(settings, apply=True)
+
+    backup = Path(str(result["backup"]))
+    assert result["status"] == "MIGRATED"
+    assert backup.is_file()
+    assert database_snapshot(backup) == before
+    connection = duckdb.connect(str(backup), read_only=True)
+    try:
+        assert connection.execute(
+            "SELECT value, label FROM uncheckpointed_source"
+        ).fetchall() == [(99, "wal-data")]
+    finally:
+        connection.close()
+
+
+def test_schema_migration_backup_validation_failure_does_not_migrate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_migration_module()
+    target = tmp_path / "quant.db"
+    connection = duckdb.connect(str(target))
+    connection.execute("CREATE TABLE marker (value INTEGER)")
+    connection.execute("INSERT INTO marker VALUES (1)")
+    connection.close()
+
+    def fail_validation(*_args, **_kwargs) -> None:
+        raise module.MigrationError("simulated backup mismatch")
+
+    monkeypatch.setattr(module, "validate_backup", fail_validation)
+    settings = load_settings(tmp_path, QRP_DUCKDB_PATH=str(target))
+    with pytest.raises(module.MigrationError, match="simulated backup mismatch"):
+        module.migrate(settings, apply=True)
+
+    assert migration_backups(target) == []
+    assert set(database_snapshot(target)) == {"marker"}
+
+
+def test_schema_migration_transaction_failure_rolls_back_and_keeps_verified_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_migration_module()
+    target = tmp_path / "quant.db"
+    connection = duckdb.connect(str(target))
+    connection.execute("CREATE TABLE marker (value INTEGER)")
+    connection.close()
+
+    def fail_init(connection) -> None:
+        connection.execute("CREATE TABLE partial_new (value INTEGER)")
+        raise RuntimeError("simulated schema transaction failure")
+
+    monkeypatch.setattr(module, "init_database", fail_init)
+    settings = load_settings(tmp_path, QRP_DUCKDB_PATH=str(target))
+    with pytest.raises(RuntimeError, match="simulated schema transaction failure"):
+        module.migrate(settings, apply=True)
+
+    assert set(database_snapshot(target)) == {"marker"}
+    backups = migration_backups(target)
+    assert len(backups) == 1
+    assert set(database_snapshot(backups[0])) == {"marker"}
+
+
+def test_schema_migration_read_only_apply_is_rejected(tmp_path: Path) -> None:
+    module = load_migration_module()
+    target = tmp_path / "quant.db"
+    connection = duckdb.connect(str(target))
+    connection.execute("CREATE TABLE marker (value INTEGER)")
+    connection.close()
+    settings = load_settings(
+        tmp_path,
+        QRP_DUCKDB_PATH=str(target),
+        QRP_READ_ONLY="true",
+    )
+
+    with pytest.raises(module.MigrationError, match="QRP_READ_ONLY"):
+        module.migrate(settings, apply=True)

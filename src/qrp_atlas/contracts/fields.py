@@ -40,6 +40,7 @@ AMOUNT = "amount"
 PCT_CHANGE = "pct_change"
 PRE_CLOSE = "pre_close"
 CHANGE = "change"
+AVG_PRICE = "avg_price"
 
 TURNOVER = "turnover"
 MARKET_CAP = "market_cap"
@@ -134,11 +135,17 @@ FLOAT_SHARE = "float_share"
 FREE_SHARE = "free_share"
 TOTAL_MV = "total_mv"
 CIRC_MV = "circ_mv"
+FLOAT_MV = "float_mv"
 LIMIT_STATUS = "limit_status"
 
 # ── 停复牌字段 ──
 SUSPEND_TIMING = "suspend_timing"
 SUSPEND_TYPE = "suspend_type"
+
+# ── Tushare 异常波动字段 ──
+TRADE_MARKET = "trade_market"
+REASON = "reason"
+PERIOD = "period"
 
 # ── 涨跌停股池字段 ──
 FIRST_BLOCK_TIME = "first_block_time"

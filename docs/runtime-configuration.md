@@ -251,9 +251,12 @@ python scripts/migrate_canonical_schema.py \
   --env-file /etc/qrp-atlas/qrp-atlas.env
 python scripts/migrate_canonical_schema.py \
   --env-file /etc/qrp-atlas/qrp-atlas.env --apply
+python scripts/migrate_canonical_schema.py \
+  --env-file /etc/qrp-atlas/qrp-atlas.env --apply \
+  --backup-path /var/backups/qrp/quant.before-schema.db
 ```
 
-迁移只补建缺失的 contract 表，执行前创建并验证不覆盖的 DuckDB 回滚备份，完成后再次验证表清单；不会搬迁、合并或删除现有数据库。
+迁移只补建缺失的 contract 表，默认 dry-run，只有显式 `--apply` 才执行写入；执行时在同一 DuckDB 连接内 `FORCE CHECKPOINT`，通过 `ATTACH` + `COPY FROM DATABASE` 创建并校验表集合、列结构和行数一致的回滚备份，校验失败删除无效备份，迁移事务失败回滚并保留有效备份；不会搬迁、合并或删除现有数据库。
 
 API 通过统一入口启动：
 

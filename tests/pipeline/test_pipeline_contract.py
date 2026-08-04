@@ -799,7 +799,7 @@ def test_deployment_selection_has_only_identity_enabled_and_schedule(tmp_path: P
 def test_default_registry_contains_only_admitted_contracts_and_never_the_template(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     assert pipeline_cli(["validate-contracts"]) == 0
-    assert capsys.readouterr().out == "valid contracts: 19\n"
+    assert capsys.readouterr().out == "valid contracts: 22\n"
     assert pipeline_cli(["list-contracts"]) == 0
     contracts = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert {contract["pipeline_id"] for contract in contracts} == {
@@ -811,6 +811,9 @@ def test_default_registry_contains_only_admitted_contracts_and_never_the_templat
         "index_daily_update",
         "index_basic_update",
         "stock_basic_update",
+        "limit_step_ingest",
+        "ths_daily_ingest",
+        "stk_high_shock_ingest",
         "zt_dt_pool_daily",
         "suspend_d_ingest",
         *(contract.pipeline_id for contract in CNINFO_CONTRACTS),
@@ -827,4 +830,4 @@ def test_default_registry_contains_only_admitted_contracts_and_never_the_templat
 
 def test_cli_contract_validation_is_config_free(capsys) -> None:
     assert pipeline_cli(["validate-contracts"]) == 0
-    assert capsys.readouterr().out == "valid contracts: 19\n"
+    assert capsys.readouterr().out == "valid contracts: 22\n"
