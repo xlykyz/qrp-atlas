@@ -5,8 +5,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from qrp_atlas.api.db import get_db, get_db_path
+from qrp_atlas.api.db import (
+    detach_database_if_attached,
+    get_db,
+    get_db_path,
+    require_irm_qa_db,
+)
 from qrp_atlas.config.settings import get_settings
+from qrp_atlas.contracts import IRM_INTERACTION_QA
 from qrp_atlas.api.routes import (
     declarative_strategies,
     adj_factor,
@@ -41,6 +47,10 @@ async def lifespan(app: FastAPI):
 
 
 _SETTINGS = get_settings()
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
 
 app = FastAPI(
     title="QRP Atlas API",
@@ -99,24 +109,42 @@ def health():
 def stats():
     """数据库概况"""
     con = get_db()
+    attached_alias: str | None = None
     try:
         result = {}
         tables = con.execute("SHOW TABLES").fetchall()
         for (tname,) in tables:
+            table_ref = _quote_identifier(tname)
+            if tname == IRM_INTERACTION_QA.name:
+                if attached_alias is None:
+                    attached_alias = require_irm_qa_db(con)
+                table_ref = f"{attached_alias}.{table_ref}"
+                date_columns_sql = (
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_catalog = ? AND table_name = ? "
+                    "AND column_name LIKE '%date%'"
+                )
+                date_column_params = [attached_alias, tname]
+            else:
+                date_columns_sql = (
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = ? AND column_name LIKE '%date%'"
+                )
+                date_column_params = [tname]
             count = con.execute(
-                f'SELECT COUNT(*) FROM "{tname}"'
+                f"SELECT COUNT(*) FROM {table_ref}"
             ).fetchone()[0]
             # 每张表可能有不同的日期字段名
             date_cols = con.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = ? AND column_name LIKE '%date%'",
-                [tname],
+                date_columns_sql,
+                date_column_params,
             ).fetchall()
             date_col = date_cols[0][0] if date_cols else None
             earliest = latest = None
             if date_col:
                 row = con.execute(
-                    f"SELECT MIN({date_col}), MAX({date_col}) FROM {tname}"
+                    f"SELECT MIN({_quote_identifier(date_col)}), "
+                    f"MAX({_quote_identifier(date_col)}) FROM {table_ref}"
                 ).fetchone()
                 earliest = str(row[0]) if row and row[0] else None
                 latest = str(row[1]) if row and row[1] else None
@@ -132,4 +160,6 @@ def stats():
             "tables": result,
         }
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(con, attached_alias)
         con.close()

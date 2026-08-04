@@ -12,10 +12,11 @@ from qrp_atlas.config.settings import AppSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
-_AUXILIARY_DATABASES = frozenset({"episode_db", "pool_db"})
+_AUXILIARY_DATABASES = frozenset({"episode_db", "pool_db", "irm_qa_db"})
 _AUXILIARY_DATABASE_DETAILS = {
     "episode_db": "EPISODE_DB_NOT_AVAILABLE",
     "pool_db": "POOL_DB_NOT_AVAILABLE",
+    "irm_qa_db": "IRM_QA_DB_NOT_AVAILABLE",
 }
 
 
@@ -79,6 +80,15 @@ def require_pool_db(connection: duckdb.DuckDBPyConnection) -> str:
         connection,
         "pool_db",
         get_settings().paths.pool_db_path,
+    )
+
+
+def require_irm_qa_db(connection: duckdb.DuckDBPyConnection) -> str:
+    """Attach the configured IRM Q&A database for the current request."""
+    return attach_readonly_database(
+        connection,
+        "irm_qa_db",
+        get_settings().paths.irm_qa_duckdb_path,
     )
 
 

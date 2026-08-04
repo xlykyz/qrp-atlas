@@ -5,9 +5,19 @@ from typing import Any, Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from qrp_atlas.api.db import get_db
+from qrp_atlas.api.db import (
+    detach_database_if_attached,
+    get_db,
+    require_irm_qa_db,
+)
+from qrp_atlas.contracts import IRM_INTERACTION_QA
 
 router = APIRouter(prefix="/api", tags=["通用表浏览"])
+IRM_TABLE = IRM_INTERACTION_QA.name
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
 
 
 class TableRow(BaseModel):
@@ -30,16 +40,29 @@ def list_tables():
 def table_schema(table_name: str):
     """返回表的列名和类型"""
     con = get_db()
+    attached_alias: str | None = None
     try:
-        cols = con.execute(
-            "SELECT column_name, data_type "
-            "FROM information_schema.columns "
-            "WHERE table_name = ? "
-            "ORDER BY ordinal_position",
-            [table_name],
-        ).fetchall()
+        if table_name == IRM_TABLE:
+            attached_alias = require_irm_qa_db(con)
+            cols = con.execute(
+                f"SELECT column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_catalog = ? AND table_name = ? "
+                "ORDER BY ordinal_position",
+                [attached_alias, table_name],
+            ).fetchall()
+        else:
+            cols = con.execute(
+                "SELECT column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_name = ? "
+                "ORDER BY ordinal_position",
+                [table_name],
+            ).fetchall()
         return [{"name": c[0], "type": c[1]} for c in cols]
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(con, attached_alias)
         con.close()
 
 
@@ -55,26 +78,42 @@ def query_table(
 ):
     """查询任意表的数据"""
     con = get_db()
+    attached_alias: str | None = None
     try:
+        table_ref = _quote_identifier(table_name)
+        if table_name == IRM_TABLE:
+            attached_alias = require_irm_qa_db(con)
+            table_ref = f"{attached_alias}.{table_ref}"
+            table_exists_sql = (
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_catalog = ? AND table_name = ?"
+            )
+            schema_sql = (
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_catalog = ? AND table_name = ? "
+                "ORDER BY ordinal_position"
+            )
+            table_params = [attached_alias, table_name]
+        else:
+            table_exists_sql = (
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_name = ?"
+            )
+            schema_sql = (
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = ? ORDER BY ordinal_position"
+            )
+            table_params = [table_name]
+
         # 先检查表是否存在
-        row = con.execute(
-            "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_name = ?",
-            [table_name],
-        ).fetchone()
+        row = con.execute(table_exists_sql, table_params).fetchone()
         exists = row[0] if row else 0
         if not exists:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail=f"表 '{table_name}' 不存在")
 
         # 获取列信息
-        cols = con.execute(
-            "SELECT column_name, data_type "
-            "FROM information_schema.columns "
-            "WHERE table_name = ? "
-            "ORDER BY ordinal_position",
-            [table_name],
-        ).fetchall()
+        cols = con.execute(schema_sql, table_params).fetchall()
         col_names = [c[0] for c in cols]
 
         # 校验 order_by 白名单，防注入
@@ -85,17 +124,17 @@ def query_table(
                     status_code=400,
                     detail=f"非法 order_by: {order_by}，可选: {col_names}",
                 )
-            sort_col = f'"{order_by}"'
+            sort_col = _quote_identifier(order_by)
         else:
             sort_col = "1"  # 默认按第一列
 
         direction = "DESC" if order.lower() == "desc" else "ASC"
 
-        total_row = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()
+        total_row = con.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()
         total = total_row[0] if total_row else 0
 
         rows = con.execute(
-            f'SELECT * FROM "{table_name}" ORDER BY {sort_col} {direction} LIMIT ? OFFSET ?',
+            f"SELECT * FROM {table_ref} ORDER BY {sort_col} {direction} LIMIT ? OFFSET ?",
             [limit, offset],
         ).fetchall()
 
@@ -114,6 +153,8 @@ def query_table(
             "offset": offset,
         }
     finally:
+        if attached_alias is not None:
+            detach_database_if_attached(con, attached_alias)
         con.close()
 
 
