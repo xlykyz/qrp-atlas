@@ -28,13 +28,15 @@ from typing import Dict
 from .fields import (
     TICKER, TS_CODE, SYMBOL, TRADE_DATE, NAME,
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
-    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
+    PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE, CHANGE, AVG_PRICE,
     INFO_CODE, TITLE, STOCK_CODE, STOCK_NAME, PUBLISH_DATE,
     MARKET, EXCHANGE, AREA, INDUSTRY, FULLNAME, ENNAME, CNSPELL,
     CURR_TYPE, LIST_STATUS, IS_HS, ACT_NAME, ACT_ENT_TYPE,
     REPORT_COLUMN, REPORT_TYPE, ENCODE_URL,
     FULL_NAME, PUBLISHER, INDEX_TYPE, CATEGORY, BASE_DATE, BASE_POINT,
-    LIST_DATE, DELIST_DATE, WEIGHT_RULE, DESCRIPTION, EXP_DATE, CHANGE,
+    LIST_DATE, DELIST_DATE, WEIGHT_RULE, DESCRIPTION, EXP_DATE,
+    INDEX_CODE, CONSECUTIVE_BOARDS, TURNOVER_RATE, TOTAL_MV, FLOAT_MV,
+    TRADE_MARKET, REASON, PERIOD,
     EM_RATING_CODE, EM_RATING_VALUE, EM_RATING_NAME,
     LAST_EM_RATING_CODE, LAST_EM_RATING_VALUE, LAST_EM_RATING_NAME,
     S_RATING_CODE, S_RATING_NAME, RATING_CHANGE,
@@ -185,6 +187,39 @@ TUSHARE_STOCK_BASIC: Dict[str, str] = {
     "is_hs": IS_HS,
     "act_name": ACT_NAME,
     "act_ent_type": ACT_ENT_TYPE,
+}
+
+TUSHARE_LIMIT_STEP: Dict[str, str] = {
+    "ts_code": TICKER,
+    "name": NAME,
+    "trade_date": TRADE_DATE,
+    "nums": CONSECUTIVE_BOARDS,
+}
+
+TUSHARE_THS_DAILY: Dict[str, str] = {
+    "ts_code": INDEX_CODE,
+    "trade_date": TRADE_DATE,
+    "close": CLOSE,
+    "open": OPEN,
+    "high": HIGH,
+    "low": LOW,
+    "pre_close": PRE_CLOSE,
+    "avg_price": AVG_PRICE,
+    "change": CHANGE,
+    "pct_change": PCT_CHANGE,
+    "vol": VOLUME,
+    "turnover_rate": TURNOVER_RATE,
+    "total_mv": TOTAL_MV,
+    "float_mv": FLOAT_MV,
+}
+
+TUSHARE_STK_HIGH_SHOCK: Dict[str, str] = {
+    "ts_code": TICKER,
+    "trade_date": TRADE_DATE,
+    "name": NAME,
+    "trade_market": TRADE_MARKET,
+    "reason": REASON,
+    "period": PERIOD,
 }
 
 EASTMONEY_RESEARCH_REPORT: Dict[str, str] = {
@@ -391,6 +426,9 @@ SOURCE_MAPPINGS = {
     "tushare_index_daily": TUSHARE_INDEX_DAILY,
     "tushare_index_basic": TUSHARE_INDEX_BASIC,
     "tushare_stock_basic": TUSHARE_STOCK_BASIC,
+    "tushare_limit_step": TUSHARE_LIMIT_STEP,
+    "tushare_ths_daily": TUSHARE_THS_DAILY,
+    "tushare_stk_high_shock": TUSHARE_STK_HIGH_SHOCK,
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,
