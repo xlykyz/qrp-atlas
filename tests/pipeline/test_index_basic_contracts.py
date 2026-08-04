@@ -149,7 +149,10 @@ def test_index_basic_accepts_provider_specific_code_forms(tmp_path: Path, monkey
     item = settings(tmp_path)
     initialise_database(item)
     client = FakeIndexBasic()
-    client.frames["SSE"] = index_basic_frame("SP500-1010.SPI", "SSE", "特殊指数")
+    special = index_basic_frame("SP500-1010.SPI", "SSE", "特殊指数")
+    special["base_date"] = None
+    special["list_date"] = None
+    client.frames["SSE"] = special
     monkeypatch.setattr(
         "qrp_atlas.pipeline.index_basic_contracts.get_tushare_pro",
         lambda **_kwargs: client,
@@ -163,8 +166,12 @@ def test_index_basic_accepts_provider_specific_code_forms(tmp_path: Path, monkey
     assert result.status is ResultStatus.SUCCESS
     connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
     try:
-        assert connection.execute("SELECT index_code FROM index_basic").fetchone() == (
+        assert connection.execute(
+            "SELECT index_code, base_date, list_date FROM index_basic"
+        ).fetchone() == (
             "SP500-1010.SPI",
+            None,
+            None,
         )
     finally:
         connection.close()

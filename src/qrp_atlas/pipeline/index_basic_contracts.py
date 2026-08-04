@@ -207,8 +207,10 @@ def _normalize_provider_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
         frame[column] = values
 
     for column in ("base_date", "list_date"):
-        parsed = pd.to_datetime(frame[column], errors="coerce")
-        if parsed.isna().any():
+        raw_dates = frame[column]
+        parsed = pd.to_datetime(raw_dates, errors="coerce")
+        invalid_dates = raw_dates.notna() & parsed.isna()
+        if invalid_dates.any():
             raise ContractError("INDEX_BASIC_API_PARTIAL", f"{column} contains invalid dates")
         frame[column] = parsed.dt.date
 
