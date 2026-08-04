@@ -35,6 +35,7 @@
 
 | 常量名 | 值 | 说明 |
 |--------|-----|------|
+| CHANGE | change | 涨跌额 |
 | PCT_CHANGE | pct_change | 涨跌幅（%） |
 | PRE_CLOSE | pre_close | 昨收价 |
 | TURNOVER | turnover | 换手率（%） |
@@ -230,6 +231,43 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | trade_date | DATE | ✅ | 发生日期 |
 | adj_factor | DOUBLE | | 复权因子 |
 
+### 2.7 etf_daily — ETF 日线行情
+
+- **主键**: (trade_date, ticker)
+- **12 列**
+
+该表保存 Tushare `fund_daily` 的 ETF 收盘后日线快照。标准层的
+`volume` 统一为股，`amount` 统一为元；Tushare 原始 `vol`（手）和
+`amount`（千元）在入库时分别乘以 100 和 1000。
+
+| 列名 | 类型 | 非空 | 说明 |
+|------|------|:----:|------|
+| trade_date | DATE | ✅ | 交易日 |
+| ticker | VARCHAR | ✅ | ETF TS 代码，如 510330.SH |
+| open | DOUBLE | | 开盘价(元) |
+| high | DOUBLE | | 最高价(元) |
+| low | DOUBLE | | 最低价(元) |
+| close | DOUBLE | | 收盘价(元) |
+| pre_close | DOUBLE | | 昨收价(元) |
+| change | DOUBLE | | 涨跌额(元) |
+| pct_change | DOUBLE | | 涨跌幅(%) |
+| volume | BIGINT | | 成交量(股) |
+| amount | DOUBLE | | 成交额(元) |
+| created_at | TIMESTAMP | | 入库时间 |
+
+### 2.8 etf_adj_factor — ETF 复权因子
+
+- **主键**: (ticker, trade_date)
+- **3 列**
+
+该表保存 Tushare `fund_adj` 的 ETF 复权因子，用于计算复权行情。
+
+| 列名 | 类型 | 非空 | 说明 |
+|------|------|:----:|------|
+| ticker | VARCHAR | ✅ | ETF TS 代码 |
+| trade_date | DATE | ✅ | 交易日 |
+| adj_factor | DOUBLE | ✅ | 复权因子 |
+
 ---
 
 ## 三、数据源字段映射 (mappings.py)
@@ -264,7 +302,31 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | 涨跌幅 | pct_change |
 | 换手率 | turnover |
 
-### 3.3 akshare_realtime — AKShare 实时行情
+### 3.3 tushare_fund_daily — Tushare ETF 日线
+
+| 源字段 | 标准字段 |
+|--------|----------|
+| ts_code | ticker |
+| trade_date | trade_date |
+| open | open |
+| high | high |
+| low | low |
+| close | close |
+| pre_close | pre_close |
+| change | change |
+| pct_chg | pct_change |
+| vol | volume（手转股） |
+| amount | amount（千元转元） |
+
+### 3.4 tushare_fund_adj — Tushare ETF 复权因子
+
+| 源字段 | 标准字段 |
+|--------|----------|
+| ts_code | ticker |
+| trade_date | trade_date |
+| adj_factor | adj_factor |
+
+### 3.5 akshare_realtime — AKShare 实时行情
 
 | 源字段 | 标准字段 |
 |--------|----------|
@@ -278,7 +340,7 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | 总市值 | market_cap |
 | 流通市值 | float_cap |
 
-### 3.4 sina_realtime — 新浪实时行情
+### 3.6 sina_realtime — 新浪实时行情
 
 | 源字段 | 标准字段 |
 |--------|----------|

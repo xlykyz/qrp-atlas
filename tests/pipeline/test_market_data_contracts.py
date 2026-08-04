@@ -276,6 +276,8 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         "limit_step_ingest",
         "ths_daily_ingest",
         "stk_high_shock_ingest",
+        "etf_daily_update",
+        "etf_adj_factor_update",
         *(contract.pipeline_id for contract in INDEX_BASIC_CONTRACTS),
         *(contract.pipeline_id for contract in STOCK_BASIC_CONTRACTS),
         *(contract.pipeline_id for contract in CNINFO_CONTRACTS),

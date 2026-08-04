@@ -19,8 +19,10 @@ qrp-atlas-jobs serve
 ```text
 QRP_JOB_RUNTIME_DIR
   默认 QRP_DATA_DIR/runtime/job
+QRP_JOB_RUNTIME_DB_PATH
+  默认 <runtime-dir>/job_runtime.sqlite3
 
-<runtime-dir>/job_runtime.sqlite3
+<job-runtime-db-path>
 <runtime-dir>/logs/<run-id>.stdout.log
 <runtime-dir>/logs/<run-id>.stderr.log
 ```
