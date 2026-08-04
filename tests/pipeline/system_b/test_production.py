@@ -48,7 +48,10 @@ def _seed_market(path: Path, *, missing_day11_ma5_input: bool = False) -> list[d
             [(item, item.year, item.month, 1) for item in dates],
         )
         connection.executemany(
-            "INSERT INTO stock_info VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO stock_info (ticker, name, exchange, market, list_date, delist_date, is_active, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
                 ("A", "A", "SZ", "MAIN", dates[0], None, True, None),
                 ("B", "B", "SH", "MAIN", dates[0], None, True, None),
@@ -181,7 +184,11 @@ def test_unresolved_gap_resets_ma5_window_and_explicit_non_trading_is_skipped(tm
             [(item, item.year, item.month, 1) for item in dates],
         )
         connection.execute(
-            "INSERT INTO stock_info VALUES ('A','A','SZ','MAIN',?,NULL,TRUE,NULL)", [dates[0]]
+            """
+            INSERT INTO stock_info (ticker, name, exchange, market, list_date, delist_date, is_active, updated_at)
+            VALUES ('A','A','SZ','MAIN',?,NULL,TRUE,NULL)
+            """,
+            [dates[0]],
         )
         connection.execute("INSERT INTO adj_factor_changes VALUES ('A', ?, 1.0)", [dates[0]])
         post_gap_prices = {12: 20.0, 14: 19.0, 15: 18.0, 16: 17.0, 17: 16.0, 18: 20.0, 19: 21.0}
@@ -431,7 +438,11 @@ def test_multiple_adjustments_scale_prices_without_changing_fact_state(tmp_path:
             [(item, item.year, item.month, 1) for item in dates],
         )
         connection.execute(
-            "INSERT INTO stock_info VALUES ('A','A','SZ','MAIN',?,NULL,TRUE,NULL)", [dates[0]]
+            """
+            INSERT INTO stock_info (ticker, name, exchange, market, list_date, delist_date, is_active, updated_at)
+            VALUES ('A','A','SZ','MAIN',?,NULL,TRUE,NULL)
+            """,
+            [dates[0]],
         )
         connection.executemany(
             "INSERT INTO adj_factor_changes VALUES ('A', ?, ?)",

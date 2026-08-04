@@ -30,6 +30,7 @@ from qrp_atlas.pipeline.market_data_contracts import (
     ZT_DT_POOL_DAILY,
 )
 from qrp_atlas.pipeline.index_basic_contracts import INDEX_BASIC_CONTRACTS
+from qrp_atlas.pipeline.stock_basic_contracts import STOCK_BASIC_CONTRACTS
 from qrp_atlas.pipeline.cninfo_contracts import CNINFO_CONTRACTS
 from qrp_atlas.pipeline.irm_qa_contracts import IRM_CONTRACTS
 from qrp_atlas.pipeline.membership_contracts import MEMBERSHIP_CONTRACTS
@@ -273,6 +274,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
     assert {contract.pipeline_id for contract in registered} == {
         *(contract.pipeline_id for contract in MARKET_DATA_CONTRACTS),
         *(contract.pipeline_id for contract in INDEX_BASIC_CONTRACTS),
+        *(contract.pipeline_id for contract in STOCK_BASIC_CONTRACTS),
         *(contract.pipeline_id for contract in CNINFO_CONTRACTS),
         *(contract.pipeline_id for contract in IRM_CONTRACTS),
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),

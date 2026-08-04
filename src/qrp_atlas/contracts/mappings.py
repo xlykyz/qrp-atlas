@@ -26,13 +26,15 @@ mappings.py - 各数据源字段映射
 from typing import Dict
 
 from .fields import (
-    TICKER, TRADE_DATE, NAME,
+    TICKER, TS_CODE, SYMBOL, TRADE_DATE, NAME,
     OPEN, HIGH, LOW, CLOSE, VOLUME, AMOUNT,
     PCT_CHANGE, TURNOVER, MARKET_CAP, FLOAT_CAP, PRE_CLOSE,
     INFO_CODE, TITLE, STOCK_CODE, STOCK_NAME, PUBLISH_DATE,
-    MARKET, REPORT_COLUMN, REPORT_TYPE, ENCODE_URL,
+    MARKET, EXCHANGE, AREA, INDUSTRY, FULLNAME, ENNAME, CNSPELL,
+    CURR_TYPE, LIST_STATUS, IS_HS, ACT_NAME, ACT_ENT_TYPE,
+    REPORT_COLUMN, REPORT_TYPE, ENCODE_URL,
     FULL_NAME, PUBLISHER, INDEX_TYPE, CATEGORY, BASE_DATE, BASE_POINT,
-    LIST_DATE, WEIGHT_RULE, DESCRIPTION, EXP_DATE, CHANGE,
+    LIST_DATE, DELIST_DATE, WEIGHT_RULE, DESCRIPTION, EXP_DATE, CHANGE,
     EM_RATING_CODE, EM_RATING_VALUE, EM_RATING_NAME,
     LAST_EM_RATING_CODE, LAST_EM_RATING_VALUE, LAST_EM_RATING_NAME,
     S_RATING_CODE, S_RATING_NAME, RATING_CHANGE,
@@ -163,6 +165,26 @@ TUSHARE_INDEX_BASIC: Dict[str, str] = {
     "weight_rule": WEIGHT_RULE,
     "desc": DESCRIPTION,
     "exp_date": EXP_DATE,
+}
+
+TUSHARE_STOCK_BASIC: Dict[str, str] = {
+    "ts_code": TS_CODE,
+    "symbol": SYMBOL,
+    "name": NAME,
+    "area": AREA,
+    "industry": INDUSTRY,
+    "fullname": FULLNAME,
+    "enname": ENNAME,
+    "cnspell": CNSPELL,
+    "market": MARKET,
+    "exchange": EXCHANGE,
+    "curr_type": CURR_TYPE,
+    "list_status": LIST_STATUS,
+    "list_date": LIST_DATE,
+    "delist_date": DELIST_DATE,
+    "is_hs": IS_HS,
+    "act_name": ACT_NAME,
+    "act_ent_type": ACT_ENT_TYPE,
 }
 
 EASTMONEY_RESEARCH_REPORT: Dict[str, str] = {
@@ -368,6 +390,7 @@ SOURCE_MAPPINGS = {
     "tushare_daily": TUSHARE_DAILY,
     "tushare_index_daily": TUSHARE_INDEX_DAILY,
     "tushare_index_basic": TUSHARE_INDEX_BASIC,
+    "tushare_stock_basic": TUSHARE_STOCK_BASIC,
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,

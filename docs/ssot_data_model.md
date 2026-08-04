@@ -176,18 +176,35 @@
 ### 2.4 stock_info — 股票基础信息
 
 - **主键**: (ticker)
-- **8 列**
+- **Tushare `stock_basic` 完整当前快照 + 兼容字段**
+- **20 列**
+
+该表只保留最近一次成功同步的当前状态，不保存历史快照。正式来源为
+Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
+交易所分区拉取后，在一个事务中全量替换本表。
 
 | 列名 | 类型 | 非空 | 说明 |
 |------|------|:----:|------|
-| ticker | VARCHAR | ✅ | 股票代码 |
+| ts_code | VARCHAR | | Tushare TS 代码 |
+| symbol | VARCHAR | | 股票代码 |
 | name | VARCHAR | | 股票名称 |
-| exchange | VARCHAR | | 交易所代码 |
+| area | VARCHAR | | 地域 |
+| industry | VARCHAR | | 所属行业 |
+| fullname | VARCHAR | | 股票全称 |
+| enname | VARCHAR | | 英文全称 |
+| cnspell | VARCHAR | | 拼音缩写 |
 | market | VARCHAR | | 市场标识 |
+| exchange | VARCHAR | | 交易所代码 |
+| curr_type | VARCHAR | | 交易货币 |
+| list_status | VARCHAR | | 上市状态 L/D/P/G |
 | list_date | DATE | | 上市日期 |
 | delist_date | DATE | | 退市日期 |
-| is_active | BOOLEAN | | 是否上市 |
-| updated_at | TIMESTAMP | | 更新时间 |
+| is_hs | VARCHAR | | 沪深港通标的 N/H/S |
+| act_name | VARCHAR | | 实际控制人名称 |
+| act_ent_type | VARCHAR | | 实际控制人企业性质 |
+| ticker | VARCHAR | ✅ | 兼容字段，等于 ts_code |
+| is_active | BOOLEAN | | 兼容字段，等于 list_status = L |
+| updated_at | TIMESTAMP | | 最近一次同步时间，不表示历史版本 |
 
 ### 2.5 trading_calendar — 交易日历
 
