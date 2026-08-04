@@ -494,7 +494,7 @@ INDEX_BASIC = TableSchema(
         ColumnSpec(INDEX_TYPE, "VARCHAR"),
         ColumnSpec(CATEGORY, "VARCHAR", nullable=False),
         ColumnSpec(BASE_DATE, "DATE"),
-        ColumnSpec(BASE_POINT, "DOUBLE", nullable=False),
+        ColumnSpec(BASE_POINT, "DOUBLE"),
         ColumnSpec(LIST_DATE, "DATE"),
         ColumnSpec(WEIGHT_RULE, "VARCHAR"),
         ColumnSpec(DESCRIPTION, "TEXT"),

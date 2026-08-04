@@ -151,6 +151,7 @@ def test_index_basic_accepts_provider_specific_code_forms(tmp_path: Path, monkey
     client = FakeIndexBasic()
     special = index_basic_frame("SP500-1010.SPI", "SSE", "特殊指数")
     special["base_date"] = None
+    special["base_point"] = None
     special["list_date"] = None
     client.frames["SSE"] = special
     monkeypatch.setattr(

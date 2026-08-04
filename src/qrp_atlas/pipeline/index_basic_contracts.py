@@ -222,9 +222,12 @@ def _normalize_provider_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
             raise ContractError("INDEX_BASIC_API_PARTIAL", "exp_date contains invalid dates")
         frame["exp_date"] = parsed_exp_date.where(parsed_exp_date.notna(), None).dt.date
 
-    frame["base_point"] = pd.to_numeric(frame["base_point"], errors="coerce")
-    if frame["base_point"].isna().any():
+    raw_base_point = frame["base_point"]
+    base_point = pd.to_numeric(raw_base_point, errors="coerce")
+    invalid_base_point = raw_base_point.notna() & base_point.isna()
+    if invalid_base_point.any():
         raise ContractError("INDEX_BASIC_API_PARTIAL", "base_point contains non-numeric values")
+    frame["base_point"] = base_point
 
     compare_columns = [column for column in TUSHARE_INDEX_BASIC if column in frame.columns]
     duplicates = frame[frame.duplicated("ts_code", keep=False)]
