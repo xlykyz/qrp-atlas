@@ -145,6 +145,47 @@ def test_index_basic_rejects_conflicting_duplicate_without_writing(tmp_path: Pat
         connection.close()
 
 
+def test_index_basic_replaces_stale_dictionary_only_after_full_validation(tmp_path: Path, monkeypatch) -> None:
+    item = settings(tmp_path)
+    initialise_database(item)
+    client = FakeIndexBasic()
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.index_basic_contracts.get_tushare_pro",
+        lambda **_kwargs: client,
+    )
+
+    first = ContractTestHarness(INDEX_BASIC_UPDATE, item).run(
+        trade_date=TARGET,
+        parameter_overrides={"markets": "SSE,SZSE"},
+    )
+    assert first.status is ResultStatus.SUCCESS
+
+    second = ContractTestHarness(INDEX_BASIC_UPDATE, item).run(
+        trade_date=TARGET,
+        parameter_overrides={"markets": "SSE"},
+    )
+    assert second.status is ResultStatus.SUCCESS
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM index_basic").fetchone()[0] == 1
+        assert connection.execute("SELECT index_code FROM index_basic").fetchone()[0] == "000001.SH"
+    finally:
+        connection.close()
+
+    client.frames["SSE"] = pd.DataFrame()
+    failed = ContractTestHarness(INDEX_BASIC_UPDATE, item).run(
+        trade_date=TARGET,
+        parameter_overrides={"markets": "SSE"},
+    )
+    assert failed.status is ResultStatus.FAILED
+    assert "INDEX_BASIC_API_EMPTY" in diagnostics(failed)
+    connection = duckdb.connect(str(item.paths.duckdb_path), read_only=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM index_basic").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
 def test_index_basic_accepts_provider_specific_code_forms(tmp_path: Path, monkeypatch) -> None:
     item = settings(tmp_path)
     initialise_database(item)

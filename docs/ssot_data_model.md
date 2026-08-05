@@ -180,13 +180,15 @@
 - **Tushare `stock_basic` 完整当前快照 + 兼容字段**
 - **20 列**
 
-该表只保留最近一次成功同步的当前状态，不保存历史快照。正式来源为
+该表只保留最近一次成功同步的标准化当前状态，不保存历史快照。正式来源为
 Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
-交易所分区拉取后，在一个事务中全量替换本表。
+交易所分区拉取后，在一个事务中全量替换本表。只有可表达为标准交易代码的
+记录进入本表；provider 返回的非标准历史身份进入下方 companion 表，不能
+为了入本表而改写代码或填充缺失分类值。
 
 | 列名 | 类型 | 非空 | 说明 |
 |------|------|:----:|------|
-| ts_code | VARCHAR | | Tushare TS 代码 |
+| ts_code | VARCHAR | | provider 原始 TS 标识；在本表中该值必须同时是标准交易代码 |
 | symbol | VARCHAR | | 股票代码 |
 | name | VARCHAR | | 股票名称 |
 | area | VARCHAR | | 地域 |
@@ -194,7 +196,7 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | fullname | VARCHAR | | 股票全称 |
 | enname | VARCHAR | | 英文全称 |
 | cnspell | VARCHAR | | 拼音缩写 |
-| market | VARCHAR | | 市场标识 |
+| market | VARCHAR | | 市场分类；provider 缺失时保持 NULL，不作为身份完整性的证明 |
 | exchange | VARCHAR | | 交易所代码 |
 | curr_type | VARCHAR | | 交易货币 |
 | list_status | VARCHAR | | 上市状态 L/D/P/G |
@@ -203,9 +205,56 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | is_hs | VARCHAR | | 沪深港通标的 N/H/S |
 | act_name | VARCHAR | | 实际控制人名称 |
 | act_ent_type | VARCHAR | | 实际控制人企业性质 |
-| ticker | VARCHAR | ✅ | 兼容字段，等于 ts_code |
+| ticker | VARCHAR | ✅ | 标准交易代码兼容字段，也是标准表内部主键，等于 ts_code |
 | is_active | BOOLEAN | | 兼容字段，等于 list_status = L |
 | updated_at | TIMESTAMP | | 最近一次同步时间，不表示历史版本 |
+
+### 2.4.1 stock_info_historical_identity — provider 历史特殊身份
+
+- **主键**: (provider, ts_code)
+- **23 列**
+
+该表是 `stock_basic` 当前快照的特殊身份 companion 表，不是通用证券主数据
+平台，也不保存历次快照。它保留 provider 返回过、但不能安全进入标准
+`stock_info` 的身份；每次成功运行与 `stock_info` 一起在同一事务中全量替换。
+
+| 列名 | 类型 | 非空 | 说明 |
+|------|------|:----:|------|
+| provider | VARCHAR | ✅ | provider 名称，当前为 `tushare` |
+| ts_code | VARCHAR | ✅ | provider 原始身份，禁止改写为标准代码 |
+| symbol | VARCHAR | | provider 短代码 |
+| name | VARCHAR | | provider 名称 |
+| area | VARCHAR | | 地域 |
+| industry | VARCHAR | | 所属行业 |
+| fullname | VARCHAR | | 股票全称 |
+| enname | VARCHAR | | 英文全称 |
+| cnspell | VARCHAR | | 拼音缩写 |
+| market | VARCHAR | | 市场分类；可为 NULL |
+| exchange | VARCHAR | ✅ | provider 交易所 |
+| curr_type | VARCHAR | | 交易货币 |
+| list_status | VARCHAR | ✅ | 上市状态；当前特殊身份要求为 `D` |
+| list_date | DATE | | 上市日期 |
+| delist_date | DATE | | 退市日期 |
+| is_hs | VARCHAR | | 沪深港通标的 |
+| act_name | VARCHAR | | 实际控制人名称 |
+| act_ent_type | VARCHAR | | 实际控制人企业性质 |
+| identity_type | VARCHAR | ✅ | `provider_historical_id` |
+| standard_ticker | VARCHAR | | 标准交易代码；特殊身份必须为 NULL |
+| isolation_reason | VARCHAR | ✅ | 当前为 `non_standard_provider_identity` |
+| snapshot_date | DATE | ✅ | 本次 provider 快照目标日期 |
+| captured_at | TIMESTAMP | ✅ | 本次抓取/落库时间 |
+
+身份语义固定为：`ts_code` 是 provider 原始标识，`ticker` 是标准表内部的
+标准交易代码主键，特殊表的 `(provider, ts_code)` 是可查询、可审计的特殊
+身份键。标准交易代码格式约束只适用于标准化可交易代码，不适用于所有
+provider 历史身份标识。
+
+`stock_basic` 的错误分类也按这个边界划分：响应缺列或日期解析失败仍属
+`STOCK_BASIC_API_PARTIAL`；`ts_code`、`exchange`、`list_status` 缺失属
+`STOCK_BASIC_IDENTITY_MISSING`；标准代码与交易所不一致属
+`STOCK_BASIC_IDENTITY_CONFLICT`；非标准代码未明确标记为退市历史身份属
+`STOCK_BASIC_IDENTITY_UNSUPPORTED`。`market` 缺失不属于上述失败条件，必须
+保持 NULL。
 
 ### 2.5 trading_calendar — 交易日历
 
@@ -355,3 +404,32 @@ Tushare `stock_basic`，Pipeline 按 `L/D/P/G` 状态和 `SSE/SZSE/BSE`
 | 最低 | low |
 | 成交量 | volume |
 | 成交额 | amount |
+
+### 3.7 tushare_stock_basic — Tushare 股票基础资料
+
+`TUSHARE_STOCK_BASIC` 的 provider 字段逐项映射到同名正式字段：
+
+| 源字段 | 标准字段 |
+|--------|----------|
+| ts_code | ts_code（provider 原始身份） |
+| symbol | symbol |
+| name | name |
+| area | area |
+| industry | industry |
+| fullname | fullname |
+| enname | enname |
+| cnspell | cnspell |
+| market | market（可空） |
+| exchange | exchange |
+| curr_type | curr_type |
+| list_status | list_status |
+| list_date | list_date |
+| delist_date | delist_date |
+| is_hs | is_hs |
+| act_name | act_name |
+| act_ent_type | act_ent_type |
+
+`ticker`、`is_active`、`updated_at` 是 Contract 根据已通过的身份分类派生
+的标准表兼容字段，不是 provider 原始映射。身份关键字段只有 provider
+原始 `ts_code`、`exchange`、`list_status`；`market` 及其他分类字段缺失时
+保持 NULL，不得用默认值证明快照完整。

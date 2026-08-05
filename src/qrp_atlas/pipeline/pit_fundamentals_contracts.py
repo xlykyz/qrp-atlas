@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -193,6 +193,18 @@ def _date_list(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _default_announcement_dates(context: PipelineRunContext) -> tuple[str, ...]:
+    """Resolve the daily provider window around the Shanghai execution date."""
+    _check_context(context)
+    if context.scheduled_for.tzinfo is None:
+        raise ContractError("SCHEDULE_TIMEZONE_MISSING")
+    scheduled_date = context.scheduled_for.astimezone(PIT_TIMEZONE).date()
+    return tuple(
+        (scheduled_date + timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in (-1, 0, 1)
+    )
+
+
 def _code_list(value: object, field_name: str, *, required: bool = False) -> tuple[str, ...]:
     raw = _text(value)
     if not raw:
@@ -301,15 +313,18 @@ def _fundamentals_scope(context: PipelineRunContext) -> dict[str, Any]:
     _check_context(context)
     values = context.parameter_overrides
     mode = _text(values.get("mode", "period")).lower()
-    if mode not in {"period", "ticker"}:
+    if mode not in {"period", "ticker", "ann_date"}:
         raise ContractError("INVALID_PARAMETER", "mode")
     tables = _tables(values.get("tables", "all"))
     periods = _date_list(values.get("periods", ""), "periods")
     tickers = _code_list(values.get("tickers", ""), "tickers")
+    ann_dates = _date_list(values.get("ann_dates", ""), "ann_dates")
     if mode == "period" and not periods:
         raise ContractError("FUNDAMENTALS_PERIODS_REQUIRED", "periods")
     if mode == "ticker" and not tickers:
         raise ContractError("FUNDAMENTALS_TICKERS_REQUIRED", "tickers")
+    if mode == "ann_date" and not ann_dates:
+        ann_dates = _default_announcement_dates(context)
     start_value = values.get("start_date")
     end_value = values.get("end_date")
     if start_value is not None or end_value is not None:
@@ -326,6 +341,7 @@ def _fundamentals_scope(context: PipelineRunContext) -> dict[str, Any]:
         "tables": tables,
         "periods": periods,
         "tickers": tickers,
+        "ann_dates": ann_dates,
         "start_date": start_date,
         "end_date": end_date,
     }
@@ -345,7 +361,7 @@ def _earnings_scope(context: PipelineRunContext) -> dict[str, Any]:
     if mode == "ticker" and not tickers:
         raise ContractError("EARNINGS_TICKERS_REQUIRED", "tickers")
     if mode == "ann_date" and not ann_dates:
-        raise ContractError("EARNINGS_ANN_DATES_REQUIRED", "ann_dates")
+        ann_dates = _default_announcement_dates(context)
     if mode == "from_raw" and not _text(values.get("raw_path", "")):
         raise ContractError("EARNINGS_RAW_PATH_REQUIRED", "raw_path")
     start_value = values.get("start_date")
@@ -495,11 +511,12 @@ def _fundamentals_provider_freshness(context: PipelineRunContext) -> CheckResult
         tables=list(scope["tables"]),
         periods=list(scope["periods"]),
         tickers=list(scope["tickers"]),
+        ann_dates=list(scope["ann_dates"]),
         start_date=scope["start_date"].isoformat() if scope["start_date"] else None,
         end_date=scope["end_date"].isoformat() if scope["end_date"] else None,
         ticker_date_scope={table: FINANCIAL_TICKER_DATE_SCOPE[table] for table in scope["tables"]},
         financial_indicator_page_limit=FINANCIAL_TICKER_ROW_LIMIT,
-        announcement_semantics="ann_date proves provider ticker request bounds; f_ann_date is used only for PIT availability when present; available_trade_date is strict next open date",
+        announcement_semantics="ann_date is the provider query scope; f_ann_date is used only for PIT availability when present; available_trade_date is strict next open date",
     )
 
 
@@ -643,6 +660,15 @@ def _validate_financial_frame(frame: object, scope: Mapping[str, Any], table: st
             announcement = row.get("f_ann_date")
         if _is_missing(announcement):
             raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number} ann_date")
+        if scope["mode"] == "ann_date":
+            if _is_missing(provider_announcement):
+                raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number} ann_date")
+            try:
+                ann_date = _date_value(provider_announcement, "ann_date").strftime("%Y%m%d")
+            except ContractError as exc:
+                raise ContractError("FUNDAMENTALS_PROVIDER_DATE_INVALID", f"row {row_number} ann_date") from exc
+            if ann_date not in set(scope["ann_dates"]):
+                raise ContractError("FUNDAMENTALS_SCOPE_MISMATCH", f"row {row_number} ann_date")
         if scope["mode"] == "ticker" and start_date is not None and end_date is not None:
             # f_ann_date is a PIT availability field and must not prove the
             # provider's ann_date request scope.
@@ -961,6 +987,7 @@ def _execute_fundamentals(context: PipelineRunContext) -> BusinessExecution:
                 table,
                 mode=scope["mode"],
                 periods=scope["periods"] or None,
+                ann_dates=scope["ann_dates"] or None,
                 tickers=scope["tickers"] or None,
                 start_date=scope["start_date"].strftime("%Y%m%d") if scope["start_date"] else None,
                 end_date=scope["end_date"].strftime("%Y%m%d") if scope["end_date"] else None,
@@ -1001,7 +1028,8 @@ def _execute_fundamentals(context: PipelineRunContext) -> BusinessExecution:
                 "rows_cleaned": len(prepared.get(table, pd.DataFrame())),
                 "rows_inserted": inserted.get(table, 0),
                 "periods": list(scope["periods"]),
-                "announcement_semantics": "f_ann_date preferred over ann_date; available_trade_date is strict next open",
+                "ann_dates": list(scope["ann_dates"]),
+                "announcement_semantics": "ann_date is the provider query scope; f_ann_date is used for PIT availability; available_trade_date is strict next open",
                 "provider_date_scope": FINANCIAL_TICKER_DATE_SCOPE[table],
                 "revision_semantics": "same normalized content repeats the revision_id; changed content is retained",
             },
@@ -1275,10 +1303,11 @@ def _pit_parameters() -> tuple[ParameterContract, ...]:
 
 def _fundamentals_parameters() -> tuple[ParameterContract, ...]:
     return (
-        ParameterContract("mode", ParameterType.STRING, "period or ticker.", default="period"),
+        ParameterContract("mode", ParameterType.STRING, "period, ticker, or ann_date.", default="period"),
         ParameterContract("tables", ParameterType.STRING, "Financial tables or all.", default="all"),
         ParameterContract("periods", ParameterType.STRING, "Comma-separated YYYYMMDD report periods.", default=""),
         ParameterContract("tickers", ParameterType.STRING, "Comma-separated ticker codes.", default=""),
+        ParameterContract("ann_dates", ParameterType.STRING, "Comma-separated YYYYMMDD announcement dates; ann_date mode defaults to D-1,D,D+1.", default=""),
         ParameterContract("start_date", ParameterType.DATE, "Optional inclusive provider date bound for ticker mode.", default=None),
         ParameterContract("end_date", ParameterType.DATE, "Optional inclusive provider date bound for ticker mode.", default=None),
     )
@@ -1387,8 +1416,8 @@ FUNDAMENTALS_INGEST = register_pipeline(
     PipelineContract(
         pipeline_id="fundamentals_ingest",
         name="Fundamentals ingestion",
-        description="Fetches explicit financial report periods or tickers, preserves announcement availability, and appends revisions transactionally.",
-        contract_version="1.1.0",
+        description="Fetches explicit financial report periods, tickers, or announcement dates, preserves announcement availability, and appends revisions transactionally.",
+        contract_version="1.2.0",
         kind=PipelineKind.ATOMIC,
         executor=_execute_fundamentals,
         target_date_policy=FUNDAMENTALS_TARGET_DATE_POLICY,
@@ -1433,7 +1462,7 @@ EARNINGS_FORECAST_INGEST = register_pipeline(
         pipeline_id="earnings_forecast_ingest",
         name="Earnings forecast ingestion",
         description="Fetches or recovers explicit earnings forecast scope, archives raw evidence, and retains disclosure revisions by source identity.",
-        contract_version="1.1.0",
+        contract_version="1.2.0",
         kind=PipelineKind.ATOMIC,
         executor=_execute_earnings,
         target_date_policy=EARNINGS_TARGET_DATE_POLICY,

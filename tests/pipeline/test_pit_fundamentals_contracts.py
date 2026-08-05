@@ -12,7 +12,11 @@ import pytest
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import init_database
 from qrp_atlas.orchestration.execution_control import ExecutionControl
-from qrp_atlas.pipeline.fundamentals.fetch import FinancialFetchError, fetch_financial_by_tickers
+from qrp_atlas.pipeline.fundamentals.fetch import (
+    FinancialFetchError,
+    fetch_financial_by_ann_date,
+    fetch_financial_by_tickers,
+)
 from qrp_atlas.pipeline.contract_validation import validate_contracts
 from qrp_atlas.pipeline.contracts import PipelineInvocation, ResultStatus
 from qrp_atlas.pipeline.execution import execute_pipeline_contract
@@ -200,6 +204,34 @@ def test_fundamentals_ticker_date_scope_uses_provider_announcement_date(tmp_path
     assert _count(settings, "cashflow_statement") == 1
 
 
+def test_fundamentals_ann_date_mode_defaults_to_three_calendar_dates(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    calls: list[dict[str, object]] = []
+    row = _financial_row(period="20231231") | {
+        "ann_date": "20240102",
+        "f_ann_date": "20240102",
+    }
+
+    def provider(*_args, **kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame([row])
+
+    monkeypatch.setattr(subject, "fetch_financial", provider)
+    result = _run(
+        subject.FUNDAMENTALS_INGEST,
+        settings,
+        {"mode": "ann_date", "tables": "income_statement"},
+        run_id="fund-ann-window",
+    )
+
+    assert result.status is ResultStatus.SUCCESS
+    assert calls[0]["mode"] == "ann_date"
+    assert calls[0]["ann_dates"] == ("20240101", "20240102", "20240103")
+    assert result.outputs[0].detail["ann_dates"] == ["20240101", "20240102", "20240103"]
+    assert _count(settings, "income_statement") == 1
+
+
 @pytest.mark.parametrize("table", ["income_statement", "balance_sheet", "cashflow_statement"])
 def test_fundamentals_ticker_announcement_date_out_of_range_fails_closed(tmp_path, monkeypatch, table) -> None:
     settings = _settings(tmp_path)
@@ -284,6 +316,22 @@ def test_financial_indicator_fetch_rejects_exact_provider_page_limit() -> None:
     assert caught.value.code == "FUNDAMENTALS_PAGE_LIMIT_REACHED"
 
 
+def test_financial_ann_date_fetch_uses_vip_announcement_parameter() -> None:
+    class FakePro:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, str]] = []
+
+        def income_vip(self, **kwargs):
+            self.calls.append(kwargs)
+            return pd.DataFrame([_financial_row()])
+
+    client = FakePro()
+    result = fetch_financial_by_ann_date("income_statement", "2024-03-15", client=client)
+
+    assert client.calls == [{"ann_date": "20240315"}]
+    assert len(result) == 1
+
+
 def test_earnings_forecast_preserves_disclosure_and_technical_revisions(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     _initialise_database(settings)
@@ -318,6 +366,34 @@ def test_earnings_forecast_preserves_disclosure_and_technical_revisions(tmp_path
         connection.close()
     assert first.outputs[0].detail["ingestion_run_id"] == "earn-1"
     assert report_calls
+
+
+def test_earnings_ann_date_mode_defaults_to_three_calendar_dates(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+    calls: list[dict[str, object]] = []
+    row = _forecast_row() | {"ann_date": "20240102", "first_ann_date": "20240102"}
+
+    def provider(*_args, report, **kwargs):
+        calls.append(kwargs)
+        report.api_requests += 1
+        report.batches += 1
+        report.rows_read += 1
+        return pd.DataFrame([row])
+
+    monkeypatch.setattr(subject, "fetch_earnings_forecast", provider)
+    result = _run(
+        subject.EARNINGS_FORECAST_INGEST,
+        settings,
+        {"mode": "ann_date"},
+        run_id="earn-ann-window",
+    )
+
+    assert result.status is ResultStatus.SUCCESS
+    assert calls[0]["mode"] == "ann_date"
+    assert calls[0]["ann_dates"] == ("20240101", "20240102", "20240103")
+    assert result.outputs[0].detail["empty_scope_result"] is False
+    assert _count(settings, "earnings_forecast_event") == 1
 
 
 def test_earnings_raw_recovery_missing_corrupt_and_identity_fail_closed(tmp_path) -> None:

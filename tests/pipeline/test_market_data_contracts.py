@@ -37,6 +37,7 @@ from qrp_atlas.pipeline.membership_contracts import MEMBERSHIP_CONTRACTS
 from qrp_atlas.pipeline.pit_fundamentals_contracts import PIT_FUNDAMENTALS_CONTRACTS
 from qrp_atlas.pipeline.research_report_contracts import RESEARCH_REPORT_CONTRACTS
 from qrp_atlas.pipeline.research_industry_contracts import RESEARCH_INDUSTRY_CONTRACTS
+from qrp_atlas.pipeline.system_b_contracts import SYSTEM_B_CONTRACTS
 from qrp_atlas.pipeline.job_adapter import ContractDeploymentSelection, contract_runtime_definition
 from qrp_atlas.jobs_cli import main as pipeline_cli
 from qrp_atlas.orchestration.store import JobRuntimeStore
@@ -284,6 +285,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         *(contract.pipeline_id for contract in IRM_CONTRACTS),
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),
         *(contract.pipeline_id for contract in PIT_FUNDAMENTALS_CONTRACTS),
+        *(contract.pipeline_id for contract in SYSTEM_B_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_REPORT_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_INDUSTRY_CONTRACTS),
     }

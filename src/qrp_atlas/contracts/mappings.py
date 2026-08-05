@@ -191,6 +191,8 @@ TUSHARE_INDEX_BASIC: Dict[str, str] = {
 }
 
 TUSHARE_STOCK_BASIC: Dict[str, str] = {
+    # ``ts_code`` remains the provider identity.  The stock_basic Contract
+    # decides separately whether it can become the standard ``ticker`` key.
     "ts_code": TS_CODE,
     "symbol": SYMBOL,
     "name": NAME,

@@ -1,9 +1,10 @@
 """Formal current-state Pipeline for the Tushare ``stock_basic`` endpoint.
 
-The output is a complete provider snapshot in ``stock_info``.  It deliberately
-does not retain historical snapshots: each successful run replaces the current
-table in one DuckDB transaction.  ``ticker``, ``is_active`` and ``updated_at``
-remain compatibility fields for existing consumers.
+The standard output is a complete current snapshot in ``stock_info``. Provider
+identities that are explicitly historical but do not have a standard trading
+code are retained in ``stock_info_historical_identity`` in the same atomic
+replacement. This keeps provider identity, standard trading code, and the
+standard-table compatibility key distinct without creating a general MDM layer.
 """
 
 from __future__ import annotations
@@ -19,15 +20,19 @@ import pandas as pd
 
 from qrp_atlas.config.tushare_client import get_tushare_pro
 from qrp_atlas.contracts import (
+    CAPTURED_AT,
     DELIST_DATE,
     EXCHANGE,
+    IDENTITY_TYPE,
     IS_ACTIVE,
+    ISOLATION_REASON,
     LIST_DATE,
     LIST_STATUS,
-    MARKET,
-    NAME,
+    PROVIDER,
+    SNAPSHOT_DATE,
+    STANDARD_TICKER,
     STOCK_INFO,
-    SYMBOL,
+    STOCK_INFO_HISTORICAL_IDENTITY,
     TICKER,
     TS_CODE,
     TUSHARE_STOCK_BASIC,
@@ -77,7 +82,11 @@ STOCK_BASIC_FIELDS = ",".join(TUSHARE_STOCK_BASIC.keys())
 STOCK_BASIC_REQUIRED_FIELDS = tuple(TUSHARE_STOCK_BASIC.values())
 STOCK_BASIC_CODE_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 STOCK_BASIC_EXCHANGE_SUFFIX = {"SSE": ".SH", "SZSE": ".SZ", "BSE": ".BJ"}
-STOCK_BASIC_CORE_FIELDS = (TS_CODE, SYMBOL, NAME, EXCHANGE, MARKET, LIST_STATUS)
+STOCK_BASIC_PROVIDER = "tushare"
+STOCK_BASIC_STANDARD_IDENTITY = "standard_trading_code"
+STOCK_BASIC_HISTORICAL_IDENTITY = "provider_historical_id"
+STOCK_BASIC_HISTORICAL_REASON = "non_standard_provider_identity"
+STOCK_BASIC_IDENTITY_FIELDS = (TS_CODE, EXCHANGE, LIST_STATUS)
 
 
 def _resolve_stock_basic_target(invocation) -> TargetWindow:
@@ -153,20 +162,42 @@ def _normalize_provider_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
         values = frame[column].astype("string").str.strip()
         frame[column] = values.mask(values.eq(""), pd.NA)
 
-    for column in STOCK_BASIC_CORE_FIELDS:
+    for column in STOCK_BASIC_IDENTITY_FIELDS:
         if frame[column].isna().any():
-            raise ContractError("STOCK_BASIC_API_PARTIAL", f"{column} contains empty values")
+            raise ContractError("STOCK_BASIC_IDENTITY_MISSING", f"{column} contains empty values")
 
     codes = frame[TS_CODE].astype("string").str.upper()
-    invalid_codes = codes.isna() | ~codes.str.fullmatch(STOCK_BASIC_CODE_PATTERN.pattern, na=False)
-    if invalid_codes.any():
-        raise ContractError("STOCK_BASIC_API_PARTIAL", "invalid ts_code in stock_basic response")
     frame[TS_CODE] = codes
 
+    frame[EXCHANGE] = frame[EXCHANGE].astype("string").str.upper()
+    frame[LIST_STATUS] = frame[LIST_STATUS].astype("string").str.upper()
     expected_suffix = frame[EXCHANGE].map(STOCK_BASIC_EXCHANGE_SUFFIX)
-    suffix_mismatch = expected_suffix.notna() & codes.str[-3:].ne(expected_suffix)
+    if expected_suffix.isna().any():
+        raise ContractError(
+            "STOCK_BASIC_IDENTITY_CONFLICT",
+            "exchange cannot be mapped to a supported exchange",
+        )
+
+    # The standard regex is applied only to standard identities. A provider
+    # historical identity may use a different code shape, but an explicit
+    # exchange suffix must still agree when one is present.
+    standard_codes = codes.str.fullmatch(STOCK_BASIC_CODE_PATTERN.pattern, na=False)
+    has_suffix = codes.str.contains(".", regex=False, na=False)
+    suffix_mismatch = has_suffix & codes.str[-3:].ne(expected_suffix)
     if suffix_mismatch.any():
-        raise ContractError("STOCK_BASIC_API_PARTIAL", "ts_code suffix does not match exchange")
+        raise ContractError("STOCK_BASIC_IDENTITY_CONFLICT", "ts_code suffix does not match exchange")
+
+    unsupported_special = (~standard_codes) & frame[LIST_STATUS].ne("D")
+    if unsupported_special.any():
+        raise ContractError(
+            "STOCK_BASIC_IDENTITY_UNSUPPORTED",
+            "non-standard provider identity is not marked as delisted historical data",
+        )
+    frame[IDENTITY_TYPE] = pd.Series(
+        STOCK_BASIC_HISTORICAL_IDENTITY,
+        index=frame.index,
+        dtype="string",
+    ).mask(standard_codes, STOCK_BASIC_STANDARD_IDENTITY)
 
     frame = _normalise_provider_dates(frame)
     duplicate_rows = frame[frame.duplicated(TS_CODE, keep=False)]
@@ -177,13 +208,37 @@ def _normalize_provider_frames(frames: list[pd.DataFrame]) -> pd.DataFrame:
     return frame.drop_duplicates(subset=[TS_CODE], keep="last").reset_index(drop=True)
 
 
-def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_frame(frame: pd.DataFrame, captured_at: pd.Timestamp) -> pd.DataFrame:
     prepared = frame.rename(columns=TUSHARE_STOCK_BASIC).copy()
     prepared[TICKER] = prepared[TS_CODE]
     prepared[IS_ACTIVE] = prepared[LIST_STATUS].eq("L")
-    prepared[UPDATED_AT] = pd.Timestamp.now(tz=CHINA_TZ).tz_localize(None)
+    prepared[UPDATED_AT] = captured_at
     prepared = align_to_schema(prepared, STOCK_INFO.name, fill_missing_optional=True, drop_extra=True)
     return quick_validate(prepared, STOCK_INFO.name, allow_extra=False)
+
+
+def _prepare_historical_identity_frame(
+    frame: pd.DataFrame,
+    target_date: date,
+    captured_at: pd.Timestamp,
+) -> pd.DataFrame:
+    prepared = frame.rename(columns=TUSHARE_STOCK_BASIC).copy()
+    prepared[PROVIDER] = STOCK_BASIC_PROVIDER
+    prepared[STANDARD_TICKER] = None
+    prepared[ISOLATION_REASON] = STOCK_BASIC_HISTORICAL_REASON
+    prepared[SNAPSHOT_DATE] = target_date
+    prepared[CAPTURED_AT] = captured_at
+    prepared = align_to_schema(
+        prepared,
+        STOCK_INFO_HISTORICAL_IDENTITY.name,
+        fill_missing_optional=True,
+        drop_extra=True,
+    )
+    return quick_validate(
+        prepared,
+        STOCK_INFO_HISTORICAL_IDENTITY.name,
+        allow_extra=False,
+    )
 
 
 def _table_exists(connection: duckdb.DuckDBPyConnection, table_name: str) -> bool:
@@ -207,25 +262,54 @@ def _ensure_compatible_schema(connection: duckdb.DuckDBPyConnection) -> None:
             f"ALTER TABLE {STOCK_INFO.name} ADD COLUMN {column.name} {column.dtype}"
         )
 
+    if not _table_exists(connection, STOCK_INFO_HISTORICAL_IDENTITY.name):
+        connection.execute(STOCK_INFO_HISTORICAL_IDENTITY.duckdb_create_sql())
+        return
+    historical_columns = {
+        row[0]
+        for row in connection.execute(
+            f"DESCRIBE {STOCK_INFO_HISTORICAL_IDENTITY.name}"
+        ).fetchall()
+    }
+    if not set(STOCK_INFO_HISTORICAL_IDENTITY.column_names()).issubset(historical_columns):
+        raise ContractError(
+            "STOCK_INFO_HISTORICAL_SCHEMA_INVALID",
+            "stock_info_historical_identity columns are incomplete",
+        )
 
-def _replace_frame(context: PipelineRunContext, frame: pd.DataFrame) -> tuple[int, float]:
+
+def _replace_frames(
+    context: PipelineRunContext,
+    standard_frame: pd.DataFrame,
+    historical_frame: pd.DataFrame,
+) -> tuple[int, int, float]:
     started = time.monotonic()
     connection = duckdb.connect(str(context.settings.paths.duckdb_path))
-    columns = list(STOCK_INFO.column_names())
+    standard_columns = list(STOCK_INFO.column_names())
+    historical_columns = list(STOCK_INFO_HISTORICAL_IDENTITY.column_names())
     try:
         context.execution_control.check()
         connection.execute("BEGIN TRANSACTION")
         _ensure_compatible_schema(connection)
         context.execution_control.check()
-        connection.register("_stock_info_rows", frame)
+        connection.register("_stock_info_rows", standard_frame)
+        connection.register("_stock_info_historical_rows", historical_frame)
         try:
             connection.execute(f"DELETE FROM {STOCK_INFO.name}")
             connection.execute(
-                f"INSERT INTO {STOCK_INFO.name} ({', '.join(columns)}) "
-                f"SELECT {', '.join(columns)} FROM _stock_info_rows"
+                f"DELETE FROM {STOCK_INFO_HISTORICAL_IDENTITY.name}"
+            )
+            connection.execute(
+                f"INSERT INTO {STOCK_INFO.name} ({', '.join(standard_columns)}) "
+                f"SELECT {', '.join(standard_columns)} FROM _stock_info_rows"
+            )
+            connection.execute(
+                f"INSERT INTO {STOCK_INFO_HISTORICAL_IDENTITY.name} ({', '.join(historical_columns)}) "
+                f"SELECT {', '.join(historical_columns)} FROM _stock_info_historical_rows"
             )
         finally:
             connection.unregister("_stock_info_rows")
+            connection.unregister("_stock_info_historical_rows")
         context.execution_control.check()
         connection.execute("COMMIT")
     except Exception:
@@ -236,7 +320,7 @@ def _replace_frame(context: PipelineRunContext, frame: pd.DataFrame) -> tuple[in
         raise
     finally:
         connection.close()
-    return len(frame), time.monotonic() - started
+    return len(standard_frame), len(historical_frame), time.monotonic() - started
 
 
 def _stock_info_completion(context: PipelineRunContext) -> CheckResult:
@@ -334,6 +418,69 @@ def _stock_info_compatibility_quality(context: PipelineRunContext) -> CheckResul
     return CheckResult.success("stock_info_compatibility_quality", invalid_rows=0)
 
 
+def _historical_identity_completion(context: PipelineRunContext) -> CheckResult:
+    try:
+        context.execution_control.check()
+        connection = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+        try:
+            rows = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {STOCK_INFO_HISTORICAL_IDENTITY.name}"
+                ).fetchone()[0]
+            )
+        finally:
+            connection.close()
+    except Exception as exc:
+        return CheckResult.failure(
+            "historical_identity_completion",
+            "STOCK_INFO_HISTORICAL_COMPLETION_MISSING",
+            "stock_info_historical_identity could not be read after the write",
+            exception=type(exc).__name__,
+        )
+    return CheckResult.success("historical_identity_completion", rows=rows)
+
+
+def _historical_identity_quality(context: PipelineRunContext) -> CheckResult:
+    try:
+        context.execution_control.check()
+        connection = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+        try:
+            invalid = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {STOCK_INFO_HISTORICAL_IDENTITY.name}
+                    WHERE {PROVIDER} IS NULL
+                       OR {TS_CODE} IS NULL
+                       OR {EXCHANGE} IS NULL
+                       OR {LIST_STATUS} IS NULL
+                       OR {IDENTITY_TYPE} <> '{STOCK_BASIC_HISTORICAL_IDENTITY}'
+                       OR {STANDARD_TICKER} IS NOT NULL
+                       OR {ISOLATION_REASON} IS NULL
+                       OR {SNAPSHOT_DATE} IS NULL
+                       OR {CAPTURED_AT} IS NULL
+                    """
+                ).fetchone()[0]
+            )
+        finally:
+            connection.close()
+    except Exception as exc:
+        return CheckResult.failure(
+            "historical_identity_quality",
+            "STOCK_INFO_HISTORICAL_QUALITY_FAILED",
+            "stock_info_historical_identity quality could not be checked",
+            exception=type(exc).__name__,
+        )
+    if invalid:
+        return CheckResult.failure(
+            "historical_identity_quality",
+            "STOCK_INFO_HISTORICAL_QUALITY_INVALID",
+            "stock_info_historical_identity contains invalid identity rows",
+            invalid_rows=invalid,
+        )
+    return CheckResult.success("historical_identity_quality", invalid_rows=0)
+
+
 def execute_stock_basic_update(context: PipelineRunContext) -> BusinessExecution:
     started = time.monotonic()
     frames: list[pd.DataFrame] = []
@@ -368,11 +515,27 @@ def execute_stock_basic_update(context: PipelineRunContext) -> BusinessExecution
         raise ContractError("STOCK_BASIC_API_FAILED", type(exc).__name__) from exc
 
     fetched_at = time.monotonic()
+    target_date = context.target_window.target_date
+    if target_date is None:
+        raise ContractError("STOCK_BASIC_TARGET_DATE_MISSING", "stock_basic requires a snapshot date")
     normalized = _normalize_provider_frames(frames)
-    prepared = _prepare_frame(normalized)
+    historical_mask = normalized[IDENTITY_TYPE].eq(STOCK_BASIC_HISTORICAL_IDENTITY)
+    standard_source = normalized.loc[~historical_mask].copy()
+    historical_source = normalized.loc[historical_mask].copy()
+    captured_at = pd.Timestamp.now(tz=CHINA_TZ).tz_localize(None)
+    prepared = _prepare_frame(standard_source, captured_at)
+    prepared_historical = _prepare_historical_identity_frame(
+        historical_source,
+        target_date,
+        captured_at,
+    )
     normalized_at = time.monotonic()
     try:
-        rows_written, database_seconds = _replace_frame(context, prepared)
+        standard_rows_written, historical_rows_written, database_seconds = _replace_frames(
+            context,
+            prepared,
+            prepared_historical,
+        )
     except ExecutionControlError:
         raise
     except ContractError:
@@ -383,8 +546,8 @@ def execute_stock_basic_update(context: PipelineRunContext) -> BusinessExecution
     return BusinessExecution.success(
         metrics=PipelineMetrics(
             rows_read=rows_read,
-            rows_written=rows_written,
-            assets_processed=rows_written,
+            rows_written=standard_rows_written + historical_rows_written,
+            assets_processed=standard_rows_written + historical_rows_written,
             dates_processed=1,
             database_write_seconds=database_seconds,
             stage_durations_seconds={
@@ -398,14 +561,34 @@ def execute_stock_basic_update(context: PipelineRunContext) -> BusinessExecution
         outputs=(
             OutputResult(
                 output_id=STOCK_INFO.name,
-                rows_written=rows_written,
+                rows_written=standard_rows_written,
                 location="settings.paths.duckdb_path",
                 completed=True,
                 detail={
                     "list_statuses": list(STOCK_BASIC_LIST_STATUSES),
                     "exchanges": list(STOCK_BASIC_EXCHANGES),
                     "provider_fields": list(STOCK_BASIC_REQUIRED_FIELDS),
+                    "standard_rows": standard_rows_written,
+                    "historical_identity_rows": historical_rows_written,
                     "snapshot_semantics": "current-state full replacement",
+                },
+            ),
+            OutputResult(
+                output_id=STOCK_INFO_HISTORICAL_IDENTITY.name,
+                rows_written=historical_rows_written,
+                location="settings.paths.duckdb_path",
+                completed=True,
+                detail={
+                    "provider": STOCK_BASIC_PROVIDER,
+                    "identity_type": STOCK_BASIC_HISTORICAL_IDENTITY,
+                    "isolation_reason": STOCK_BASIC_HISTORICAL_REASON,
+                    "standard_rows": standard_rows_written,
+                    "historical_identity_rows": historical_rows_written,
+                    "snapshot_date": target_date.isoformat(),
+                    "provider_identity_samples": [
+                        str(value)
+                        for value in historical_source[TS_CODE].head(10).tolist()
+                    ],
                 },
             ),
         ),
@@ -418,9 +601,11 @@ STOCK_BASIC_UPDATE = register_pipeline(
         name="Tushare stock basic current snapshot",
         description=(
             "Synchronizes the complete current Tushare stock_basic fields into stock_info "
-            "and replaces the local current-state snapshot without retaining history."
+            "and replaces the local current-state snapshot without retaining history; "
+            "non-standard provider identities marked D are retained in the historical "
+            "identity companion table instead of being forced into the standard code contract."
         ),
-        contract_version="1.0.0",
+        contract_version="1.1.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_stock_basic_update,
         target_date_policy=STOCK_BASIC_TARGET_DATE_POLICY,
@@ -465,28 +650,44 @@ STOCK_BASIC_UPDATE = register_pipeline(
                 quality_checks=(_stock_info_key_quality, _stock_info_compatibility_quality),
                 allow_empty=False,
             ),
+            OutputContract(
+                output_id=STOCK_INFO_HISTORICAL_IDENTITY.name,
+                physical_resource=QUANT_DB_RESOURCE,
+                location="settings.paths.duckdb_path",
+                object_name=STOCK_INFO_HISTORICAL_IDENTITY.name,
+                unique_key=STOCK_INFO_HISTORICAL_IDENTITY.primary_key,
+                write_mode=WriteMode.FULL_REBUILD,
+                target_date_semantics="current provider historical identities observed during this execution",
+                completion=CompletionContract(
+                    marker="stock_info_historical_identity is queryable after the current replacement",
+                    error_code="STOCK_INFO_HISTORICAL_COMPLETION_MISSING",
+                    checker=_historical_identity_completion,
+                ),
+                quality_checks=(_historical_identity_quality,),
+                allow_empty=True,
+            ),
         ),
         dependencies=(),
         resource_locks=(QUANT_DB_WRITER,),
         idempotency=IdempotencyContract(
-            idempotency_key="stock_info.ticker",
-            repeat_run_semantics="repeated provider snapshots replace the same current-state table without retaining history",
-            existing_target_handling="the existing stock_info rows are replaced only after the complete validated provider snapshot is available",
-            failure_recovery="a failed fetch or write leaves the previous committed stock_info snapshot available; rerun after correcting the provider or schema failure",
+            idempotency_key="stock_info.ticker; stock_info_historical_identity.provider+ts_code",
+            repeat_run_semantics="repeated provider snapshots replace both current-state tables without retaining history",
+            existing_target_handling="the existing standard and historical-identity rows are replaced only after the complete validated provider snapshot is available",
+            failure_recovery="a failed fetch, classification, or write leaves the previous committed standard and historical-identity snapshots available; rerun after correcting the provider or schema failure",
             uses_staging=False,
-            atomic_replace_boundary="one transaction deletes and replaces all current stock_info rows",
+            atomic_replace_boundary="one transaction deletes and replaces stock_info and stock_info_historical_identity",
         ),
         transaction=TransactionContract(
             mode=TransactionMode.DATABASE_TRANSACTION,
-            boundary="validated complete stock_basic snapshot for all configured statuses and exchanges",
-            failure_visibility="a failed transaction rolls back the full replacement and preserves the previous snapshot",
+            boundary="validated complete stock_basic snapshot, including standard and historical identity classification, for all configured statuses and exchanges",
+            failure_visibility="a failed transaction rolls back both replacements and preserves the previous standard and historical-identity snapshots",
         ),
         execution=ExecutionPolicy(overlap_policy=OverlapPolicy.FORBID, max_retries=1),
         performance=PerformanceBudget(
             normal_budget_seconds=180.0,
             warning_threshold_seconds=120.0,
             hard_timeout_seconds=600,
-            benchmark_scope="end-to-end: twelve partitioned stock_basic requests and one full stock_info replacement",
+            benchmark_scope="end-to-end: twelve partitioned stock_basic requests and one atomic replacement of the standard and historical-identity snapshots",
             baseline_source="internal:stock_basic_update_v1; offline temporary-DuckDB acceptance tests",
         ),
         manual_execution_allowed=True,

@@ -20,6 +20,7 @@ import pandas as pd
 
 from qrp_atlas.contracts import (
     ASSET_ID,
+    CLOSE,
     DIAGNOSTICS,
     IS_TRADING_DAY,
     LISTING_TRADING_DAY_NUMBER,
@@ -640,3 +641,39 @@ def run_daily(
             output.close()
         if completed and not keep_staging and staging_dir.exists():
             shutil.rmtree(staging_dir)
+
+
+def check_readiness(path: Path, trade_date: date) -> dict[str, object]:
+    """Validate the source facts required for one daily System B state run."""
+    connection = open_database(path, read_only=True)
+    try:
+        validate_source_schema(connection)
+        open_row = connection.execute(
+            "SELECT is_open FROM trading_calendar WHERE trade_date = ?", [trade_date]
+        ).fetchone()
+        if not open_row or not bool(open_row[0]):
+            raise SystemBProductionError("TARGET_NOT_MARKET_TRADING_DAY", str(trade_date))
+        frame = execute_standard_input(
+            connection,
+            end_date=trade_date,
+            target_date=trade_date,
+        ).fetchdf()
+        if frame.empty:
+            raise SystemBProductionError("EMPTY_DAILY_UNIVERSE", str(trade_date))
+        target = frame.loc[frame[TRADE_DATE].dt.date == trade_date].copy()
+        unresolved = target.loc[target[MARKET_FACT_STATUS] == UNRESOLVED_MISSING]
+        missing_close = int((target[IS_TRADING_DAY] & target[CLOSE].isna()).sum())
+        if missing_close:
+            raise SystemBProductionError("MISSING_FORWARD_ADJUSTED_CLOSE", str(missing_close))
+        return {
+            "status": "READY",
+            "trade_date": trade_date.isoformat(),
+            "asset_count": int(target[ASSET_ID].nunique()),
+            "row_count": len(target),
+            "trading_asset_count": int(target[IS_TRADING_DAY].sum()),
+            "suspended_asset_count": int((target[MARKET_FACT_STATUS] == EXPLICIT_NON_TRADING).sum()),
+            "unresolved_asset_count": len(unresolved),
+            "price_adjustment": "FORWARD_ADJUSTED",
+        }
+    finally:
+        connection.close()

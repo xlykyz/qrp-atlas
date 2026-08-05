@@ -1,8 +1,7 @@
 """Formal Tushare contract for the index dictionary snapshot.
 
-``index_basic`` is a manually executable reference-data Pipeline.  It is part of
-the admitted contract catalog, but deployment schedules remain a separate
-selection and are intentionally unchanged by this module.
+``index_basic`` is a reference-data Pipeline whose validated provider response
+replaces the previous dictionary in one transaction.
 """
 
 from __future__ import annotations
@@ -244,7 +243,7 @@ def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return quick_validate(prepared, INDEX_BASIC.name, allow_extra=False)
 
 
-def _upsert_frame(context: PipelineRunContext, frame: pd.DataFrame) -> tuple[int, float]:
+def _replace_frame(context: PipelineRunContext, frame: pd.DataFrame) -> tuple[int, float]:
     started = time.monotonic()
     connection = duckdb.connect(str(context.settings.paths.duckdb_path))
     try:
@@ -253,8 +252,9 @@ def _upsert_frame(context: PipelineRunContext, frame: pd.DataFrame) -> tuple[int
         columns = [column for column in INDEX_BASIC.column_names() if column != CREATED_AT]
         connection.register("_index_basic_rows", frame)
         try:
+            connection.execute(f"DELETE FROM {INDEX_BASIC.name}")
             connection.execute(
-                f"INSERT OR REPLACE INTO {INDEX_BASIC.name} ({', '.join(columns)}) "
+                f"INSERT INTO {INDEX_BASIC.name} ({', '.join(columns)}) "
                 f"SELECT {', '.join(columns)} FROM _index_basic_rows"
             )
         finally:
@@ -303,7 +303,7 @@ def execute_index_basic_update(context: PipelineRunContext) -> BusinessExecution
     prepared = _prepare_frame(normalized)
     normalized_at = time.monotonic()
     try:
-        rows_written, database_seconds = _upsert_frame(context, prepared)
+        rows_written, database_seconds = _replace_frame(context, prepared)
     except Exception as exc:
         raise ContractError("INDEX_BASIC_WRITE_FAILED", type(exc).__name__) from exc
     return BusinessExecution.success(
@@ -337,8 +337,8 @@ INDEX_BASIC_UPDATE = register_pipeline(
     PipelineContract(
         pipeline_id="index_basic_update",
         name="Tushare index basic dictionary",
-        description="Synchronizes the Tushare index_basic dictionary for the requested provider markets into index_basic.",
-        contract_version="1.0.0",
+        description="Rebuilds the Tushare index_basic dictionary for the requested provider markets into index_basic.",
+        contract_version="1.1.0",
         kind=PipelineKind.ATOMIC,
         executor=execute_index_basic_update,
         target_date_policy=INDEX_BASIC_TARGET_DATE_POLICY,
@@ -376,7 +376,7 @@ INDEX_BASIC_UPDATE = register_pipeline(
                 location="settings.paths.duckdb_path",
                 object_name=INDEX_BASIC.name,
                 unique_key=INDEX_BASIC.primary_key,
-                write_mode=WriteMode.UPSERT,
+                write_mode=WriteMode.FULL_REBUILD,
                 target_date_semantics="reference-data snapshot committed during this execution",
                 completion=CompletionContract(
                     marker="index_basic contains queryable index definitions",
@@ -391,11 +391,11 @@ INDEX_BASIC_UPDATE = register_pipeline(
         resource_locks=(QUANT_DB_WRITER,),
         idempotency=IdempotencyContract(
             idempotency_key="index_basic.index_code",
-            repeat_run_semantics="repeated snapshots upsert the same index definitions without duplicating primary keys",
-            existing_target_handling="existing definitions are replaced by the latest validated provider values",
+            repeat_run_semantics="repeated snapshots replace the same validated dictionary without duplicating primary keys",
+            existing_target_handling="the complete existing dictionary is replaced by the latest validated provider snapshot",
             failure_recovery="rerun the same manual snapshot after correcting the provider or schema failure",
             uses_staging=False,
-            atomic_replace_boundary="all validated dictionary rows are committed in one quant.db transaction",
+            atomic_replace_boundary="the existing dictionary is deleted and all validated rows are committed in one quant.db transaction",
         ),
         transaction=TransactionContract(
             mode=TransactionMode.DATABASE_TRANSACTION,

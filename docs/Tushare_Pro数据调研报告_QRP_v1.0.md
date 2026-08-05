@@ -30,7 +30,8 @@
 | `daily_market_snapshot` | 日线 OHLCV、涨跌幅、量额 | `pro.daily`（主）/ 新浪兜底 |
 | `daily_basic` | 估值、市值、换手、股本 | `pro.daily_basic` |
 | `adj_factor_changes` | 复权因子 | `pro.adj_factor` |
-| `stock_info` | `stock_basic` 完整当前快照及兼容字段 | `pro.stock_basic` |
+| `stock_info` | `stock_basic` 标准代码当前快照及兼容字段 | `pro.stock_basic` |
+| `stock_info_historical_identity` | `stock_basic` 非标准历史 provider 身份当前 companion 快照 | `pro.stock_basic` |
 | `trading_calendar` | 交易日 | 已有契约；Tushare 有 `trade_cal` |
 | `index_daily` | 指数日线 | 契约已有；Tushare 有 `index_daily` |
 | `zt_pool` / `dt_pool` | 涨跌停池 | 当前更偏东财/业务口径 |
@@ -98,7 +99,7 @@
 
 | 接口 | 文档 | 最低积分（文档） | 限量/更新 | QRP 映射 |
 |---|---|---:|---|---|
-| `stock_basic` | [doc_id=25](https://tushare.pro/document/2?doc_id=25) | 2000 起 | 单次最多 6000 行，按状态和交易所分区 | `stock_info` |
+| `stock_basic` | [doc_id=25](https://tushare.pro/document/2?doc_id=25) | 2000 起 | 单次最多 6000 行，按状态和交易所分区 | `stock_info` + `stock_info_historical_identity` |
 | `stock_company` | [doc_id=112](https://tushare.pro/document/2?doc_id=112) | 120 | 单次约 4500 | 公司静态信息增强 |
 | `namechange` | [doc_id=100](https://tushare.pro/document/2?doc_id=100) | 低门槛基础接口 | 历史曾用名 | 名称历史 / ST 名称追踪辅助 |
 | `trade_cal` | [doc_id=26](https://tushare.pro/document/2?doc_id=26) | 2000 | 交易所日历 | `trading_calendar` |

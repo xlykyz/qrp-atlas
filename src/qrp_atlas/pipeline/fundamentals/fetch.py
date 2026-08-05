@@ -152,6 +152,48 @@ def fetch_financial_by_period(
     return df.reset_index(drop=True)
 
 
+def fetch_financial_by_ann_date(
+    table: str,
+    ann_date: str,
+    *,
+    client=None,
+    tickers: Sequence[str] | None = None,
+    execution_control: ExecutionControl | None = None,
+    report: FinancialFetchReport | None = None,
+    settings=None,
+) -> pd.DataFrame:
+    """Fetch one market-wide announcement date via a VIP financial API.
+
+    ``ann_date`` is the provider query scope.  The returned ``f_ann_date``
+    remains an independent PIT availability field and is never substituted
+    into the provider request.
+    """
+    _check(execution_control)
+    api_name = API_BY_TABLE[table]
+    ann_date = _normalize_period(ann_date)
+    pro = client or get_tushare_pro(settings=settings, execution_control=execution_control)
+    method = getattr(pro, api_name)
+    df = _call_with_retry(
+        method,
+        ann_date=ann_date,
+        execution_control=execution_control,
+        report=report,
+    )
+    _check(execution_control)
+    if df is None or df.empty:
+        if report is not None:
+            report.batches += 1
+        return pd.DataFrame()
+    if tickers:
+        ticker_set = set(tickers)
+        df = df[df["ts_code"].isin(ticker_set)].copy()
+    if report is not None:
+        report.batches += 1
+        report.rows_read += len(df)
+    _check(execution_control)
+    return df.reset_index(drop=True)
+
+
 def fetch_financial_by_tickers(
     table: str,
     tickers: Iterable[str],
@@ -211,6 +253,7 @@ def fetch_financial(
     table: str,
     *,
     periods: Sequence[str] | None = None,
+    ann_dates: Sequence[str] | None = None,
     tickers: Sequence[str] | None = None,
     mode: str = "period",
     start_date: str | None = None,
@@ -225,6 +268,7 @@ def fetch_financial(
     mode:
       - period: VIP by report period (default, preferred for bulk)
       - ticker: non-VIP by ticker list
+      - ann_date: VIP by announcement date (daily incremental scope)
     """
     if mode == "period":
         if not periods:
@@ -257,4 +301,21 @@ def fetch_financial(
             report=report,
             settings=settings,
         )
+    if mode == "ann_date":
+        if not ann_dates:
+            raise ValueError("ann_dates is required when mode='ann_date'")
+        frames = [
+            fetch_financial_by_ann_date(
+                table,
+                ann_date,
+                client=client,
+                tickers=tickers,
+                execution_control=execution_control,
+                report=report,
+                settings=settings,
+            )
+            for ann_date in ann_dates
+        ]
+        frames = [frame for frame in frames if frame is not None and not frame.empty]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     raise ValueError(f"unsupported mode: {mode}")
