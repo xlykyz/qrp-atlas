@@ -15,3 +15,14 @@ CREATE TABLE IF NOT EXISTS system_b_episode_observation (
   rule_version VARCHAR NOT NULL, created_at TIMESTAMP NOT NULL,
   PRIMARY KEY (trade_date, asset_id, rule_version)
 );
+CREATE TABLE IF NOT EXISTS system_b_episode_segment (
+  segment_id VARCHAR PRIMARY KEY, episode_id VARCHAR NOT NULL, asset_id VARCHAR NOT NULL,
+  segment_no INTEGER NOT NULL, segment_state VARCHAR NOT NULL, active_sprint_no INTEGER,
+  anchor_date DATE NOT NULL, start_date DATE NOT NULL, end_date DATE NOT NULL,
+  trading_days INTEGER NOT NULL, anchor_close DOUBLE NOT NULL, start_close DOUBLE NOT NULL,
+  end_close DOUBLE NOT NULL, segment_return DOUBLE NOT NULL, peak_close DOUBLE NOT NULL,
+  peak_date DATE NOT NULL, peak_return DOUBLE NOT NULL, max_drawdown DOUBLE NOT NULL,
+  is_open BOOLEAN NOT NULL, source_episode_rule_version VARCHAR NOT NULL,
+  segment_version VARCHAR NOT NULL, created_run_id VARCHAR NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
