@@ -1,5 +1,5 @@
 -- 003_stock_collections_and_m4.sql
--- DDL for StockCollection, Theme, Custom Theme Index and M4 observations.
+-- StockCollection, Theme, PIT Membership, Theme Custom Index, Trend/Episode, and M4 Observation schemas.
 
 CREATE TABLE IF NOT EXISTS stock_collection (
     collection_id VARCHAR NOT NULL,
@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS stock_collection (
 CREATE TABLE IF NOT EXISTS theme (
     theme_id VARCHAR NOT NULL,
     collection_id VARCHAR NOT NULL,
-    canonical_name VARCHAR NOT NULL,
+    theme_name VARCHAR NOT NULL,
+    namespace VARCHAR NOT NULL,
+    source_key VARCHAR NOT NULL,
     status VARCHAR NOT NULL,
     effective_from DATE NOT NULL,
     effective_to DATE,
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS theme_membership_history (
     theme_id VARCHAR NOT NULL,
     collection_id VARCHAR NOT NULL,
     asset_id VARCHAR NOT NULL,
+    weight DOUBLE,
     effective_from DATE NOT NULL,
     effective_to DATE,
     available_trade_date DATE NOT NULL,
@@ -60,6 +63,8 @@ CREATE TABLE IF NOT EXISTS theme_custom_index_daily (
     effective_member_count BIGINT NOT NULL,
     total_member_count BIGINT NOT NULL,
     calculation_version VARCHAR NOT NULL,
+    production_run_id VARCHAR,
+    input_snapshot_id VARCHAR,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (theme_id, trade_date)
 );
@@ -77,6 +82,8 @@ CREATE TABLE IF NOT EXISTS theme_custom_index_state (
     is_above_or_equal_ma5 BOOLEAN,
     state_changed BOOLEAN,
     rule_version VARCHAR NOT NULL,
+    production_run_id VARCHAR,
+    input_snapshot_id VARCHAR,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (theme_id, trade_date)
 );
@@ -92,6 +99,8 @@ CREATE TABLE IF NOT EXISTS theme_custom_index_episode (
     ma5_reentry_count BIGINT NOT NULL,
     episode_return DOUBLE,
     rule_version VARCHAR NOT NULL,
+    production_run_id VARCHAR,
+    input_snapshot_id VARCHAR,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (episode_id)
 );
@@ -112,6 +121,8 @@ CREATE TABLE IF NOT EXISTS theme_m4_observation (
     custom_index_episode_id VARCHAR,
     qualification_status VARCHAR NOT NULL,
     calculation_version VARCHAR NOT NULL,
+    production_run_id VARCHAR,
+    input_snapshot_id VARCHAR,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (theme_id, trade_date)
 );

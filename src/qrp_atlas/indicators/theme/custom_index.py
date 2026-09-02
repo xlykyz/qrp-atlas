@@ -1,50 +1,41 @@
-"""Pure calculation of custom Theme equal-weight index from effective member returns."""
+"""Pure calculation of custom Theme Equal-Weight Index with strict missing input semantics."""
 
 from __future__ import annotations
 
+import math
 import numpy as np
 import pandas as pd
 
-from qrp_atlas.contracts import (
-    ASSET_ID,
+from qrp_atlas.contracts import ASSET_ID, TRADE_DATE
+from qrp_atlas.contracts.m4 import (
     BASE_LEVEL,
-    CALCULATION_VERSION,
-    COLLECTION_ID,
     DEFAULT_BASE_LEVEL,
     EFFECTIVE_MEMBER_COUNT,
     INDEX_LEVEL,
     IS_M4_EFFECTIVE_MEMBER,
-    PCT_CHANGE,
-    THEME_CUSTOM_INDEX_VERSION,
     THEME_DAILY_RETURN,
-    THEME_ID,
     TOTAL_MEMBER_COUNT,
-    TRADE_DATE,
 )
-
-
-class ThemeIndexCalculationError(ValueError):
-    """Raised when theme index calculation inputs are invalid."""
+from qrp_atlas.contracts.stock_collection import COLLECTION_ID
 
 
 def calculate_theme_equal_weight_index(
     effective_members: pd.DataFrame,
-    market_snapshot: pd.DataFrame,
+    market_returns: pd.DataFrame,
     base_level: float = DEFAULT_BASE_LEVEL,
-    calculation_version: str = THEME_CUSTOM_INDEX_VERSION,
+    previous_cumulative_index_level: float | None = None,
 ) -> pd.DataFrame:
-    """Calculate continuous Theme equal-weight index from effective members' daily returns.
+    """Calculate arithmetic mean equal-weight returns and continuous compounding index levels.
 
-    Rules:
-    1. Only rows where is_m4_effective_member == True are included in the return average.
-    2. theme_daily_return = arithmetic mean(member daily returns). Daily return from pct_change is expressed as ratio (e.g. 0.05 for +5%).
-    3. If effective_member_count == 0: theme_daily_return = np.nan (NOT 0).
-    4. Index level is compounded chronologically: index_level_t = index_level_{t-1} * (1 + theme_daily_return_t).
+    Strict Missing Input Policy:
+    1. If effective_member_count == 0, theme_daily_return is NaN.
+    2. If effective_member_count > 0, ALL effective members MUST have valid non-null returns.
+       If any member return is missing, the entire Theme's daily return is NaN (unresolved).
+    3. On NaN return days, index_level is NaN (gap). No carry-forward to fabricate flat return.
     """
     if effective_members.empty:
         return pd.DataFrame(
             columns=[
-                THEME_ID,
                 COLLECTION_ID,
                 TRADE_DATE,
                 THEME_DAILY_RETURN,
@@ -52,82 +43,81 @@ def calculate_theme_equal_weight_index(
                 BASE_LEVEL,
                 EFFECTIVE_MEMBER_COUNT,
                 TOTAL_MEMBER_COUNT,
-                CALCULATION_VERSION,
             ]
         )
 
-    # Prepare return data: support close/pre_close or pct_change
-    mkt = market_snapshot.copy()
-    mkt[TRADE_DATE] = pd.to_datetime(mkt[TRADE_DATE]).dt.date
+    # Prepare market returns: asset_id, trade_date, daily_return (in ratio, e.g. 0.05 for +5%)
+    # Support either 'daily_return' or 'pct_change' (where pct_change in percent is converted to ratio if needed)
+    m_df = market_returns.copy()
+    if "daily_return" in m_df.columns:
+        m_df["ret"] = pd.to_numeric(m_df["daily_return"], errors="coerce")
+    elif "pct_change" in m_df.columns:
+        # daily_market_snapshot pct_change is percent (e.g. 5.0 -> 0.05)
+        m_df["ret"] = pd.to_numeric(m_df["pct_change"], errors="coerce") / 100.0
+    else:
+        raise ValueError("market_returns must contain 'daily_return' or 'pct_change'")
 
-    if "return_ratio" not in mkt.columns:
-        if PCT_CHANGE in mkt.columns:
-            # If pct_change is given as percentage (e.g., 5.0 for 5%), convert if > 1.0 on average or keep standard ratio
-            # In QRP snapshot, pct_change is standard percentage (e.g. 5.0) or ratio? Let's check close / pre_close if available
-            if "close" in mkt.columns and "pre_close" in mkt.columns:
-                mkt["return_ratio"] = (mkt["close"] - mkt["pre_close"]) / mkt["pre_close"]
-            else:
-                mkt["return_ratio"] = mkt[PCT_CHANGE] / 100.0 if (mkt[PCT_CHANGE].abs().max() > 1.5) else mkt[PCT_CHANGE]
-        elif "close" in mkt.columns and "pre_close" in mkt.columns:
-            mkt["return_ratio"] = (mkt["close"] - mkt["pre_close"]) / mkt["pre_close"]
+    # Group by collection and trade_date
+    results = []
+    for (coll_id, trade_date), group in effective_members.groupby(
+        [COLLECTION_ID, TRADE_DATE], sort=True
+    ):
+        total_count = len(group)
+        eff_group = group[group[IS_M4_EFFECTIVE_MEMBER].astype(bool)]
+        eff_count = len(eff_group)
+
+        if eff_count == 0:
+            theme_return = np.nan
         else:
-            raise ThemeIndexCalculationError("market_snapshot must contain return_ratio, pct_change, or close + pre_close")
-
-    # Match asset column (ticker or asset_id)
-    asset_col = "ticker" if "ticker" in mkt.columns else ASSET_ID
-    mkt[ASSET_ID] = mkt[asset_col]
-
-    members = effective_members.copy()
-    members[TRADE_DATE] = pd.to_datetime(members[TRADE_DATE]).dt.date
-
-    # Merge returns
-    merged = members.merge(
-        mkt[[ASSET_ID, TRADE_DATE, "return_ratio"]],
-        on=[ASSET_ID, TRADE_DATE],
-        how="left",
-    )
-
-    results: list[dict[str, object]] = []
-
-    for (theme_id, collection_id), group in merged.groupby([THEME_ID, COLLECTION_ID], sort=False):
-        dates = sorted(group[TRADE_DATE].unique())
-        current_level = float(base_level)
-
-        for t_date in dates:
-            day_group = group[group[TRADE_DATE] == t_date]
-            total_count = len(day_group)
-            effective_group = day_group[day_group[IS_M4_EFFECTIVE_MEMBER] == True]
-            effective_count = len(effective_group)
-
-            if effective_count == 0:
-                daily_return = np.nan
-                # Level remains unchanged or becomes NaN? Continuous index compounds on available returns
-                index_val = current_level
-            else:
-                valid_returns = effective_group["return_ratio"].dropna()
-                if valid_returns.empty:
-                    daily_return = np.nan
-                    index_val = current_level
-                else:
-                    daily_return = float(valid_returns.mean())
-                    current_level = current_level * (1.0 + daily_return)
-                    index_val = current_level
-
-            results.append(
-                {
-                    THEME_ID: theme_id,
-                    COLLECTION_ID: collection_id,
-                    TRADE_DATE: t_date,
-                    THEME_DAILY_RETURN: daily_return if not np.isnan(daily_return) else None,
-                    INDEX_LEVEL: index_val,
-                    BASE_LEVEL: float(base_level),
-                    EFFECTIVE_MEMBER_COUNT: int(effective_count),
-                    TOTAL_MEMBER_COUNT: int(total_count),
-                    CALCULATION_VERSION: calculation_version,
-                }
+            # Join with market returns
+            merged = eff_group.merge(
+                m_df[[ASSET_ID, TRADE_DATE, "ret"]],
+                on=[ASSET_ID, TRADE_DATE],
+                how="left",
             )
+            valid_returns = merged["ret"].dropna()
+            # Strict completeness: all effective members must have a valid return
+            if len(valid_returns) == eff_count:
+                theme_return = float(valid_returns.mean())
+            else:
+                # Incomplete returns -> fail closed
+                theme_return = np.nan
 
-    res_df = pd.DataFrame(results)
-    if res_df.empty:
-        return res_df
-    return res_df.sort_values([THEME_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
+        results.append(
+            {
+                COLLECTION_ID: coll_id,
+                TRADE_DATE: trade_date,
+                THEME_DAILY_RETURN: theme_return,
+                BASE_LEVEL: base_level,
+                EFFECTIVE_MEMBER_COUNT: eff_count,
+                TOTAL_MEMBER_COUNT: total_count,
+            }
+        )
+
+    out = pd.DataFrame(results).sort_values([COLLECTION_ID, TRADE_DATE], kind="mergesort").reset_index(drop=True)
+
+    # Calculate continuous compounded index level per collection
+    index_levels = []
+    for coll_id, coll_df in out.groupby(COLLECTION_ID, sort=False):
+        current_level = previous_cumulative_index_level if previous_cumulative_index_level is not None else base_level
+        levels = []
+        for ret in coll_df[THEME_DAILY_RETURN]:
+            if pd.isna(ret) or not math.isfinite(ret):
+                levels.append(np.nan)
+            else:
+                current_level = current_level * (1.0 + ret)
+                levels.append(current_level)
+        index_levels.extend(levels)
+
+    out[INDEX_LEVEL] = index_levels
+    return out[
+        [
+            COLLECTION_ID,
+            TRADE_DATE,
+            THEME_DAILY_RETURN,
+            INDEX_LEVEL,
+            BASE_LEVEL,
+            EFFECTIVE_MEMBER_COUNT,
+            TOTAL_MEMBER_COUNT,
+        ]
+    ]

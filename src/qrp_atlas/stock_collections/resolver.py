@@ -1,113 +1,135 @@
-"""StockCollection Resolver orchestrating adapters and enforcing PIT access controls."""
+"""Unified StockCollection resolver executing PIT resolution, reverse lookups, and audit."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
-from typing import Sequence
+from typing import Any
 
 import duckdb
+import pandas as pd
 
-from qrp_atlas.contracts.stock_collection import (
-    CollectionScope,
-    CollectionType,
-)
-from qrp_atlas.stock_collections.adapters.theme import ThemeAdapter
-from qrp_atlas.stock_collections.models import (
-    CollectionVersionContext,
+from qrp_atlas.contracts.stock_collection import CollectionScope, CollectionType
+
+from .adapters.theme import ThemeAdapter
+from .models import (
     MembershipExplanation,
     ResolvedMember,
     StockCollectionError,
-    StockCollectionErrorCode,
     StockCollectionQueryContext,
     StockCollectionRecord,
 )
-from qrp_atlas.stock_collections.repository import StockCollectionRepository
+from .repository import StockCollectionRepository
 
 
 class StockCollectionResolver:
-    """Unified resolver for resolving stock collection identities and PIT memberships."""
+    """Entry point for StockCollection resolution, PIT verification, and explainability."""
 
-    def __init__(self, connection: duckdb.DuckDBPyConnection) -> None:
-        self.con = connection
-        self.repo = StockCollectionRepository(connection)
-        self.theme_adapter = ThemeAdapter(connection)
+    def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
+        self.con = con
+        self.repo = StockCollectionRepository(con)
+        self.theme_adapter = ThemeAdapter(con)
 
     def resolve_collection(
         self,
         collection_id: str,
         context: StockCollectionQueryContext,
     ) -> StockCollectionRecord:
-        """Resolve and validate the StockCollection record as of context.knowledge_date."""
-        record = self.repo.get_collection_record(collection_id, context.knowledge_date)
-        if record is None:
+        """Resolve collection metadata as of (as_of_date, knowledge_date)."""
+        revisions = self.repo.get_collection_revisions(collection_id)
+        if not revisions:
             raise StockCollectionError(
-                StockCollectionErrorCode.COLLECTION_NOT_FOUND,
-                f"Collection '{collection_id}' not found or not visible as of knowledge_date {context.knowledge_date}",
+                "COLLECTION_NOT_FOUND", f"Collection {collection_id} does not exist"
             )
 
-        # Check scope permissions
-        if record.collection_scope not in context.allowed_scopes:
+        visible = [r for r in revisions if r.available_trade_date <= context.knowledge_date]
+        if not visible:
             raise StockCollectionError(
-                StockCollectionErrorCode.COLLECTION_SCOPE_NOT_ALLOWED,
-                f"Collection scope '{record.collection_scope}' is not in allowed scopes {context.allowed_scopes}",
+                "COLLECTION_NOT_AVAILABLE_AS_OF",
+                f"Collection {collection_id} is not known as of knowledge_date {context.knowledge_date}",
             )
 
-        # Check collection availability vs as_of_date
-        if record.available_trade_date > context.as_of_date:
+        latest = visible[-1]
+        if latest.collection_scope not in context.allowed_scopes:
             raise StockCollectionError(
-                StockCollectionErrorCode.COLLECTION_NOT_AVAILABLE_AS_OF,
-                f"Collection '{collection_id}' is only available starting {record.available_trade_date}, requested as_of_date is {context.as_of_date}",
+                "SCOPE_NOT_ALLOWED",
+                f"Collection scope {latest.collection_scope} not in allowed scopes {context.allowed_scopes}",
             )
 
-        return record
+        if latest.collection_type != CollectionType.THEME:
+            raise StockCollectionError(
+                "UNSUPPORTED_COLLECTION_TYPE",
+                f"Collection type {latest.collection_type} is not supported in v1.1 Task 04-A",
+            )
+
+        return latest
 
     def resolve_members(
         self,
         collection_id: str,
-        as_of_date: date,
-        knowledge_date: date,
-        version_context: CollectionVersionContext | None = None,
-        allowed_scopes: tuple[CollectionScope | str, ...] = (CollectionScope.CANONICAL,),
-    ) -> Sequence[ResolvedMember]:
-        """Resolve valid PIT members of a collection."""
-        ctx = StockCollectionQueryContext(
-            as_of_date=as_of_date,
-            knowledge_date=knowledge_date,
-            version_context=version_context or CollectionVersionContext(),
-            allowed_scopes=allowed_scopes,
+        context: StockCollectionQueryContext,
+    ) -> list[ResolvedMember]:
+        """Resolve point-in-time members for a collection."""
+        coll = self.resolve_collection(collection_id, context)
+        if coll.collection_type == CollectionType.THEME:
+            return self.theme_adapter.resolve_members(collection_id, context)
+        raise StockCollectionError(
+            "UNSUPPORTED_COLLECTION_TYPE", f"Unsupported type {coll.collection_type}"
         )
 
-        collection_record = self.resolve_collection(collection_id, ctx)
-
-        if collection_record.collection_type == CollectionType.THEME:
-            return self.theme_adapter.resolve_members(collection_id, ctx)
-        else:
-            raise StockCollectionError(
-                StockCollectionErrorCode.COLLECTION_ADAPTER_NOT_FOUND,
-                f"Collection type '{collection_record.collection_type}' is not supported in v1.1 Task 04-A",
+    def batch_resolve_members(
+        self,
+        collection_ids: Sequence[str],
+        trade_dates: Sequence[date],
+        knowledge_date: date,
+        allowed_scopes: tuple[str, ...] = ("CANONICAL",),
+    ) -> pd.DataFrame:
+        """Batch set-based vectorized resolution across multiple collections and dates."""
+        if not collection_ids or not trade_dates:
+            return pd.DataFrame(
+                columns=[
+                    "collection_id",
+                    "asset_id",
+                    "trade_date",
+                    "membership_id",
+                    "revision_id",
+                    "effective_from",
+                    "effective_to",
+                    "available_trade_date",
+                ]
             )
+
+        # Validate collections visibility
+        for coll_id in collection_ids:
+            ctx = StockCollectionQueryContext(
+                as_of_date=max(trade_dates),
+                knowledge_date=knowledge_date,
+                allowed_scopes=allowed_scopes,
+            )
+            self.resolve_collection(coll_id, ctx)
+
+        return self.theme_adapter.batch_resolve_members(
+            collection_ids, trade_dates, knowledge_date
+        )
 
     def resolve_asset_collections(
         self,
         asset_id: str,
         context: StockCollectionQueryContext,
-        collection_types: tuple[CollectionType | str, ...] | None = None,
-    ) -> Sequence[str]:
-        """Reverse-lookup: find all collections an asset belongs to as of as_of_date @ knowledge_date."""
+        collection_types: tuple[str, ...] | None = None,
+    ) -> list[ResolvedMember]:
+        """Reverse lookup: find all collections containing asset_id as of PIT context."""
         types = collection_types or (CollectionType.THEME,)
-        results: list[str] = []
-
+        results: list[ResolvedMember] = []
         if CollectionType.THEME in types:
-            theme_collections = self.theme_adapter.resolve_asset_collections(asset_id, context)
-            for cid in theme_collections:
+            theme_members = self.theme_adapter.reverse_lookup(asset_id, context)
+            for m in theme_members:
                 try:
-                    # Filter through scope and availability verification
-                    self.resolve_collection(cid, context)
-                    results.append(cid)
+                    self.resolve_collection(m.collection_id, context)
+                    results.append(m)
                 except StockCollectionError:
-                    pass
-
-        return tuple(results)
+                    continue
+        return results
 
     def explain_membership(
         self,
@@ -115,12 +137,6 @@ class StockCollectionResolver:
         asset_id: str,
         context: StockCollectionQueryContext,
     ) -> MembershipExplanation:
-        """Explain why an asset is or is not an active PIT member."""
-        collection_record = self.resolve_collection(collection_id, context)
-        if collection_record.collection_type == CollectionType.THEME:
-            return self.theme_adapter.explain_membership(collection_id, asset_id, context)
-        else:
-            raise StockCollectionError(
-                StockCollectionErrorCode.COLLECTION_ADAPTER_NOT_FOUND,
-                f"Collection type '{collection_record.collection_type}' is not supported in v1.1 Task 04-A",
-            )
+        """Explain PIT membership lifecycle and validity."""
+        self.resolve_collection(collection_id, context)
+        return self.theme_adapter.explain_membership(collection_id, asset_id, context)

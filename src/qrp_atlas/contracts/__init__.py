@@ -202,6 +202,7 @@ from .fields import (
     BOARD_AMOUNT,
     PE_RATIO,
     # ── 停复牌字段 ──
+    IS_SUSPENDED,
     SUSPEND_TIMING,
     SUSPEND_TYPE,
     TRADE_MARKET,
@@ -1031,6 +1032,7 @@ __all__ = [
     "BASE_LEVEL",
     "IS_THEME_MEMBER",
     "IS_M4_EFFECTIVE_MEMBER",
+    "IS_SUSPENDED",
     "EXCLUSION_REASON",
     "CUSTOM_INDEX_TREND_STATE",
     "CUSTOM_INDEX_TREND_RUN_DAYS",

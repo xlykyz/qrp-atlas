@@ -1,96 +1,83 @@
-"""Tests for M4 Raw Observations calculation, limit-up counts, and comparison universe ranking."""
-
-from __future__ import annotations
+"""Tests for M4 raw observation calculations, ranking, and universe fail-closed semantics."""
 
 from datetime import date
+import numpy as np
 import pandas as pd
 import pytest
 
-from qrp_atlas.contracts import (
-    ASSET_ID,
-    COLLECTION_ID,
+from qrp_atlas.contracts import ASSET_ID, IS_LIMIT_UP, TRADE_DATE
+from qrp_atlas.contracts.m4 import (
     COMPARISON_UNIVERSE_SIZE,
     COMPARISON_UNIVERSE_VERSION,
-    COMPARISON_UNIVERSE_VERSION_V1,
-    IS_LIMIT_UP,
     IS_M4_EFFECTIVE_MEMBER,
     QUALIFICATION_STATUS,
-    QUALIFICATION_STATUS_NOT_CONFIGURED,
     THEME_DAILY_RETURN,
-    THEME_ID,
     THEME_LIMIT_UP_COUNT,
     THEME_RETURN_RANK,
-    TRADE_DATE,
 )
-from qrp_atlas.indicators.m4.observations import calculate_m4_raw_observations
+from qrp_atlas.contracts.stock_collection import COLLECTION_ID
+from qrp_atlas.indicators.m4.observations import (
+    M4ObservationError,
+    calculate_m4_raw_observations,
+)
 
 
-def test_m4_raw_observations_returns_limit_up_and_rank():
-    """Verify M4 observations:
-    - theme_daily_return equals theme index return.
-    - theme_limit_up_count counts only closing limit-ups of effective members.
-    - theme_return_rank computes 1-based cross-sectional rank in universe.
-    - qualification_status is fixed to 'NOT_CONFIGURED'.
-    """
-    t_date = date(2026, 8, 10)
+def test_m4_observations_ranking_and_missing_universe_fail_closed():
+    d1 = date(2026, 8, 3)
 
-    # 2 Themes: TH_1 (return +8%), TH_2 (return +3%)
-    theme_indices = pd.DataFrame([
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", TRADE_DATE: t_date, THEME_DAILY_RETURN: 0.08, "effective_member_count": 2, "total_member_count": 2},
-        {THEME_ID: "TH_2", COLLECTION_ID: "COLL:THEME:QRP:TH_2", TRADE_DATE: t_date, THEME_DAILY_RETURN: 0.03, "effective_member_count": 2, "total_member_count": 2},
-    ])
-
-    # Members:
-    # TH_1: Stock A (effective, limit-up=True), Stock B (effective, limit-up=False) -> Limit-up count = 1
-    # TH_2: Stock C (effective, limit-up=False), Stock D (NOT effective, limit-up=True) -> Limit-up count = 0 (D excluded!)
-    effective_members = pd.DataFrame([
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "A", TRADE_DATE: t_date, IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "B", TRADE_DATE: t_date, IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_2", COLLECTION_ID: "COLL:THEME:QRP:TH_2", ASSET_ID: "C", TRADE_DATE: t_date, IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_2", COLLECTION_ID: "COLL:THEME:QRP:TH_2", ASSET_ID: "D", TRADE_DATE: t_date, IS_M4_EFFECTIVE_MEMBER: False},
-    ])
-
-    market_snapshot = pd.DataFrame([
-        {ASSET_ID: "A", TRADE_DATE: t_date, IS_LIMIT_UP: True},
-        {ASSET_ID: "B", TRADE_DATE: t_date, IS_LIMIT_UP: False},
-        {ASSET_ID: "C", TRADE_DATE: t_date, IS_LIMIT_UP: False},
-        {ASSET_ID: "D", TRADE_DATE: t_date, IS_LIMIT_UP: True},
-    ])
-
-    # Comparison universe boards: Board X (+10%), Board Y (+5%), Board Z (+1%)
-    # Overall universe: Board X (+10%), TH_1 (+8%), Board Y (+5%), TH_2 (+3%), Board Z (+1%)
-    # Total size = 5
-    # TH_1 rank = 2
-    # TH_2 rank = 4
-    comparison_boards = pd.DataFrame([
-        {"board_id": "BOARD_X", TRADE_DATE: t_date, "board_return": 0.10},
-        {"board_id": "BOARD_Y", TRADE_DATE: t_date, "board_return": 0.05},
-        {"board_id": "BOARD_Z", TRADE_DATE: t_date, "board_return": 0.01},
-    ])
-
-    m4_obs = calculate_m4_raw_observations(
-        theme_indices=theme_indices,
-        effective_members=effective_members,
-        market_snapshot=market_snapshot,
-        comparison_boards=comparison_boards,
-        comparison_universe_version=COMPARISON_UNIVERSE_VERSION_V1,
+    theme_index_daily = pd.DataFrame(
+        [
+            {COLLECTION_ID: "COLL_A", TRADE_DATE: d1, THEME_DAILY_RETURN: 0.05, "effective_member_count": 2, "total_member_count": 2},
+            {COLLECTION_ID: "COLL_B", TRADE_DATE: d1, THEME_DAILY_RETURN: 0.02, "effective_member_count": 2, "total_member_count": 2},
+        ]
     )
 
-    assert len(m4_obs) == 2
+    effective_members = pd.DataFrame(
+        [
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "S1", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "S2", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_B", ASSET_ID: "S3", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_B", ASSET_ID: "S4", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+        ]
+    )
 
-    # TH_1
-    row_1 = m4_obs[m4_obs[THEME_ID] == "TH_1"].iloc[0]
-    assert pytest.approx(row_1[THEME_DAILY_RETURN], rel=1e-6) == 0.08
-    assert row_1[THEME_LIMIT_UP_COUNT] == 1
-    assert row_1[THEME_RETURN_RANK] == 2
-    assert row_1[COMPARISON_UNIVERSE_SIZE] == 5
-    assert row_1[QUALIFICATION_STATUS] == QUALIFICATION_STATUS_NOT_CONFIGURED
-    assert row_1[COMPARISON_UNIVERSE_VERSION] == COMPARISON_UNIVERSE_VERSION_V1
+    market_snapshot = pd.DataFrame(
+        [
+            {ASSET_ID: "S1", TRADE_DATE: d1, IS_LIMIT_UP: True},
+            {ASSET_ID: "S2", TRADE_DATE: d1, IS_LIMIT_UP: False},
+            {ASSET_ID: "S3", TRADE_DATE: d1, IS_LIMIT_UP: True},
+            {ASSET_ID: "S4", TRADE_DATE: d1, IS_LIMIT_UP: True},
+        ]
+    )
 
-    # TH_2
-    row_2 = m4_obs[m4_obs[THEME_ID] == "TH_2"].iloc[0]
-    assert pytest.approx(row_2[THEME_DAILY_RETURN], rel=1e-6) == 0.03
-    assert row_2[THEME_LIMIT_UP_COUNT] == 0  # D was not effective, so excluded
-    assert row_2[THEME_RETURN_RANK] == 4
-    assert row_2[COMPARISON_UNIVERSE_SIZE] == 5
-    assert row_2[QUALIFICATION_STATUS] == QUALIFICATION_STATUS_NOT_CONFIGURED
+    # 1. Missing comparison boards fails closed
+    with pytest.raises(M4ObservationError, match="MISSING_COMPARISON_UNIVERSE"):
+        calculate_m4_raw_observations(
+            theme_index_daily, effective_members, market_snapshot, pd.DataFrame()
+        )
+
+    # 2. Valid comparison boards: e.g. THS boards with returns 0.08, 0.03, 0.01
+    comparison_boards = pd.DataFrame(
+        [
+            {"board_id": "881101.TI", TRADE_DATE: d1, "board_return": 0.08},
+            {"board_id": "885750.TI", TRADE_DATE: d1, "board_return": 0.03},
+            {"board_id": "886001.TI", TRADE_DATE: d1, "board_return": 0.01},
+        ]
+    )
+
+    obs = calculate_m4_raw_observations(
+        theme_index_daily, effective_members, market_snapshot, comparison_boards
+    )
+
+    # Returns across universe: 0.08, 0.05 (COLL_A), 0.03, 0.02 (COLL_B), 0.01
+    # Total size = 3 boards + 2 themes = 5
+    r_a = obs[obs[COLLECTION_ID] == "COLL_A"].iloc[0]
+    r_b = obs[obs[COLLECTION_ID] == "COLL_B"].iloc[0]
+
+    assert r_a[THEME_LIMIT_UP_COUNT] == 1
+    assert r_a[THEME_RETURN_RANK] == 2  # Behind 0.08
+    assert r_a[COMPARISON_UNIVERSE_SIZE] == 5
+    assert r_a[QUALIFICATION_STATUS] == "NOT_CONFIGURED"
+
+    assert r_b[THEME_LIMIT_UP_COUNT] == 2
+    assert r_b[THEME_RETURN_RANK] == 4  # Behind 0.08, 0.05, 0.03

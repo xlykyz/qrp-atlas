@@ -1,17 +1,10 @@
-"""StockCollection domain package for QRP Atlas v1.1."""
+"""StockCollection top-level domain package."""
 
-from .adapters.theme import ThemeAdapter
-from .identity import (
-    StockCollectionIdentityError,
-    make_collection_id,
-    parse_collection_id,
-)
+from .identity import make_collection_id
 from .models import (
-    CollectionVersionContext,
     MembershipExplanation,
     ResolvedMember,
     StockCollectionError,
-    StockCollectionErrorCode,
     StockCollectionQueryContext,
     StockCollectionRecord,
     ThemeMembershipRecord,
@@ -22,20 +15,15 @@ from .resolver import StockCollectionResolver
 from .service import StockCollectionService
 
 __all__ = [
-    "StockCollectionIdentityError",
     "make_collection_id",
-    "parse_collection_id",
-    "StockCollectionErrorCode",
     "StockCollectionError",
     "StockCollectionRecord",
     "ThemeRecord",
     "ThemeMembershipRecord",
+    "StockCollectionQueryContext",
     "ResolvedMember",
     "MembershipExplanation",
-    "CollectionVersionContext",
-    "StockCollectionQueryContext",
     "StockCollectionRepository",
-    "ThemeAdapter",
     "StockCollectionResolver",
     "StockCollectionService",
 ]

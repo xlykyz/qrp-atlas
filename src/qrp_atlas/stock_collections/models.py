@@ -1,36 +1,16 @@
-"""Domain models and query contexts for StockCollection."""
+"""Domain models, query contexts, and error types for StockCollection."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
-from enum import StrEnum
-from typing import Mapping, Sequence
-
-from qrp_atlas.contracts.stock_collection import (
-    CollectionScope,
-    CollectionStatus,
-    CollectionType,
-    MembershipModel,
-)
-
-
-class StockCollectionErrorCode(StrEnum):
-    COLLECTION_NOT_FOUND = "COLLECTION_NOT_FOUND"
-    COLLECTION_NOT_AVAILABLE_AS_OF = "COLLECTION_NOT_AVAILABLE_AS_OF"
-    COLLECTION_SCOPE_NOT_ALLOWED = "COLLECTION_SCOPE_NOT_ALLOWED"
-    COLLECTION_VERSION_REQUIRED = "COLLECTION_VERSION_REQUIRED"
-    COLLECTION_VERSION_UNSUPPORTED = "COLLECTION_VERSION_UNSUPPORTED"
-    COLLECTION_ADAPTER_NOT_FOUND = "COLLECTION_ADAPTER_NOT_FOUND"
-    COLLECTION_IDENTITY_COLLISION = "COLLECTION_IDENTITY_COLLISION"
-    COLLECTION_PIT_INVARIANT_VIOLATION = "COLLECTION_PIT_INVARIANT_VIOLATION"
-    COLLECTION_SOURCE_INCONSISTENT = "COLLECTION_SOURCE_INCONSISTENT"
+from typing import Any
 
 
 class StockCollectionError(ValueError):
-    """Base error for stock collections."""
+    """Domain error for StockCollection operations."""
 
-    def __init__(self, code: StockCollectionErrorCode | str, detail: str) -> None:
+    def __init__(self, code: str, detail: str) -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
@@ -38,15 +18,14 @@ class StockCollectionError(ValueError):
 
 @dataclass(frozen=True)
 class StockCollectionRecord:
-    """Registry record representing a stock collection revision."""
     collection_id: str
-    collection_type: CollectionType | str
-    collection_scope: CollectionScope | str
+    collection_type: str
+    collection_scope: str
     namespace: str
     source_key: str
     canonical_name: str
-    membership_model: MembershipModel | str
-    status: CollectionStatus | str
+    membership_model: str
+    status: str
     effective_from: date
     effective_to: date | None
     available_trade_date: date
@@ -58,11 +37,10 @@ class StockCollectionRecord:
 
 @dataclass(frozen=True)
 class ThemeRecord:
-    """Canonical theme domain entity revision (1:1 with THEME StockCollection)."""
     theme_id: str
     collection_id: str
     canonical_name: str
-    status: CollectionStatus | str
+    status: str
     effective_from: date
     effective_to: date | None
     available_trade_date: date
@@ -74,11 +52,11 @@ class ThemeRecord:
 
 @dataclass(frozen=True)
 class ThemeMembershipRecord:
-    """Theme membership interval revision record."""
     membership_id: str
     theme_id: str
     collection_id: str
     asset_id: str
+    weight: float | None
     effective_from: date
     effective_to: date | None
     available_trade_date: date
@@ -89,48 +67,39 @@ class ThemeMembershipRecord:
 
 
 @dataclass(frozen=True)
+class StockCollectionQueryContext:
+    as_of_date: date
+    knowledge_date: date
+    version_context: str = "default"
+    allowed_scopes: tuple[str, ...] = ("CANONICAL",)
+
+
+@dataclass(frozen=True)
 class ResolvedMember:
-    """Normalized resolved member from StockCollectionResolver."""
     collection_id: str
-    collection_type: CollectionType | str
     asset_id: str
     as_of_date: date
-    weight: float | None = None
-    source_table: str = ""
-    source_record_id: str | None = None
-    source_revision_id: str = ""
-    source_rule_version: str | None = None
+    weight: float | None
+    membership_id: str
+    revision_id: str
+    effective_from: date
+    effective_to: date | None
+    available_trade_date: date
+    source_table: str
+    source_record_id: str | None
 
 
 @dataclass(frozen=True)
 class MembershipExplanation:
-    """Explainability record detailing why an asset belongs or belonged to a collection."""
     collection_id: str
     asset_id: str
-    is_member: bool
     as_of_date: date
     knowledge_date: date
+    is_member: bool
     membership_id: str | None
     revision_id: str | None
     effective_from: date | None
     effective_to: date | None
     available_trade_date: date | None
-    source: str | None
-    source_record_id: str | None
-    reasons: Sequence[str] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True)
-class CollectionVersionContext:
-    """Context holding rule and calculation versions."""
-    rule_versions: Mapping[str, str] = field(default_factory=dict)
-    calculation_versions: Mapping[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class StockCollectionQueryContext:
-    """Point-in-Time query context for resolving collections and members."""
-    as_of_date: date
-    knowledge_date: date
-    version_context: CollectionVersionContext = field(default_factory=CollectionVersionContext)
-    allowed_scopes: tuple[CollectionScope | str, ...] = (CollectionScope.CANONICAL,)
+    reason: str
+    lifecycle_history: tuple[dict[str, Any], ...]

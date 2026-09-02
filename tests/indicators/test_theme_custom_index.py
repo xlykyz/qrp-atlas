@@ -1,63 +1,65 @@
-"""Tests for custom Theme equal-weight index calculation."""
-
-from __future__ import annotations
+"""Tests for Theme custom equal-weight index calculation and missing semantics."""
 
 from datetime import date
 import numpy as np
 import pandas as pd
 import pytest
 
-from qrp_atlas.contracts import (
-    ASSET_ID,
-    COLLECTION_ID,
+from qrp_atlas.contracts import ASSET_ID, TRADE_DATE
+from qrp_atlas.contracts.m4 import (
+    EFFECTIVE_MEMBER_COUNT,
     INDEX_LEVEL,
     IS_M4_EFFECTIVE_MEMBER,
     THEME_DAILY_RETURN,
-    THEME_ID,
-    TRADE_DATE,
 )
+from qrp_atlas.contracts.stock_collection import COLLECTION_ID
 from qrp_atlas.indicators.theme.custom_index import calculate_theme_equal_weight_index
 
 
-def test_theme_equal_weight_index_arithmetic_mean_and_compounding():
-    """Verify arithmetic mean return calculation, continuous compounding, and 0-member NULL handling."""
-    dates = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12)]
+def test_theme_equal_weight_index_strict_completeness_and_gap():
+    d1 = date(2026, 8, 3)
+    d2 = date(2026, 8, 4)
+    d3 = date(2026, 8, 5)
 
-    # 2 members: Stock A (+10%, +5%, +0%), Stock B (+0%, -5%, +0%)
-    # Day 1: A (+10%), B (+0%) -> Mean = +5% (0.05) -> Index: 1000 * 1.05 = 1050.0
-    # Day 2: A is effective (+5%), B is NOT effective -> Mean = +5% (0.05) -> Index: 1050 * 1.05 = 1102.5
-    # Day 3: Neither A nor B is effective -> Return = NULL -> Index: remains 1102.5
+    effective_members = pd.DataFrame(
+        [
+            # Day 1: 2 effective members, both have returns
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_1", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_2", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+            # Day 2: 2 effective members, but only STK_1 has return (STK_2 missing) -> should be NaN
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_1", TRADE_DATE: d2, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_2", TRADE_DATE: d2, IS_M4_EFFECTIVE_MEMBER: True},
+            # Day 3: 2 effective members, both have returns -> should recover compounding
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_1", TRADE_DATE: d3, IS_M4_EFFECTIVE_MEMBER: True},
+            {COLLECTION_ID: "COLL_A", ASSET_ID: "STK_2", TRADE_DATE: d3, IS_M4_EFFECTIVE_MEMBER: True},
+        ]
+    )
 
-    effective_members = pd.DataFrame([
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "A", TRADE_DATE: dates[0], IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "B", TRADE_DATE: dates[0], IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "A", TRADE_DATE: dates[1], IS_M4_EFFECTIVE_MEMBER: True},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "B", TRADE_DATE: dates[1], IS_M4_EFFECTIVE_MEMBER: False},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "A", TRADE_DATE: dates[2], IS_M4_EFFECTIVE_MEMBER: False},
-        {THEME_ID: "TH_1", COLLECTION_ID: "COLL:THEME:QRP:TH_1", ASSET_ID: "B", TRADE_DATE: dates[2], IS_M4_EFFECTIVE_MEMBER: False},
-    ])
+    market_returns = pd.DataFrame(
+        [
+            {ASSET_ID: "STK_1", TRADE_DATE: d1, "daily_return": 0.02},
+            {ASSET_ID: "STK_2", TRADE_DATE: d1, "daily_return": 0.04},
+            # Day 2: STK_2 missing
+            {ASSET_ID: "STK_1", TRADE_DATE: d2, "daily_return": 0.01},
+            # Day 3: both present
+            {ASSET_ID: "STK_1", TRADE_DATE: d3, "daily_return": 0.03},
+            {ASSET_ID: "STK_2", TRADE_DATE: d3, "daily_return": 0.05},
+        ]
+    )
 
-    market_snapshot = pd.DataFrame([
-        {ASSET_ID: "A", TRADE_DATE: dates[0], "return_ratio": 0.10},
-        {ASSET_ID: "B", TRADE_DATE: dates[0], "return_ratio": 0.00},
-        {ASSET_ID: "A", TRADE_DATE: dates[1], "return_ratio": 0.05},
-        {ASSET_ID: "B", TRADE_DATE: dates[1], "return_ratio": -0.05},
-        {ASSET_ID: "A", TRADE_DATE: dates[2], "return_ratio": 0.02},
-        {ASSET_ID: "B", TRADE_DATE: dates[2], "return_ratio": 0.02},
-    ])
+    res = calculate_theme_equal_weight_index(effective_members, market_returns, base_level=1000.0)
 
-    result = calculate_theme_equal_weight_index(effective_members, market_snapshot, base_level=1000.0)
+    # Day 1: mean(0.02, 0.04) = 0.03 -> level = 1000 * 1.03 = 1030.0
+    r1 = res[res[TRADE_DATE] == d1].iloc[0]
+    assert np.isclose(r1[THEME_DAILY_RETURN], 0.03)
+    assert np.isclose(r1[INDEX_LEVEL], 1030.0)
 
-    assert len(result) == 3
+    # Day 2: Missing member -> return is NaN, level is NaN (gap)
+    r2 = res[res[TRADE_DATE] == d2].iloc[0]
+    assert pd.isna(r2[THEME_DAILY_RETURN])
+    assert pd.isna(r2[INDEX_LEVEL])
 
-    # Day 1
-    assert pytest.approx(result.loc[0, THEME_DAILY_RETURN], rel=1e-6) == 0.05
-    assert pytest.approx(result.loc[0, INDEX_LEVEL], rel=1e-6) == 1050.0
-
-    # Day 2
-    assert pytest.approx(result.loc[1, THEME_DAILY_RETURN], rel=1e-6) == 0.05
-    assert pytest.approx(result.loc[1, INDEX_LEVEL], rel=1e-6) == 1102.5
-
-    # Day 3 (0 effective members -> return must be None / NaN, NOT 0.0)
-    assert result.loc[2, THEME_DAILY_RETURN] is None or np.isnan(result.loc[2, THEME_DAILY_RETURN])
-    assert pytest.approx(result.loc[2, INDEX_LEVEL], rel=1e-6) == 1102.5
+    # Day 3: mean(0.03, 0.05) = 0.04 -> level compounds from Day 1 level (1030.0 * 1.04 = 1071.2)
+    r3 = res[res[TRADE_DATE] == d3].iloc[0]
+    assert np.isclose(r3[THEME_DAILY_RETURN], 0.04)
+    assert np.isclose(r3[INDEX_LEVEL], 1071.2)

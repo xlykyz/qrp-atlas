@@ -1,16 +1,11 @@
-"""Tests for StockCollection Resolver, reverse lookup, and explainability."""
-
-from __future__ import annotations
-
 from datetime import date
 import duckdb
+import pandas as pd
 import pytest
 
-from qrp_atlas.contracts import init_stock_collections_database
-from qrp_atlas.contracts.stock_collection import CollectionScope, CollectionType
+from qrp_atlas.contracts.schema import init_stock_collections_database
 from qrp_atlas.stock_collections.models import (
     StockCollectionError,
-    StockCollectionErrorCode,
     StockCollectionQueryContext,
 )
 from qrp_atlas.stock_collections.resolver import StockCollectionResolver
@@ -18,101 +13,143 @@ from qrp_atlas.stock_collections.service import StockCollectionService
 
 
 @pytest.fixture
-def memory_db():
+def db():
     con = duckdb.connect(":memory:")
     init_stock_collections_database(con)
+    con.execute(
+        """
+        CREATE TABLE stock_info (
+            ticker VARCHAR PRIMARY KEY,
+            name VARCHAR,
+            list_date DATE,
+            delist_date DATE
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO stock_info VALUES
+        ('000001.SZ', 'Ping An Bank', '2020-01-01', NULL),
+        ('600519.SH', 'Kweichow Moutai', '2020-01-01', NULL),
+        ('300750.SZ', 'CATL', '2020-01-01', NULL)
+        """
+    )
     yield con
     con.close()
 
 
-def test_resolver_collection_not_found_and_availability(memory_db):
-    resolver = StockCollectionResolver(memory_db)
-    ctx = StockCollectionQueryContext(
-        as_of_date=date(2026, 8, 10),
-        knowledge_date=date(2026, 8, 10),
+def test_resolver_dual_time_and_collection_availability_states(db):
+    service = StockCollectionService(db)
+    resolver = StockCollectionResolver(db)
+
+    # Create collection available as of 2026-03-01
+    thm, coll = service.create_canonical_theme(
+        theme_name="半导体",
+        source_key="SEMICONDUCTOR",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 3, 1),
     )
 
-    with pytest.raises(StockCollectionError) as exc_info:
-        resolver.resolve_collection("COLL:THEME:QRP:NON_EXISTENT", ctx)
-    assert exc_info.value.code == StockCollectionErrorCode.COLLECTION_NOT_FOUND
+    # 1. Unknown collection -> COLLECTION_NOT_FOUND
+    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_FOUND"):
+        resolver.resolve_collection(
+            "COLL:THEME:QRP:NON_EXISTENT",
+            StockCollectionQueryContext(as_of_date=date(2026, 3, 1), knowledge_date=date(2026, 3, 1)),
+        )
 
-    # Create collection available starting 2026-08-15
-    service = StockCollectionService(memory_db)
-    _, coll = service.create_canonical_theme(
-        theme_id="TH_FUTURE",
-        canonical_name="未来题材",
-        source_key="FUTURE",
-        effective_from=date(2026, 8, 15),
-        available_trade_date=date(2026, 8, 15),
+    # 2. Knowledge Date before available_trade_date -> COLLECTION_NOT_AVAILABLE_AS_OF
+    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_AVAILABLE_AS_OF"):
+        resolver.resolve_collection(
+            coll.collection_id,
+            StockCollectionQueryContext(as_of_date=date(2026, 1, 15), knowledge_date=date(2026, 2, 28)),
+        )
+
+    # 3. Late-known historical collection:
+    # Knowledge date is 2026-03-01 (visible), querying historical as_of_date 2026-01-15 (business valid)
+    coll_resolved = resolver.resolve_collection(
+        coll.collection_id,
+        StockCollectionQueryContext(as_of_date=date(2026, 1, 15), knowledge_date=date(2026, 3, 1)),
     )
+    assert coll_resolved.collection_id == coll.collection_id
 
-    # Querying as of 2026-08-10 with knowledge_date 2026-08-15 -> not available as of 2026-08-10
-    ctx_early = StockCollectionQueryContext(
-        as_of_date=date(2026, 8, 10),
-        knowledge_date=date(2026, 8, 15),
+    # 4. Collection exists but has empty membership
+    members = resolver.resolve_members(
+        coll.collection_id,
+        StockCollectionQueryContext(as_of_date=date(2026, 1, 15), knowledge_date=date(2026, 3, 1)),
     )
-    with pytest.raises(StockCollectionError) as exc_early:
-        resolver.resolve_collection(coll.collection_id, ctx_early)
-    assert exc_early.value.code == StockCollectionErrorCode.COLLECTION_NOT_AVAILABLE_AS_OF
+    assert members == []
 
 
-def test_resolver_reverse_lookup_and_explainability(memory_db):
-    service = StockCollectionService(memory_db)
-    resolver = StockCollectionResolver(memory_db)
+def test_resolver_explain_reentry_and_equivalence(db):
+    service = StockCollectionService(db)
+    resolver = StockCollectionResolver(db)
 
-    # Create two themes
-    _, coll1 = service.create_canonical_theme(
-        theme_id="TH_ROBOT",
-        canonical_name="人形机器人",
-        source_key="ROBOT",
+    thm, coll = service.create_canonical_theme(
+        theme_name="机器人",
+        source_key="ROBOTICS",
         effective_from=date(2026, 1, 1),
         available_trade_date=date(2026, 1, 1),
     )
-    _, coll2 = service.create_canonical_theme(
-        theme_id="TH_MOTOR",
-        canonical_name="微特电机",
-        source_key="MOTOR",
+
+    # Lifecycle 1: [2026-01-01, 2026-03-01), available on 2026-01-01
+    m1 = service.add_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="000001.SZ",
         effective_from=date(2026, 1, 1),
         available_trade_date=date(2026, 1, 1),
     )
+    service.remove_member(
+        membership_id=m1.membership_id,
+        removal_date=date(2026, 3, 1),
+        available_trade_date=date(2026, 3, 1),
+    )
 
-    # Add Stock '600001.SH' to both themes
-    service.add_member(
-        theme_id="TH_ROBOT",
-        collection_id=coll1.collection_id,
-        asset_id="600001.SH",
+    # Lifecycle 2 (Re-entry): [2026-05-01, None), available on 2026-05-01
+    m2 = service.reenter_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="000001.SZ",
         effective_from=date(2026, 5, 1),
         available_trade_date=date(2026, 5, 1),
     )
-    service.add_member(
-        theme_id="TH_MOTOR",
-        collection_id=coll2.collection_id,
-        asset_id="600001.SH",
-        effective_from=date(2026, 6, 1),
-        available_trade_date=date(2026, 6, 1),
+
+    # Now knowledge_date is 2026-06-01 (both lifecycles known)
+    kd = date(2026, 6, 1)
+
+    # Test Case A: as_of_date = 2026-02-01 (inside Lifecycle 1)
+    ctx_a = StockCollectionQueryContext(as_of_date=date(2026, 2, 1), knowledge_date=kd)
+    members_a = resolver.resolve_members(coll.collection_id, ctx_a)
+    exp_a = resolver.explain_membership(coll.collection_id, "000001.SZ", ctx_a)
+
+    assert "000001.SZ" in [m.asset_id for m in members_a]
+    assert exp_a.is_member is True
+    assert exp_a.membership_id == m1.membership_id
+    assert len(exp_a.lifecycle_history) >= 2
+
+    # Test Case B: as_of_date = 2026-04-01 (in between lifecycles)
+    ctx_b = StockCollectionQueryContext(as_of_date=date(2026, 4, 1), knowledge_date=kd)
+    members_b = resolver.resolve_members(coll.collection_id, ctx_b)
+    exp_b = resolver.explain_membership(coll.collection_id, "000001.SZ", ctx_b)
+
+    assert "000001.SZ" not in [m.asset_id for m in members_b]
+    assert exp_b.is_member is False
+    assert exp_b.reason == "OUTSIDE_EFFECTIVE_INTERVAL"
+
+    # Test Case C: as_of_date = 2026-05-15 (inside Lifecycle 2)
+    ctx_c = StockCollectionQueryContext(as_of_date=date(2026, 5, 15), knowledge_date=kd)
+    members_c = resolver.resolve_members(coll.collection_id, ctx_c)
+    exp_c = resolver.explain_membership(coll.collection_id, "000001.SZ", ctx_c)
+
+    assert "000001.SZ" in [m.asset_id for m in members_c]
+    assert exp_c.is_member is True
+    assert exp_c.membership_id == m2.membership_id
+
+    # Test Case D: batch resolution across all dates
+    batch_df = resolver.batch_resolve_members(
+        [coll.collection_id],
+        [date(2026, 2, 1), date(2026, 4, 1), date(2026, 5, 15)],
+        knowledge_date=kd,
     )
-
-    # Reverse lookup on 2026-05-15 (only belongs to ROBOT)
-    ctx_may = StockCollectionQueryContext(
-        as_of_date=date(2026, 5, 15),
-        knowledge_date=date(2026, 6, 15),
-    )
-    cids_may = resolver.resolve_asset_collections("600001.SH", ctx_may)
-    assert list(cids_may) == [coll1.collection_id]
-
-    # Reverse lookup on 2026-06-15 (belongs to both)
-    ctx_jun = StockCollectionQueryContext(
-        as_of_date=date(2026, 6, 15),
-        knowledge_date=date(2026, 6, 15),
-    )
-    cids_jun = resolver.resolve_asset_collections("600001.SH", ctx_jun)
-    assert sorted(cids_jun) == sorted([coll1.collection_id, coll2.collection_id])
-
-    # Explainability test
-    exp = resolver.explain_membership(coll1.collection_id, "600001.SH", ctx_jun)
-    assert exp.is_member is True
-    assert "VALID_POINT_IN_TIME_MEMBER" in exp.reasons
-
-    exp_non = resolver.explain_membership(coll1.collection_id, "999999.SH", ctx_jun)
-    assert exp_non.is_member is False
-    assert "NO_VISIBLE_MEMBERSHIP_REVISION" in exp_non.reasons
+    assert len(batch_df) == 2  # dates 2026-02-01 and 2026-05-15
+    assert set(pd.to_datetime(batch_df["trade_date"]).dt.date.tolist()) == {date(2026, 2, 1), date(2026, 5, 15)}

@@ -1,11 +1,12 @@
 """Theme pipeline package."""
 
 from .query import M4ObservationAuditReport, ThemeQueryService
-from .service import ThemePipelineProductionError, ThemePipelineService
+from .service import ThemePipelineError, ThemePipelineService, ThemeProductionReport
 
 __all__ = [
+    "ThemePipelineError",
     "ThemePipelineService",
-    "ThemePipelineProductionError",
+    "ThemeProductionReport",
     "ThemeQueryService",
     "M4ObservationAuditReport",
 ]
