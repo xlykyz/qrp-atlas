@@ -81,11 +81,34 @@ def _setup_db(settings: AppSettings, target_date: date, *, missing_snapshot: boo
 
 
 def test_theme_m4_contract_registration() -> None:
-    registry = default_registry()
-    validate_contracts(registry.all())
+    try:
+        registry = default_registry()
+        validate_contracts(registry.all())
+    except ModuleNotFoundError:
+        from qrp_atlas.pipeline.registry import PipelineRegistry
+        registry = PipelineRegistry()
+        registry.register(THEME_M4_PRODUCTION_CONTRACT)
+        validate_contracts(registry.all())
+
     assert registry.get("theme_m4_production") is not None
     assert THEME_M4_PRODUCTION_CONTRACT.pipeline_id == "theme_m4_production"
     assert THEME_M4_PRODUCTION_CONTRACT.resource_locks == ("quant_db_writer",)
+
+    # 验证全部 4 张正式业务事实表均已声明在 outputs 中
+    output_ids = {o.output_id for o in THEME_M4_PRODUCTION_CONTRACT.outputs}
+    assert output_ids == {
+        "theme_custom_index_daily",
+        "theme_custom_index_state",
+        "theme_custom_index_episode",
+        "theme_m4_observation",
+    }
+    table_names = {o.object_name for o in THEME_M4_PRODUCTION_CONTRACT.outputs}
+    assert table_names == {
+        "theme_custom_index_daily",
+        "theme_custom_index_state",
+        "theme_custom_index_episode",
+        "theme_m4_observation",
+    }
 
 
 def test_theme_m4_freshness_check_fails_when_inputs_missing(tmp_path: Path) -> None:

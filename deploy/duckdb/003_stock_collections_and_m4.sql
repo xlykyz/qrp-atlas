@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS theme_m4_observation (
     collection_id VARCHAR NOT NULL,
     trade_date DATE NOT NULL,
     theme_daily_return DOUBLE,
-    theme_limit_up_count BIGINT NOT NULL,
+    theme_limit_up_count BIGINT,
     theme_return_rank BIGINT,
     effective_member_count BIGINT NOT NULL,
     total_member_count BIGINT NOT NULL,

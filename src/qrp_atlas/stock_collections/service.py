@@ -99,6 +99,58 @@ class StockCollectionService:
         self.repo.create_theme_collection_atomic(theme_rec, coll_rec)
         return theme_rec, coll_rec
 
+    def _validate_membership_bounds(
+        self,
+        *,
+        collection_id: str,
+        theme_id: str,
+        effective_from: date,
+        effective_to: date | None,
+    ) -> None:
+        colls = self.repo.get_collection_revisions(collection_id)
+        if not colls:
+            raise StockCollectionError("COLLECTION_NOT_FOUND", f"Collection {collection_id} not found")
+        themes = self.repo.get_theme_revisions(theme_id)
+        if not themes:
+            raise StockCollectionError("THEME_NOT_FOUND", f"Theme {theme_id} not found")
+
+        coll = colls[-1]
+        thm = themes[-1]
+
+        if thm.collection_id != collection_id:
+            raise StockCollectionError(
+                "THEME_COLLECTION_MISMATCH",
+                f"Theme {theme_id} belongs to {thm.collection_id}, not {collection_id}",
+            )
+
+        # 1:1 Invariant: Canonical Theme and StockCollection effective intervals must match
+        if coll.effective_from != thm.effective_from or coll.effective_to != thm.effective_to:
+            raise StockCollectionError(
+                "PIT_INVARIANT_VIOLATION",
+                f"Theme {theme_id} interval [{thm.effective_from}, {thm.effective_to}) does not match "
+                f"Collection {collection_id} interval [{coll.effective_from}, {coll.effective_to})",
+            )
+
+        # Membership lifecycle must fall completely inside canonical Theme / Collection effective interval
+        if effective_from < coll.effective_from:
+            raise StockCollectionError(
+                "MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE",
+                f"membership.effective_from ({effective_from}) < canonical collection effective_from ({coll.effective_from})",
+            )
+
+        if coll.effective_to is not None:
+            # Open-ended membership not allowed to span past closed Collection/Theme
+            if effective_to is None:
+                raise StockCollectionError(
+                    "MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE",
+                    f"Open-ended membership not allowed in closed collection (effective_to: {coll.effective_to})",
+                )
+            if effective_to > coll.effective_to:
+                raise StockCollectionError(
+                    "MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE",
+                    f"membership.effective_to ({effective_to}) > canonical collection effective_to ({coll.effective_to})",
+                )
+
     def add_member(
         self,
         *,
@@ -119,18 +171,13 @@ class StockCollectionService:
                 "NON_EQUITY_ASSET", f"Asset {asset_id} is not a valid EQUITY"
             )
 
-        # 2. Validate Theme & Collection exist and match
-        colls = self.repo.get_collection_revisions(collection_id)
-        if not colls:
-            raise StockCollectionError("COLLECTION_NOT_FOUND", f"Collection {collection_id} not found")
-        themes = self.repo.get_theme_revisions(theme_id)
-        if not themes:
-            raise StockCollectionError("THEME_NOT_FOUND", f"Theme {theme_id} not found")
-        if themes[-1].collection_id != collection_id:
-            raise StockCollectionError(
-                "THEME_COLLECTION_MISMATCH",
-                f"Theme {theme_id} belongs to {themes[-1].collection_id}, not {collection_id}",
-            )
+        # 2. Validate Theme & Collection exist, match, and bound membership lifecycle
+        self._validate_membership_bounds(
+            collection_id=collection_id,
+            theme_id=theme_id,
+            effective_from=effective_from,
+            effective_to=effective_to,
+        )
 
         # 3. Validate Effective Interval
         if effective_to is not None and effective_to <= effective_from:
@@ -239,6 +286,14 @@ class StockCollectionService:
 
         eff_from = latest.effective_from
 
+        # Validate bounds against canonical Theme & Collection lifecycle
+        self._validate_membership_bounds(
+            collection_id=latest.collection_id,
+            theme_id=latest.theme_id,
+            effective_from=eff_from,
+            effective_to=effective_to,
+        )
+
         if effective_to is not None and effective_to <= eff_from:
             raise StockCollectionError(
                 "INVALID_EFFECTIVE_INTERVAL",
@@ -345,6 +400,13 @@ class StockCollectionService:
             asset_id = str(entry["asset_id"])
             eff_from = entry["effective_from"]
             eff_to = entry.get("effective_to")
+
+            self._validate_membership_bounds(
+                collection_id=collection_id,
+                theme_id=theme_id,
+                effective_from=eff_from,
+                effective_to=eff_to,
+            )
 
             if not self.repo.check_is_equity(asset_id):
                 raise StockCollectionError("NON_EQUITY_ASSET", f"Asset {asset_id} is not a valid EQUITY")

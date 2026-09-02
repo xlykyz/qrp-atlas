@@ -9,6 +9,7 @@ from qrp_atlas.contracts import ASSET_ID, IS_LIMIT_UP, TRADE_DATE
 from qrp_atlas.contracts.m4 import (
     COMPARISON_UNIVERSE_SIZE,
     COMPARISON_UNIVERSE_VERSION,
+    EFFECTIVE_MEMBER_COUNT,
     IS_M4_EFFECTIVE_MEMBER,
     QUALIFICATION_STATUS,
     THEME_DAILY_RETURN,
@@ -174,4 +175,59 @@ def test_m4_comparison_universe_standard_competition_ranking():
     # 0.08 (2个) > 0.05 (COLL_T) > 0.01 (1个)
     # 标准竞争排名：大于 0.05 的有 2 个，因此 rank = 3
     assert row[THEME_RETURN_RANK] == 3
+    assert row[COMPARISON_UNIVERSE_SIZE] == 4
+
+
+def test_m4_missing_is_limit_up_fails_closed_to_none():
+    """验证当有效成员的 is_limit_up 无法证明 (缺失或为 None) 时，theme_limit_up_count 为 None 而不是假定 0。"""
+    d1 = date(2026, 8, 3)
+    theme_index_daily = pd.DataFrame([
+        {COLLECTION_ID: "COLL_T", TRADE_DATE: d1, THEME_DAILY_RETURN: 0.05, EFFECTIVE_MEMBER_COUNT: 2},
+    ])
+    effective_members = pd.DataFrame([
+        {COLLECTION_ID: "COLL_T", ASSET_ID: "S1", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+        {COLLECTION_ID: "COLL_T", ASSET_ID: "S2", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+    ])
+    # S1 确认未涨停，S2 缺少 market snapshot 事实
+    market_snapshot = pd.DataFrame([
+        {ASSET_ID: "S1", TRADE_DATE: d1, IS_LIMIT_UP: False},
+    ])
+    comparison_boards = pd.DataFrame([
+        {"board_id": "881101.TI", TRADE_DATE: d1, "board_return": 0.01},
+    ])
+
+    obs = calculate_m4_raw_observations(
+        theme_index_daily, effective_members, market_snapshot, comparison_boards
+    )
+    row = obs.iloc[0]
+    assert pd.isna(row[THEME_LIMIT_UP_COUNT])
+
+
+def test_m4_missing_board_return_fails_closed_to_none_rank_and_preserves_universe_size():
+    """验证当基准 Universe 中某板块 return 缺失时：
+    - theme_return_rank = None (fail-closed，不得静默 dropna 缩小 universe)
+    - comparison_universe_size 保持正式 Universe 大小 (4)
+    """
+    d1 = date(2026, 8, 3)
+    theme_index_daily = pd.DataFrame([
+        {COLLECTION_ID: "COLL_T", TRADE_DATE: d1, THEME_DAILY_RETURN: 0.05, EFFECTIVE_MEMBER_COUNT: 1},
+    ])
+    effective_members = pd.DataFrame([
+        {COLLECTION_ID: "COLL_T", ASSET_ID: "S1", TRADE_DATE: d1, IS_M4_EFFECTIVE_MEMBER: True},
+    ])
+    market_snapshot = pd.DataFrame([
+        {ASSET_ID: "S1", TRADE_DATE: d1, IS_LIMIT_UP: False},
+    ])
+    # 3 个板块，其中一个 board_return 为 None
+    comparison_boards = pd.DataFrame([
+        {"board_id": "881101.TI", TRADE_DATE: d1, "board_return": 0.08},
+        {"board_id": "885750.TI", TRADE_DATE: d1, "board_return": None},
+        {"board_id": "886001.TI", TRADE_DATE: d1, "board_return": 0.01},
+    ])
+
+    obs = calculate_m4_raw_observations(
+        theme_index_daily, effective_members, market_snapshot, comparison_boards
+    )
+    row = obs.iloc[0]
+    assert pd.isna(row[THEME_RETURN_RANK])
     assert row[COMPARISON_UNIVERSE_SIZE] == 4

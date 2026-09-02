@@ -61,7 +61,7 @@ class M4ObservationAuditReport:
     collection_id: str
     trade_date: date
     theme_daily_return: float | None
-    theme_limit_up_count: int
+    theme_limit_up_count: int | None
     theme_return_rank: int | None
     effective_members: int
     total_members: int
@@ -79,6 +79,8 @@ class M4ObservationAuditReport:
     comparison_boards: tuple[dict[str, Any], ...]
     is_reproducible: bool = True
     discrepancy_reason: str | None = None
+    production_knowledge_date: date | None = None
+    audit_knowledge_date: date | None = None
 
 
 class ThemeQueryService:
@@ -152,8 +154,6 @@ class ThemeQueryService:
         knowledge_date: date | None = None,
     ) -> M4ObservationAuditReport:
         """Set-based, non-N+1 lineage audit for a specific Theme M4 Observation."""
-        kd = knowledge_date or trade_date
-
         # 1. Fetch persisted observation
         obs_row = self.con.execute(
             f"""
@@ -175,6 +175,22 @@ class ThemeQueryService:
         collection_id = obs_row[1]
         prod_run_id = obs_row[14]
         snap_id = obs_row[15]
+
+        # Resolve persisted production knowledge_date if not explicitly supplied
+        persisted_kd = None
+        if prod_run_id:
+            run_kd_row = self.con.execute(
+                f"SELECT knowledge_date FROM {THEME_PRODUCTION_RUN_TABLE} WHERE production_run_id = ?",
+                [prod_run_id],
+            ).fetchone()
+            if run_kd_row and run_kd_row[0]:
+                persisted_kd = run_kd_row[0]
+                if hasattr(persisted_kd, "date"):
+                    persisted_kd = persisted_kd.date()
+                elif isinstance(persisted_kd, str):
+                    persisted_kd = pd.to_datetime(persisted_kd).date()
+
+        kd = knowledge_date if knowledge_date is not None else (persisted_kd or trade_date)
 
         # 2. Batch resolve members via StockCollectionResolver
         ctx = StockCollectionQueryContext(as_of_date=trade_date, knowledge_date=kd)
@@ -379,4 +395,6 @@ class ThemeQueryService:
             comparison_boards=tuple(comparison_boards),
             is_reproducible=is_reproducible,
             discrepancy_reason=drift_status,
+            production_knowledge_date=persisted_kd,
+            audit_knowledge_date=kd,
         )

@@ -57,9 +57,16 @@ def calculate_theme_equal_weight_index(
     else:
         raise ValueError("market_returns must contain 'daily_return' or 'pct_change'")
 
+    # Merge upfront once to avoid repeated O(N) DataFrame merges inside the loop
+    eff_merged = effective_members.merge(
+        m_df[[ASSET_ID, TRADE_DATE, "ret"]],
+        on=[ASSET_ID, TRADE_DATE],
+        how="left",
+    )
+
     # Group by collection and trade_date
     results = []
-    for (coll_id, trade_date), group in effective_members.groupby(
+    for (coll_id, trade_date), group in eff_merged.groupby(
         [COLLECTION_ID, TRADE_DATE], sort=True
     ):
         total_count = len(group)
@@ -69,13 +76,7 @@ def calculate_theme_equal_weight_index(
         if eff_count == 0:
             theme_return = np.nan
         else:
-            # Join with market returns
-            merged = eff_group.merge(
-                m_df[[ASSET_ID, TRADE_DATE, "ret"]],
-                on=[ASSET_ID, TRADE_DATE],
-                how="left",
-            )
-            valid_returns = merged["ret"].dropna()
+            valid_returns = eff_group["ret"].dropna()
             # Strict completeness: all effective members must have a valid return
             if len(valid_returns) == eff_count:
                 theme_return = float(valid_returns.mean())

@@ -1276,7 +1276,7 @@ THEME_M4_OBSERVATION = TableSchema(
         ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
         ColumnSpec(TRADE_DATE, "DATE", nullable=False),
         ColumnSpec(THEME_DAILY_RETURN, "DOUBLE"),
-        ColumnSpec(THEME_LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_LIMIT_UP_COUNT, "BIGINT"),
         ColumnSpec(THEME_RETURN_RANK, "BIGINT"),
         ColumnSpec(EFFECTIVE_MEMBER_COUNT, "BIGINT", nullable=False),
         ColumnSpec(TOTAL_MEMBER_COUNT, "BIGINT", nullable=False),

@@ -134,6 +134,7 @@ class ThemeProductionReport:
     total_observation_rows: int
     total_episodes: int
     execution_seconds: float
+    total_state_rows: int = 0
 
 
 class ThemePipelineService:
@@ -244,33 +245,48 @@ class ThemePipelineService:
         theme_map = {coll_id: theme_id for theme_id, coll_id in themes}
         coll_ids = list(theme_map.keys())
 
+        # Determine current materialized horizon for affected themes to enforce forward dependency closure
+        theme_ids = [t[0] for t in themes]
+        placeholders = ",".join(["?"] * len(theme_ids))
+        max_row = self.con.execute(
+            f"SELECT MAX(trade_date) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id IN ({placeholders})",
+            theme_ids,
+        ).fetchone()
+        current_materialized = max_row[0] if max_row and max_row[0] else None
+
+        affected_output_start = start_date
+        if current_materialized and current_materialized > end_date:
+            affected_output_end = current_materialized
+        else:
+            affected_output_end = end_date
+
         # Determine calculation context start: must start at earliest theme inception to preserve compounding
         if context_start_date is None:
             min_date_row = self.con.execute(
                 f"SELECT MIN(effective_from) FROM {THEME_TABLE} WHERE available_trade_date <= ?",
                 [kd],
             ).fetchone()
-            earliest_theme_date = min_date_row[0] if min_date_row and min_date_row[0] else start_date
-            calc_start = min(earliest_theme_date, start_date)
+            earliest_theme_date = min_date_row[0] if min_date_row and min_date_row[0] else affected_output_start
+            calc_start = min(earliest_theme_date, affected_output_start)
         else:
-            calc_start = min(context_start_date, start_date)
+            calc_start = min(context_start_date, affected_output_start)
 
-        calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, end_date)
+        calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, affected_output_end)
         if not calc_trade_dates:
             raise ThemePipelineError(
-                "NO_TRADING_DATES", f"No open trading dates between {calc_start} and {end_date}"
+                "NO_TRADING_DATES", f"No open trading dates between {calc_start} and {affected_output_end}"
             )
 
-        output_trade_dates = [d for d in calc_trade_dates if start_date <= d <= end_date]
+        output_trade_dates = [d for d in calc_trade_dates if affected_output_start <= d <= affected_output_end]
 
         # 1. Fetch set-based memberships via batch Resolver across calculation range
         raw_memberships = self.resolver.batch_resolve_members(coll_ids, calc_trade_dates, kd)
 
         # 2. Fetch facts across calculation context range
-        listing_df = self._fetch_confirmed_listing_facts(calc_start, end_date)
-        susp_df = self._fetch_suspension_facts(calc_start, end_date)
-        market_df = self._fetch_market_snapshot(calc_start, end_date)
-        comp_boards_df = self._fetch_comparison_boards(calc_start, end_date)
+        listing_df = self._fetch_confirmed_listing_facts(calc_start, affected_output_end)
+        susp_df = self._fetch_suspension_facts(calc_start, affected_output_end)
+        market_df = self._fetch_market_snapshot(calc_start, affected_output_end)
+        comp_boards_df = self._fetch_comparison_boards(calc_start, affected_output_end)
 
         if execution_control is not None and hasattr(execution_control, "checkpoint"):
             execution_control.checkpoint()
@@ -381,107 +397,73 @@ class ThemePipelineService:
 
         # 7. Single ACID Transaction Persistence with Scope Control
         now = datetime.now(timezone.utc)
+        written_episodes = []
         try:
             self.con.execute("BEGIN TRANSACTION")
 
-            if run_type == "DAILY":
-                # Option A: physically replace target_date only
-                self.con.execute(
-                    f"DELETE FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?",
-                    [end_date],
-                )
-                self.con.execute(
-                    f"DELETE FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?",
-                    [end_date],
-                )
-                self.con.execute(
-                    f"DELETE FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?",
-                    [end_date],
-                )
-                # For episodes: upsert only episodes touching end_date
-                if not all_episodes.empty:
-                    for r in all_episodes.itertuples(index=False):
-                        st = _to_date(getattr(r, "episode_start_date"))
-                        ed_val = getattr(r, "episode_end_date")
-                        ed = _to_date(ed_val) if (ed_val is not None and pd.notna(ed_val)) else None
-                        if st <= end_date and (ed is None or ed >= end_date):
-                            self.con.execute(
-                                f"DELETE FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE} WHERE episode_id = ?",
-                                [getattr(r, "episode_id")],
-                            )
-                            self.con.execute(
-                                f"""
-                                INSERT INTO {THEME_CUSTOM_INDEX_EPISODE_TABLE} (
-                                    episode_id, theme_id, collection_id, episode_no,
-                                    episode_start_date, episode_confirmed_date, episode_end_date,
-                                    ma5_reentry_count, episode_return, rule_version,
-                                    production_run_id, input_snapshot_id, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                [
-                                    getattr(r, "episode_id"),
-                                    getattr(r, THEME_ID),
-                                    getattr(r, COLLECTION_ID),
-                                    getattr(r, "episode_no"),
-                                    getattr(r, "episode_start_date"),
-                                    getattr(r, "episode_confirmed_date"),
-                                    getattr(r, "episode_end_date") if pd.notna(getattr(r, "episode_end_date")) else None,
-                                    getattr(r, "ma5_reentry_count"),
-                                    getattr(r, "episode_return") if pd.notna(getattr(r, "episode_return")) else None,
-                                    THEME_CUSTOM_INDEX_EPISODE_VERSION,
-                                    run_id,
-                                    snap_id,
-                                    now,
-                                ],
-                            )
-            else:
-                # Replay mode: replace requested date range
-                self.con.execute(
-                    f"DELETE FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                    [start_date, end_date],
-                )
-                self.con.execute(
-                    f"DELETE FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                    [start_date, end_date],
-                )
-                self.con.execute(
-                    f"DELETE FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                    [start_date, end_date],
-                )
-                self.con.execute(
-                    f"DELETE FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE} WHERE episode_confirmed_date BETWEEN ? AND ? OR episode_start_date BETWEEN ? AND ?",
-                    [start_date, end_date, start_date, end_date],
-                )
-                if not all_episodes.empty:
-                    for r in all_episodes.itertuples(index=False):
-                        c_date = _to_date(getattr(r, "episode_confirmed_date"))
-                        s_date = _to_date(getattr(r, "episode_start_date"))
-                        if (start_date <= c_date <= end_date) or (start_date <= s_date <= end_date):
-                            self.con.execute(
-                                f"""
-                                INSERT INTO {THEME_CUSTOM_INDEX_EPISODE_TABLE} (
-                                    episode_id, theme_id, collection_id, episode_no,
-                                    episode_start_date, episode_confirmed_date, episode_end_date,
-                                    ma5_reentry_count, episode_return, rule_version,
-                                    production_run_id, input_snapshot_id, created_at
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                                [
-                                    getattr(r, "episode_id"),
-                                    getattr(r, THEME_ID),
-                                    getattr(r, COLLECTION_ID),
-                                    getattr(r, "episode_no"),
-                                    getattr(r, "episode_start_date"),
-                                    getattr(r, "episode_confirmed_date"),
-                                    getattr(r, "episode_end_date") if pd.notna(getattr(r, "episode_end_date")) else None,
-                                    getattr(r, "ma5_reentry_count"),
-                                    getattr(r, "episode_return") if pd.notna(getattr(r, "episode_return")) else None,
-                                    THEME_CUSTOM_INDEX_EPISODE_VERSION,
-                                    run_id,
-                                    snap_id,
-                                    now,
-                                ],
-                            )
+            # Replace daily tables for affected range [affected_output_start, affected_output_end]
+            self.con.execute(
+                f"DELETE FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date BETWEEN ? AND ?",
+                [affected_output_start, affected_output_end],
+            )
+            self.con.execute(
+                f"DELETE FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date BETWEEN ? AND ?",
+                [affected_output_start, affected_output_end],
+            )
+            self.con.execute(
+                f"DELETE FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date BETWEEN ? AND ?",
+                [affected_output_start, affected_output_end],
+            )
+
+            # For episodes: delete open episodes or episodes touching/after affected_output_start
+            self.con.execute(
+                f"""
+                DELETE FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE}
+                WHERE theme_id IN ({placeholders})
+                  AND (
+                      episode_end_date IS NULL
+                      OR episode_end_date >= ?
+                      OR episode_start_date >= ?
+                  )
+                """,
+                [*theme_ids, affected_output_start, affected_output_start],
+            )
+
+            if not all_episodes.empty:
+                for r in all_episodes.itertuples(index=False):
+                    th_id = getattr(r, THEME_ID)
+                    if th_id not in theme_ids:
+                        continue
+                    st = _to_date(getattr(r, "episode_start_date"))
+                    ed_val = getattr(r, "episode_end_date")
+                    ed = _to_date(ed_val) if (ed_val is not None and pd.notna(ed_val)) else None
+                    if ed is None or ed >= affected_output_start or st >= affected_output_start:
+                        self.con.execute(
+                            f"""
+                            INSERT INTO {THEME_CUSTOM_INDEX_EPISODE_TABLE} (
+                                episode_id, theme_id, collection_id, episode_no,
+                                episode_start_date, episode_confirmed_date, episode_end_date,
+                                ma5_reentry_count, episode_return, rule_version,
+                                production_run_id, input_snapshot_id, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                getattr(r, "episode_id"),
+                                th_id,
+                                getattr(r, COLLECTION_ID),
+                                getattr(r, "episode_no"),
+                                getattr(r, "episode_start_date"),
+                                getattr(r, "episode_confirmed_date"),
+                                getattr(r, "episode_end_date") if pd.notna(getattr(r, "episode_end_date")) else None,
+                                getattr(r, "ma5_reentry_count"),
+                                getattr(r, "episode_return") if pd.notna(getattr(r, "episode_return")) else None,
+                                THEME_CUSTOM_INDEX_EPISODE_VERSION,
+                                run_id,
+                                snap_id,
+                                now,
+                            ],
+                        )
+                        written_episodes.append(r)
 
             # Insert Daily Indices for sliced output
             if not written_index_daily.empty:
@@ -559,8 +541,8 @@ class ThemePipelineService:
                             getattr(r, COLLECTION_ID),
                             getattr(r, TRADE_DATE),
                             getattr(r, THEME_DAILY_RETURN) if pd.notna(getattr(r, THEME_DAILY_RETURN)) else None,
-                            getattr(r, THEME_LIMIT_UP_COUNT),
-                            getattr(r, THEME_RETURN_RANK) if pd.notna(getattr(r, THEME_RETURN_RANK)) else None,
+                            int(getattr(r, THEME_LIMIT_UP_COUNT)) if pd.notna(getattr(r, THEME_LIMIT_UP_COUNT)) else None,
+                            int(getattr(r, THEME_RETURN_RANK)) if pd.notna(getattr(r, THEME_RETURN_RANK)) else None,
                             getattr(r, EFFECTIVE_MEMBER_COUNT),
                             getattr(r, TOTAL_MEMBER_COUNT),
                             getattr(r, COMPARISON_UNIVERSE_SIZE),
@@ -590,8 +572,8 @@ class ThemePipelineService:
                     run_id,
                     run_type,
                     "SUCCEEDED",
-                    start_date,
-                    end_date,
+                    affected_output_start,
+                    affected_output_end,
                     kd,
                     THEME_M4_OBSERVATION_VERSION,
                     THEME_CUSTOM_INDEX_STATE_VERSION,
@@ -621,12 +603,13 @@ class ThemePipelineService:
             input_snapshot_id=snap_id,
             theme_count=len(themes),
             trade_date_count=len(output_trade_dates),
-            start_date=start_date,
-            end_date=end_date,
+            start_date=affected_output_start,
+            end_date=affected_output_end,
             total_index_rows=len(written_index_daily),
             total_observation_rows=len(written_m4_obs),
-            total_episodes=len(all_episodes),
+            total_episodes=len(written_episodes),
             execution_seconds=exec_sec,
+            total_state_rows=len(written_states),
         )
 
     def run_m4_daily(

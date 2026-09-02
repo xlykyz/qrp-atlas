@@ -290,3 +290,76 @@ def test_batch_append_atomic_and_rollback(db):
     assert len(records) == 3
     all_inserted = service.repo.get_asset_memberships(coll.collection_id)
     assert len(all_inserted) == 3
+
+
+def test_theme_collection_membership_effective_interval_invariants(db):
+    """验证 Theme / Collection 1:1 有效区间一致性及 Membership lifecycle 必须落入集合区间：
+    1. member.effective_from < collection.effective_from -> MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE
+    2. collection 已闭合但 member open-ended -> MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE
+    3. member.effective_to > collection.effective_to -> MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE
+    4. Theme 与 Collection 区间不匹配 -> PIT_INVARIANT_VIOLATION
+    """
+    service = StockCollectionService(db)
+    thm, coll = service.create_canonical_theme(
+        theme_name="人形机器人",
+        source_key="HUMANOID_ROBOT",
+        effective_from=date(2026, 2, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # 1. 尝试添加早于 collection effective_from 的成员 -> fail
+    with pytest.raises(StockCollectionError, match="MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE"):
+        service.add_member(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 1, 15),  # 01-15 < 02-01
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # 2. 为集合和主题设定闭合时间 effective_to = 2026-06-01
+    db.execute(
+        "UPDATE stock_collection SET effective_to = ? WHERE collection_id = ?",
+        [date(2026, 6, 1), coll.collection_id],
+    )
+    db.execute(
+        "UPDATE theme SET effective_to = ? WHERE theme_id = ?",
+        [date(2026, 6, 1), thm.theme_id],
+    )
+
+    # 3. 闭合集合不允许添加 open-ended 成员
+    with pytest.raises(StockCollectionError, match="MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE"):
+        service.add_member(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 3, 1),
+            effective_to=None,  # open-ended in closed collection!
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # 4. member effective_to 超过 collection effective_to -> fail
+    with pytest.raises(StockCollectionError, match="MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE"):
+        service.add_member(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 3, 1),
+            effective_to=date(2026, 7, 1),  # 07-01 > 06-01
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # 5. Theme 与 Collection 区间不匹配 -> PIT_INVARIANT_VIOLATION
+    db.execute(
+        "UPDATE theme SET effective_to = ? WHERE theme_id = ?",
+        [date(2026, 8, 1), thm.theme_id],
+    )
+    with pytest.raises(StockCollectionError, match="PIT_INVARIANT_VIOLATION"):
+        service.add_member(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 3, 1),
+            effective_to=date(2026, 5, 1),
+            available_trade_date=date(2026, 1, 1),
+        )

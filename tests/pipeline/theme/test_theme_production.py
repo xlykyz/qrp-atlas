@@ -272,3 +272,182 @@ def test_source_drift_detection_in_lineage_audit(db):
     audit_drifted = query_service.audit_m4_observation("THM:QRP:AI_CHIP", d)
     assert audit_drifted.is_reproducible is False
     assert audit_drifted.discrepancy_reason == "CURRENT_SOURCE_DIFFERS_FROM_PRODUCTION_SNAPSHOT"
+
+
+def test_historical_correction_forward_dependency_closure(db):
+    """验证历史修订从受影响起点开始，自动向前闭包直到当前 Theme 已 materialize 的最大交易日：
+    - 已生产至 dates[9] (Day 10)
+    - 历史修订请求 start_date = dates[5] (Day 6), end_date = dates[5] (Day 6)
+    - 系统必须自动识别 affected_output_end = dates[9]
+    - 从 Inception 重算，输出写入 dates[5]..dates[9]
+    """
+    dates = [
+        date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7),
+        date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12), date(2026, 8, 13), date(2026, 8, 14),
+    ]
+    service = ThemePipelineService(db)
+
+    # 1. 初始生产全部 10 天
+    service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1])
+    max_d = db.execute("SELECT MAX(trade_date) FROM theme_custom_index_daily").fetchone()[0]
+    assert max_d == dates[-1]
+
+    # 2. 对 Day 6 (dates[5]) 发生历史修订（仅请求 Day 6）
+    rep = service.rebuild_m4_facts(start_date=dates[5], end_date=dates[5], run_type="CORRECTION")
+
+    # 验证报告中 affected_output_end 自动延伸至当前物化上限 dates[-1]
+    assert rep.start_date == dates[5]
+    assert rep.end_date == dates[-1]
+    assert rep.trade_date_count == 5  # dates[5], [6], [7], [8], [9]
+
+    # 验证 theme_production_run 表中记录的 target_end_date 也是 dates[-1]
+    run_rec = db.execute(
+        "SELECT target_start_date, target_end_date FROM theme_production_run WHERE production_run_id = ?",
+        [rep.production_run_id],
+    ).fetchone()
+    assert run_rec[0] == dates[5]
+    assert run_rec[1] == dates[-1]
+
+
+def test_cross_range_existing_episode_update_on_historical_correction(db):
+    """验证跨越修订起点的已有 Episode 能够被正确删除并依据完整上下文重建：
+    - Episode 启动于 dates[5]，确认于 dates[6]，在 dates[7] 之后保持 open
+    - 针对 dates[7] 发起历史修订
+    - 尽管 episode_start_date (dates[5]) 与 episode_confirmed_date (dates[6]) 均落在 dates[7] 之前，
+      由于 episode 是 open 的 (或 episode_end_date >= dates[7])，必须自动被清理并重新写入！
+    """
+    dates = [
+        date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7),
+        date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12), date(2026, 8, 13), date(2026, 8, 14),
+    ]
+    service = ThemePipelineService(db)
+
+    # 构造能够触发 Episode 的价格形态：Day 5 大幅下跌进入 BASE，Day 6 上涨进入 CANDIDATE，Day 7 上涨确认 ACTIVE
+    db.execute("UPDATE daily_market_snapshot SET pct_change = -18.0 WHERE trade_date = ?", [dates[4]])
+    db.execute("UPDATE daily_market_snapshot SET pct_change = 15.0 WHERE trade_date = ?", [dates[5]])
+    db.execute("UPDATE daily_market_snapshot SET pct_change = 5.0 WHERE trade_date = ?", [dates[6]])
+
+    # 1. 初始生产全部 10 天
+    rep1 = service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1])
+    episodes_before = db.execute(
+        "SELECT episode_id, episode_start_date, episode_confirmed_date, episode_end_date, production_run_id FROM theme_custom_index_episode"
+    ).fetchall()
+    assert len(episodes_before) >= 1
+    # 确认 episode 的 start (dates[5]) 和 confirmed (dates[6]) 都在 dates[7] 之前
+    assert episodes_before[0][1] < dates[7]
+    assert episodes_before[0][2] < dates[7]
+
+    # 2. 模拟底层数据变化并对 dates[7] 发起历史修订
+    db.execute(
+        "UPDATE daily_market_snapshot SET pct_change = 1.0 WHERE trade_date = ? AND ticker = '000001.SZ'",
+        [dates[7]],
+    )
+    rep2 = service.rebuild_m4_facts(start_date=dates[7], end_date=dates[7], run_type="CORRECTION")
+
+    # 3. 验证受影响 Episode 的 production_run_id 已被更新为本次修订的 run_id
+    episodes_after = db.execute(
+        "SELECT episode_id, episode_start_date, episode_confirmed_date, episode_end_date, production_run_id FROM theme_custom_index_episode"
+    ).fetchall()
+    assert len(episodes_after) >= 1
+    for ep in episodes_after:
+        end_d = ep[3]
+        if end_d is None or end_d >= dates[7]:
+            assert ep[4] == rep2.production_run_id
+
+
+def test_deterministic_replay_with_as_of_and_different_knowledge_dates(db):
+    """验证 (T, K) 双时间确定性回放：
+    - 同一 as_of_date (T = 2026-08-06)，不同 knowledge_date (K1 vs K2) 表达知识演进，产生不同但确定的输出
+    - (T, K) 相同多次运行产生 100% 确定性输出
+    """
+    service = ThemePipelineService(db)
+    sc_service = StockCollectionService(db)
+
+    # 添加第 3 只股票 000002.SZ，在 K2 = 2026-08-08 才可见
+    db.execute("INSERT INTO stock_info (ticker, name, list_date) VALUES ('000002.SZ', 'Stock C', '2020-01-01')")
+    prior_dates = [date(2026, 7, i) for i in range(20, 31)]
+    for p_d in prior_dates:
+        db.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, name, open, high, low, close, volume, amount, pct_change, is_limit_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [p_d, "000002.SZ", "Stock C", 10.0, 10.0, 9.8, 10.0, 1000, 10000, 0.0, False],
+        )
+    for d in [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6)]:
+        db.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, name, open, high, low, close, volume, amount, pct_change, is_limit_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [d, "000002.SZ", "Stock C", 10.0, 10.5, 9.8, 10.5, 1000, 10000, 5.0, False],
+        )
+
+    thm = db.execute("SELECT theme_id, collection_id FROM theme LIMIT 1").fetchone()
+    theme_id, coll_id = thm[0], thm[1]
+
+    # 添加成员，effective_from 2026-08-03，但 available_trade_date 为 2026-08-08 (K2)
+    sc_service.add_member(
+        theme_id=theme_id,
+        collection_id=coll_id,
+        asset_id="000002.SZ",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 8),
+    )
+
+    t = date(2026, 8, 6)
+    k1 = date(2026, 8, 5)  # K1 无法获知 Stock C
+    k2 = date(2026, 8, 9)  # K2 可以获知 Stock C
+
+    # 1. 以 (T, K1) 回放两次
+    rep_k1_first = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
+    m4_k1_first = db.execute(
+        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
+    ).fetchone()
+
+    rep_k1_second = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
+    m4_k1_second = db.execute(
+        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
+    ).fetchone()
+
+    # K1 下必须完全一致 (2 个成员)
+    assert m4_k1_first == m4_k1_second
+    assert m4_k1_first[0] == 2
+    assert rep_k1_first.input_snapshot_id == rep_k1_second.input_snapshot_id
+
+    # 2. 以 (T, K2) 回放两次
+    rep_k2_first = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
+    m4_k2_first = db.execute(
+        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
+    ).fetchone()
+
+    rep_k2_second = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
+    m4_k2_second = db.execute(
+        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
+    ).fetchone()
+
+    # K2 下必须完全一致 (3 个成员)
+    assert m4_k2_first == m4_k2_second
+    assert m4_k2_first[0] == 3
+    assert rep_k2_first.input_snapshot_id == rep_k2_second.input_snapshot_id
+
+    # K1 与 K2 的结果不同，表达确定性的知识演进
+    assert m4_k1_first[0] != m4_k2_first[0]
+    assert rep_k1_first.input_snapshot_id != rep_k2_first.input_snapshot_id
+
+
+def test_audit_defaults_to_persisted_production_knowledge_date(db):
+    """验证当 trade_date != production knowledge_date 时，audit_m4_observation(knowledge_date=None)
+    自动解析并使用 production run 中保存的 knowledge_date。
+    """
+    service = ThemePipelineService(db)
+    query_service = ThemeQueryService(db)
+
+    t = date(2026, 8, 4)
+    k_prod = date(2026, 8, 10)  # trade_date (08-04) != knowledge_date (08-10)
+
+    # 运行生产，显式指定 knowledge_date = k_prod
+    rep = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k_prod)
+
+    # 不传 knowledge_date 进行审计
+    audit = query_service.audit_m4_observation("THM:QRP:AI_CHIP", t, knowledge_date=None)
+
+    assert audit.production_knowledge_date == k_prod
+    assert audit.audit_knowledge_date == k_prod
+    assert audit.production_knowledge_date != t
+    assert audit.is_reproducible is True
+    assert audit.discrepancy_reason is None

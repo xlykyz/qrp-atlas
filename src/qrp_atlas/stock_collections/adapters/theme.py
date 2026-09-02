@@ -9,7 +9,10 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-from qrp_atlas.contracts.stock_collection import THEME_MEMBERSHIP_HISTORY_TABLE
+from qrp_atlas.contracts.stock_collection import (
+    STOCK_COLLECTION_TABLE,
+    THEME_MEMBERSHIP_HISTORY_TABLE,
+)
 
 from ..models import (
     MembershipExplanation,
@@ -117,7 +120,24 @@ class ThemeAdapter:
         coll_filter = "AND collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
 
         sql = f"""
-        WITH visible_revisions AS (
+        WITH visible_collections AS (
+            SELECT
+                collection_id,
+                effective_from AS coll_effective_from,
+                effective_to AS coll_effective_to,
+                status AS coll_status,
+                row_number() OVER (
+                    PARTITION BY collection_id
+                    ORDER BY available_trade_date DESC, ingested_at DESC
+                ) as rn
+            FROM {STOCK_COLLECTION_TABLE}
+            WHERE available_trade_date <= ?
+              {coll_filter}
+        ),
+        latest_collections AS (
+            SELECT * FROM visible_collections WHERE rn = 1 AND coll_status = 'ACTIVE'
+        ),
+        visible_revisions AS (
             SELECT
                 membership_id,
                 theme_id,
@@ -151,12 +171,22 @@ class ThemeAdapter:
             r.effective_to,
             r.available_trade_date
         FROM latest_revisions r
+        JOIN latest_collections c
+          ON r.collection_id = c.collection_id
         JOIN dates d
           ON r.effective_from <= d.trade_date
          AND (r.effective_to IS NULL OR d.trade_date < r.effective_to)
+         AND c.coll_effective_from <= d.trade_date
+         AND (c.coll_effective_to IS NULL OR d.trade_date < c.coll_effective_to)
         ORDER BY r.collection_id, d.trade_date, r.asset_id
         """
-        params: list[Any] = [knowledge_date, *collection_ids, list(trade_dates)]
+        params: list[Any] = [
+            knowledge_date,
+            *collection_ids,
+            knowledge_date,
+            *collection_ids,
+            list(trade_dates),
+        ]
         return self.con.execute(sql, params).df()
 
     def reverse_lookup(

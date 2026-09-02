@@ -160,3 +160,47 @@ def test_resolver_explain_reentry_and_equivalence(db):
     )
     assert len(batch_df) == 2  # dates 2026-02-01 and 2026-05-15
     assert set(pd.to_datetime(batch_df["trade_date"]).dt.date.tolist()) == {date(2026, 2, 1), date(2026, 5, 15)}
+
+
+def test_batch_resolver_collection_effective_interval(db):
+    """验证 Batch Resolver 严格执行 Collection Effective-Time ∩ Membership Effective-Time：
+    集合闭合后，即使成员原本有效，也不会解析出来；集合未生效前同样不解析。
+    """
+    service = StockCollectionService(db)
+    resolver = StockCollectionResolver(db)
+
+    thm, coll = service.create_canonical_theme(
+        theme_name="周期主题",
+        source_key="CYCLE_THEME",
+        effective_from=date(2026, 2, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+    # 给集合设置 effective_to = 2026-04-01
+    db.execute(
+        "UPDATE stock_collection SET effective_to = ? WHERE collection_id = ?",
+        [date(2026, 4, 1), coll.collection_id],
+    )
+    db.execute(
+        "UPDATE theme SET effective_to = ? WHERE theme_id = ?",
+        [date(2026, 4, 1), thm.theme_id],
+    )
+
+    # 添加成员，effective_from 2026-02-01, effective_to 2026-04-01
+    service.add_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="000001.SZ",
+        effective_from=date(2026, 2, 1),
+        effective_to=date(2026, 4, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # 批量解析日期跨越：未生效前 (01-15)、生效中 (02-15)、失效后 (04-15)
+    trade_dates = [date(2026, 1, 15), date(2026, 2, 15), date(2026, 4, 15)]
+    kd = date(2026, 5, 1)
+
+    batch_df = resolver.batch_resolve_members([coll.collection_id], trade_dates, knowledge_date=kd)
+    # 只有 2026-02-15 满足 Collection Effective ∩ Membership Effective
+    assert len(batch_df) == 1
+    assert pd.to_datetime(batch_df.iloc[0]["trade_date"]).date() == date(2026, 2, 15)
+    assert batch_df.iloc[0]["asset_id"] == "000001.SZ"

@@ -218,13 +218,25 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
 
         for table_name in expected_ddl_tables:
             table_schema = TABLE_BY_NAME[table_name]
-            cols_info = con.execute(
-                f"SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '{table_name}' ORDER BY ordinal_position"
-            ).fetchall()
-            actual_col_names = [r[0] for r in cols_info]
+            info = con.execute(f"PRAGMA table_info({table_name})").fetchall()
+            actual_col_names = [r[1] for r in info]
             expected_col_names = list(table_schema.column_names())
             assert actual_col_names == expected_col_names, (
                 f"Table {table_name} columns mismatch: actual {actual_col_names} vs expected {expected_col_names}"
+            )
+            for r, col in zip(info, table_schema.columns):
+                _, name, col_type, notnull, _, pk = r
+                assert name == col.name
+                assert col_type.upper() == col.dtype.upper(), (
+                    f"Table {table_name}.{name} type mismatch: DDL {col_type} vs schema {col.dtype}"
+                )
+                expected_notnull = not col.nullable
+                assert bool(notnull) == expected_notnull, (
+                    f"Table {table_name}.{name} nullability mismatch: DDL notnull={notnull} vs expected {expected_notnull}"
+                )
+            actual_pk = tuple(r[1] for r in info if r[5])
+            assert set(actual_pk) == set(table_schema.primary_key), (
+                f"Table {table_name} PK mismatch: DDL {actual_pk} vs schema {table_schema.primary_key}"
             )
     finally:
         con.close()

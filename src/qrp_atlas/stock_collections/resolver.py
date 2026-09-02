@@ -109,14 +109,30 @@ class StockCollectionResolver:
                 ]
             )
 
-        # Validate collections visibility
+        # Validate collections visibility at knowledge_date
         for coll_id in collection_ids:
-            ctx = StockCollectionQueryContext(
-                as_of_date=max(trade_dates),
-                knowledge_date=knowledge_date,
-                allowed_scopes=allowed_scopes,
-            )
-            self.resolve_collection(coll_id, ctx)
+            revisions = self.repo.get_collection_revisions(coll_id)
+            if not revisions:
+                raise StockCollectionError(
+                    "COLLECTION_NOT_FOUND", f"Collection {coll_id} does not exist"
+                )
+            visible = [r for r in revisions if r.available_trade_date <= knowledge_date]
+            if not visible:
+                raise StockCollectionError(
+                    "COLLECTION_NOT_KNOWN_AT_KNOWLEDGE_DATE",
+                    f"Collection {coll_id} is not known as of knowledge_date {knowledge_date}",
+                )
+            latest = visible[-1]
+            if latest.collection_scope not in allowed_scopes:
+                raise StockCollectionError(
+                    "SCOPE_NOT_ALLOWED",
+                    f"Collection scope {latest.collection_scope} not in allowed scopes {allowed_scopes}",
+                )
+            if latest.collection_type != CollectionType.THEME:
+                raise StockCollectionError(
+                    "UNSUPPORTED_COLLECTION_TYPE",
+                    f"Collection type {latest.collection_type} is not supported in v1.1 Task 04-A",
+                )
 
         return self.theme_adapter.batch_resolve_members(
             collection_ids, trade_dates, knowledge_date

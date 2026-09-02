@@ -7,22 +7,7 @@ conftest.py 或测试文件中。
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 from typing import Callable
-import unittest.mock
-
-# Mock resource and POSIX paths on Windows test environments without modifying production source code
-if sys.platform.startswith("win"):
-    if "resource" not in sys.modules:
-        mock_resource = unittest.mock.MagicMock()
-        mock_resource.RUSAGE_SELF = 0
-        mock_resource.getrusage.return_value.ru_maxrss = 0
-        sys.modules["resource"] = mock_resource
-
-    _orig_is_absolute = Path.is_absolute
-    def _is_absolute_shim(self):
-        return _orig_is_absolute(self) or str(self).startswith(("/", "\\"))
-    Path.is_absolute = _is_absolute_shim
 
 import duckdb
 import pytest

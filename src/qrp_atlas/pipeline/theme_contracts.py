@@ -251,32 +251,123 @@ def _duplicate_quality(
     return checker
 
 
-def _check_m4_completion(context: PipelineRunContext) -> CheckResult:
-    target = _target(context)
-    try:
-        con = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+def _make_table_completion_checker(table_name: str, check_id: str, error_code: str, is_episode: bool = False):
+    def checker(context: PipelineRunContext) -> CheckResult:
+        target = _target(context)
         try:
-            row = con.execute(
-                f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?",
-                [target],
-            ).fetchone()
-            rows = int(row[0]) if row else 0
-        finally:
-            con.close()
-    except Exception as exc:
-        return CheckResult.failure(
-            "theme_m4_completion",
-            "THEME_M4_COMPLETION_MISSING",
-            "M4 observation output table is not queryable",
-            exception=type(exc).__name__,
-        )
-    return CheckResult.success("theme_m4_completion", target_date=target.isoformat(), rows=rows)
+            con = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+            try:
+                if is_episode:
+                    row = con.execute(
+                        f"SELECT COUNT(*) FROM {table_name} WHERE episode_confirmed_date <= ? AND (episode_end_date IS NULL OR episode_end_date >= ?)",
+                        [target, target],
+                    ).fetchone()
+                else:
+                    row = con.execute(
+                        f"SELECT COUNT(*) FROM {table_name} WHERE trade_date = ?",
+                        [target],
+                    ).fetchone()
+                rows = int(row[0]) if row else 0
+            finally:
+                con.close()
+        except Exception as exc:
+            return CheckResult.failure(
+                check_id,
+                error_code,
+                f"{table_name} output table is not queryable",
+                exception=type(exc).__name__,
+            )
+        return CheckResult.success(check_id, target_date=target.isoformat(), rows=rows)
+    checker.__name__ = f"{check_id}_checker"
+    return checker
 
 
 def _m4_outputs() -> tuple[OutputContract, ...]:
     return (
         OutputContract(
-            output_id="theme_m4_observations",
+            output_id="theme_custom_index_daily",
+            physical_resource=QUANT_DB_RESOURCE,
+            location="settings.paths.duckdb_path",
+            object_name=THEME_CUSTOM_INDEX_DAILY_TABLE,
+            unique_key=("theme_id", "trade_date"),
+            write_mode=WriteMode.REPLACE_TARGET_DATE,
+            target_date_semantics="target date theme custom daily indices atomically calculated and replaced",
+            completion=CompletionContract(
+                marker=f"table:{THEME_CUSTOM_INDEX_DAILY_TABLE}",
+                error_code="THEME_INDEX_DAILY_OUTPUT_EMPTY",
+                checker=_make_table_completion_checker(
+                    THEME_CUSTOM_INDEX_DAILY_TABLE,
+                    "theme_index_daily_completion",
+                    "THEME_INDEX_DAILY_COMPLETION_MISSING",
+                ),
+            ),
+            quality_checks=(
+                _duplicate_quality(
+                    THEME_CUSTOM_INDEX_DAILY_TABLE,
+                    "theme_index_daily_duplicate_quality",
+                    "THEME_INDEX_DAILY_DUPLICATE_KEYS",
+                    ("theme_id", "trade_date"),
+                ),
+            ),
+            allow_empty=True,
+        ),
+        OutputContract(
+            output_id="theme_custom_index_state",
+            physical_resource=QUANT_DB_RESOURCE,
+            location="settings.paths.duckdb_path",
+            object_name=THEME_CUSTOM_INDEX_STATE_TABLE,
+            unique_key=("theme_id", "trade_date"),
+            write_mode=WriteMode.REPLACE_TARGET_DATE,
+            target_date_semantics="target date theme custom index trend states atomically calculated and replaced",
+            completion=CompletionContract(
+                marker=f"table:{THEME_CUSTOM_INDEX_STATE_TABLE}",
+                error_code="THEME_INDEX_STATE_OUTPUT_EMPTY",
+                checker=_make_table_completion_checker(
+                    THEME_CUSTOM_INDEX_STATE_TABLE,
+                    "theme_index_state_completion",
+                    "THEME_INDEX_STATE_COMPLETION_MISSING",
+                ),
+            ),
+            quality_checks=(
+                _duplicate_quality(
+                    THEME_CUSTOM_INDEX_STATE_TABLE,
+                    "theme_index_state_duplicate_quality",
+                    "THEME_INDEX_STATE_DUPLICATE_KEYS",
+                    ("theme_id", "trade_date"),
+                ),
+            ),
+            allow_empty=True,
+        ),
+        OutputContract(
+            output_id="theme_custom_index_episode",
+            physical_resource=QUANT_DB_RESOURCE,
+            location="settings.paths.duckdb_path",
+            object_name=THEME_CUSTOM_INDEX_EPISODE_TABLE,
+            unique_key=("episode_id",),
+            write_mode=WriteMode.UPSERT,
+            target_date_semantics="theme custom index episodes maintained across state transitions",
+            completion=CompletionContract(
+                marker=f"table:{THEME_CUSTOM_INDEX_EPISODE_TABLE}",
+                error_code="THEME_INDEX_EPISODE_OUTPUT_EMPTY",
+                checker=_make_table_completion_checker(
+                    THEME_CUSTOM_INDEX_EPISODE_TABLE,
+                    "theme_index_episode_completion",
+                    "THEME_INDEX_EPISODE_COMPLETION_MISSING",
+                    is_episode=True,
+                ),
+            ),
+            quality_checks=(
+                _duplicate_quality(
+                    THEME_CUSTOM_INDEX_EPISODE_TABLE,
+                    "theme_index_episode_duplicate_quality",
+                    "THEME_INDEX_EPISODE_DUPLICATE_KEYS",
+                    ("episode_id",),
+                ),
+            ),
+            allow_empty=True,
+        ),
+        OutputContract(
+            output_id="theme_m4_observation",
             physical_resource=QUANT_DB_RESOURCE,
             location="settings.paths.duckdb_path",
             object_name=THEME_M4_OBSERVATION_TABLE,
@@ -286,7 +377,11 @@ def _m4_outputs() -> tuple[OutputContract, ...]:
             completion=CompletionContract(
                 marker=f"table:{THEME_M4_OBSERVATION_TABLE}",
                 error_code="THEME_M4_OUTPUT_EMPTY",
-                checker=_check_m4_completion,
+                checker=_make_table_completion_checker(
+                    THEME_M4_OBSERVATION_TABLE,
+                    "theme_m4_completion",
+                    "THEME_M4_COMPLETION_MISSING",
+                ),
             ),
             quality_checks=(
                 _duplicate_quality(
@@ -322,15 +417,39 @@ def _execute_theme_m4(context: PipelineRunContext) -> BusinessExecution:
             knowledge_date=knowledge_date,
             execution_control=context.execution_control,
         )
+        total_rows_written = (
+            report.total_index_rows
+            + report.total_state_rows
+            + report.total_episodes
+            + report.total_observation_rows
+        )
         return BusinessExecution.success(
             metrics=PipelineMetrics(
                 rows_read=report.total_index_rows,
-                rows_written=report.total_observation_rows,
+                rows_written=total_rows_written,
                 database_write_seconds=report.execution_seconds,
             ),
             outputs=(
                 OutputResult(
-                    output_id="theme_m4_observations",
+                    output_id="theme_custom_index_daily",
+                    rows_written=report.total_index_rows,
+                    location="settings.paths.duckdb_path",
+                    completed=True,
+                ),
+                OutputResult(
+                    output_id="theme_custom_index_state",
+                    rows_written=report.total_state_rows,
+                    location="settings.paths.duckdb_path",
+                    completed=True,
+                ),
+                OutputResult(
+                    output_id="theme_custom_index_episode",
+                    rows_written=report.total_episodes,
+                    location="settings.paths.duckdb_path",
+                    completed=True,
+                ),
+                OutputResult(
+                    output_id="theme_m4_observation",
                     rows_written=report.total_observation_rows,
                     location="settings.paths.duckdb_path",
                     completed=True,

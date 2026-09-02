@@ -162,36 +162,57 @@ def test_episode_termination_requires_two_days_below_ma10_outside_active():
 
 
 def test_system_b_and_theme_episode_direct_equivalence():
-    """验证 Theme Episode 规则与 System B 规则的严格等价性：
-    1. 起始条件（CANDIDATE -> ACTIVE）
-    2. 确认日期
-    3. Re-entry 计数（CANDIDATE -> ACTIVE 发生在活跃 Episode 中）
-    4. 结束条件（连续两日 close < MA10 且当前状态非 ACTIVE）
+    """真实双向调用 Theme Trend/Episode 与 System B Episode 核心实现，断言完全等价：
+    1. 起始条件（CANDIDATE -> ACTIVE，episode_start_date 完全一致）
+    2. 确认日期（episode_confirmed_date 完全一致）
+    3. Re-entry 计数（CANDIDATE -> ACTIVE 发生在活跃 Episode 中，ma5_reentry_count 完全一致）
+    4. 结束条件（连续两日 close < MA10 且当前状态非 ACTIVE，episode_end_date 完全一致）
     """
     from qrp_atlas.indicators.system_b.episode import calculate_system_b_episodes
     from qrp_atlas.contracts import ASSET_ID
 
-    dates = [date(2026, 8, i) for i in range(1, 21)]
-    prices = [
-        100.0, 100.0, 100.0, 100.0, 95.0,   # 1-5
-        105.0, 110.0, 112.0, 115.0, 118.0,  # 6-10
-        90.0, 120.0, 125.0, 130.0, 135.0,   # 11-15 (drop below MA5 on 11, candidate on 12, active on 13 -> re-entry=1)
-        100.0, 95.0, 90.0, 85.0, 80.0       # 16-20 (drop below MA10 on 16, second drop on 17 -> end on 17)
-    ]
+    dates = [date(2026, 8, i) for i in range(1, 26)]
+    prices = (
+        [100.0] * 10
+        + [95.0, 105.0, 110.0, 90.0, 120.0, 125.0]
+        + [70.0, 65.0, 60.0, 55.0, 50.0, 45.0, 40.0, 35.0, 30.0]
+    )
     df = pd.DataFrame({
-        COLLECTION_ID: ["COLL_EQ"] * 20,
+        COLLECTION_ID: ["COLL_EQ"] * 25,
         TRADE_DATE: dates,
         INDEX_LEVEL: prices,
     })
+
+    # 1. 调用 Theme 真实实现
     theme_res = calculate_theme_index_trend_and_episodes(df, theme_id="TEST_EQ")
     theme_eps = theme_res.episodes
     theme_states = theme_res.daily_states
 
+    # 2. 构造数据并实际调用 System B 真实实现
+    sys_b_df = pd.DataFrame({
+        ASSET_ID: ["TEST_EQ"] * 25,
+        TRADE_DATE: pd.to_datetime(theme_states[TRADE_DATE]),
+        CLOSE: theme_states[CLOSE],
+        MA5: theme_states[MA5],
+        MA10: theme_states[MA10],
+        TREND_STATE: theme_states[TREND_STATE],
+    })
+    valid_mask = sys_b_df[TREND_STATE].notna() & sys_b_df[MA10].notna()
+    sys_b_res = calculate_system_b_episodes(sys_b_df[valid_mask])
+    sys_b_eps = sys_b_res.episodes
+
+    # 3. 断言 Episodes 双向完全等价
     assert len(theme_eps) == 1
+    assert len(sys_b_eps) == 1
+
     t_ep = theme_eps.iloc[0]
-    assert t_ep[EPISODE_START_DATE] == dates[5]
-    assert t_ep[EPISODE_CONFIRMED_DATE] == dates[6]
-    assert t_ep[MA5_REENTRY_COUNT] == 1
-    # Day 16: close=100.0, MA10=114.5. First day < MA10 -> does not end
-    # Day 17: close=95.0, MA10=111.9. Second day < MA10 -> ends on Day 17 (dates[16])
-    assert t_ep[EPISODE_END_DATE] == dates[16]
+    s_ep = sys_b_eps.iloc[0]
+
+    # episode_start_date 完全相同
+    assert t_ep[EPISODE_START_DATE] == pd.to_datetime(s_ep[EPISODE_START_DATE]).date()
+    # episode_confirmed_date 完全相同
+    assert t_ep[EPISODE_CONFIRMED_DATE] == pd.to_datetime(s_ep[EPISODE_CONFIRMED_DATE]).date()
+    # episode_end_date 完全相同
+    assert t_ep[EPISODE_END_DATE] == pd.to_datetime(s_ep[EPISODE_END_DATE]).date()
+    # ma5_reentry_count 完全相同
+    assert int(t_ep[MA5_REENTRY_COUNT]) == int(s_ep[MA5_REENTRY_COUNT])
