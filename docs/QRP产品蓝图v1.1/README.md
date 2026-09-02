@@ -71,7 +71,8 @@ primary_document: docs/15_交易系统2.0(初稿).md
 - `09_Pipeline现状事实与迁移边界.md`：现有 Hermes Pipeline 的源码事实、迁移边界与未裁决项。
 - `10_Pipeline基础运行框架.md`：独立运行库、Scheduler、Runner、资源锁和部署模板边界。
 - `task03/README.md`：System B 2.0 纯历史事实派生模型、NULL 与生命周期语义。
-- `task04/README.md`：System B 全市场事实统计、独立求值、范围原子覆盖、每日定点计算、查询与部署说明。
+- `system-b-state-productionization/README.md`：System B 全市场事实统计、独立求值、范围原子覆盖、每日定点计算、查询与部署说明。
+- `task04/README.md`：正式 Task 04“题材和市场结构事实”的工作包总览，按 M4 → M5 → M6 串行推进。
 
 ## 6. 分支治理
 
