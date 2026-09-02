@@ -137,7 +137,7 @@ def test_cli_config_path_is_independent_of_current_directory(tmp_path: Path,monk
     assert calls[0][1]==calls[1][1]==output
 
 
-def test_audit_rejects_segment_invariants(tmp_path: Path):
+def test_audit_rejects_segment_invariants_and_provides_structured_closure_diagnostics(tmp_path: Path):
     output = duckdb.connect(str(tmp_path / "audit_seg.duckdb"))
     ensure_schema(output)
     # Valid Episode
@@ -156,7 +156,19 @@ def test_audit_rejects_segment_invariants(tmp_path: Path):
     assert audit["quality"]["return_closure_violations"] == 1
     assert audit["quality"]["orphan_segments"] == 0
     assert audit["quality"]["trading_days_mismatch"] == 0
+    assert audit["quality"]["segment_start_boundary_mismatch"] == 0
+    assert audit["quality"]["segment_end_boundary_mismatch"] == 0
     assert audit["quality"]["active_sprint_count_mismatch"] == 0
+
+    # Verify structured failure evidence
+    diagnostics = audit["evidence"]["return_closure_diagnostics"]
+    assert len(diagnostics) == 1
+    diag = diagnostics[0]
+    assert diag["episode_id"] == "A_EP_0001"
+    assert diag["lhs"] == pytest.approx(1.10)
+    assert diag["rhs"] == pytest.approx(1.20)
+    assert diag["abs_error"] == pytest.approx(0.10)
+    assert diag["rel_error"] == pytest.approx(0.10 / 1.20)
 
     # Inject orphan segment
     output.execute("""INSERT INTO system_b_episode_segment VALUES
@@ -166,4 +178,39 @@ def test_audit_rejects_segment_invariants(tmp_path: Path):
 
     source.close()
     output.close()
+
+
+def test_audit_rejects_segment_start_and_end_boundary_mutations(tmp_path: Path):
+    output = duckdb.connect(str(tmp_path / "audit_boundary.duckdb"))
+    ensure_schema(output)
+    output.execute("""INSERT INTO system_b_episode VALUES
+        ('A_EP_0001','A',1,DATE '2026-01-01',DATE '2026-01-02',DATE '2026-01-06',0,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01')""")
+    output.execute("""INSERT INTO system_b_episode_observation VALUES
+        (DATE '2026-01-02','A','A_EP_0001',1,0,10.0,9.0,8.0,'ACTIVE','CANDIDATE','CANDIDATE->ACTIVE',0.0,0.0,0.0,0,TRUE,FALSE,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01'),
+        (DATE '2026-01-05','A','A_EP_0001',2,1,12.0,9.5,8.5,'NON_ACTIVE','ACTIVE',NULL,0.2,0.2,0.0,0,FALSE,FALSE,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01'),
+        (DATE '2026-01-06','A','A_EP_0001',3,2,11.0,9.0,8.0,'NON_ACTIVE','NON_ACTIVE',NULL,0.1,0.2,-0.08,0,FALSE,TRUE,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01')""")
+    
+    # 1. Start boundary mismatch mutation: first segment start_date mutated to Jan 01 (instead of Jan 02)
+    output.execute("""INSERT INTO system_b_episode_segment VALUES
+        ('A_EP_0001_SEG_001','A_EP_0001','A',1,'ACTIVE',1,DATE '2026-01-01',DATE '2026-01-01',DATE '2026-01-02',1,10.0,10.0,10.0,0.0,10.0,DATE '2026-01-02',0.0,0.0,FALSE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01'),
+        ('A_EP_0001_SEG_002','A_EP_0001','A',2,'NON_ACTIVE',NULL,DATE '2026-01-02',DATE '2026-01-05',DATE '2026-01-06',2,10.0,12.0,11.0,0.1,12.0,DATE '2026-01-05',0.2,-0.08,FALSE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01')""")
+
+    source = duckdb.connect()
+    audit_start = audit_episodes(output, source, acceptance_start_date=pd.Timestamp("2013-01-01").date(), end_date=pd.Timestamp("2026-07-24").date())
+    assert audit_start["quality"]["segment_start_boundary_mismatch"] == 1
+    assert audit_start["quality"]["segment_end_boundary_mismatch"] == 0
+
+    # 2. End boundary mismatch mutation: mutate last segment end_date to Jan 05 (instead of Jan 06)
+    output.execute("DELETE FROM system_b_episode_segment")
+    output.execute("""INSERT INTO system_b_episode_segment VALUES
+        ('A_EP_0001_SEG_001','A_EP_0001','A',1,'ACTIVE',1,DATE '2026-01-01',DATE '2026-01-02',DATE '2026-01-02',1,10.0,10.0,10.0,0.0,10.0,DATE '2026-01-02',0.0,0.0,FALSE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01'),
+        ('A_EP_0001_SEG_002','A_EP_0001','A',2,'NON_ACTIVE',NULL,DATE '2026-01-02',DATE '2026-01-05',DATE '2026-01-05',2,10.0,12.0,11.0,0.1,12.0,DATE '2026-01-05',0.2,-0.08,FALSE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01')""")
+    
+    audit_end = audit_episodes(output, source, acceptance_start_date=pd.Timestamp("2013-01-01").date(), end_date=pd.Timestamp("2026-07-24").date())
+    assert audit_end["quality"]["segment_start_boundary_mismatch"] == 0
+    assert audit_end["quality"]["segment_end_boundary_mismatch"] == 1
+
+    source.close()
+    output.close()
+
 

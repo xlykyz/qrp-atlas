@@ -238,7 +238,10 @@ def rebuild_episodes(
             audit = audit_episodes(output, source, acceptance_start_date=acceptance_start_date, end_date=end_date)
             violations = {key: value for key, value in audit["quality"].items() if value and key != "shared_boundary_days"}
             if violations:
-                raise SystemBEpisodeProductionError("INVARIANT_VIOLATION", repr(violations))
+                error_detail: dict[str, object] = {"violations": violations}
+                if violations.get("return_closure_violations"):
+                    error_detail["return_closure_diagnostics"] = audit["evidence"].get("return_closure_diagnostics", [])
+                raise SystemBEpisodeProductionError("INVARIANT_VIOLATION", repr(error_detail))
             output.execute("COMMIT")
             return {
                 "created_run_id": run_id, "state_input_database": str(input_path),
@@ -300,6 +303,7 @@ def audit_episodes(
     """).fetchall()
 
     closure_violations = 0
+    closure_diagnostics: list[dict[str, object]] = []
     if closure_rows:
         from itertools import groupby
         for ep_id, group in groupby(closure_rows, key=lambda r: r[0]):
@@ -310,6 +314,15 @@ def audit_episodes(
             ep_factor = 1.0 + latest_ret
             if not np.isclose(seg_factor, ep_factor, rtol=1e-10, atol=1e-12):
                 closure_violations += 1
+                abs_err = abs(seg_factor - ep_factor)
+                rel_err = abs_err / abs(ep_factor) if ep_factor != 0 else abs_err
+                closure_diagnostics.append({
+                    "episode_id": ep_id,
+                    "lhs": float(seg_factor),
+                    "rhs": float(ep_factor),
+                    "abs_error": float(abs_err),
+                    "rel_error": float(rel_err),
+                })
 
     quality = {
         "multiple_open_episodes": q(f"SELECT count(*) FROM (SELECT asset_id FROM {SYSTEM_B_EPISODE_TABLE} WHERE episode_end_date IS NULL GROUP BY 1 HAVING count(*)>1)"),
@@ -338,6 +351,40 @@ def audit_episodes(
             LEFT JOIN seg_agg s USING(episode_id)
             LEFT JOIN obs_agg o USING(episode_id)
             WHERE coalesce(s.seg_days, 0) <> coalesce(o.obs_days, 0)
+        """),
+        "segment_start_boundary_mismatch": q(f"""
+            WITH ep_obs_bounds AS (
+                SELECT episode_id, min(trade_date) AS min_obs_date
+                FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE}
+                GROUP BY episode_id
+            ),
+            seg_bounds AS (
+                SELECT episode_id, arg_min(start_date, segment_no) AS first_seg_start_date
+                FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE}
+                GROUP BY episode_id
+            )
+            SELECT count(*)
+            FROM {SYSTEM_B_EPISODE_TABLE} e
+            JOIN ep_obs_bounds o USING(episode_id)
+            LEFT JOIN seg_bounds s USING(episode_id)
+            WHERE s.first_seg_start_date IS NULL OR s.first_seg_start_date <> o.min_obs_date
+        """),
+        "segment_end_boundary_mismatch": q(f"""
+            WITH ep_obs_bounds AS (
+                SELECT episode_id, max(trade_date) AS max_obs_date
+                FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE}
+                GROUP BY episode_id
+            ),
+            seg_bounds AS (
+                SELECT episode_id, arg_max(end_date, segment_no) AS last_seg_end_date
+                FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE}
+                GROUP BY episode_id
+            )
+            SELECT count(*)
+            FROM {SYSTEM_B_EPISODE_TABLE} e
+            JOIN ep_obs_bounds o USING(episode_id)
+            LEFT JOIN seg_bounds s USING(episode_id)
+            WHERE s.last_seg_end_date IS NULL OR s.last_seg_end_date <> o.max_obs_date
         """),
         "first_anchor_mismatch": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} s JOIN {SYSTEM_B_EPISODE_TABLE} e USING(episode_id) WHERE s.segment_no=1 AND s.anchor_date<>e.episode_start_date"),
         "active_sprint_count_mismatch": q(f"SELECT count(*) FROM (SELECT e.episode_id,e.ma5_reentry_count,coalesce(sum(CASE WHEN s.segment_state='ACTIVE' THEN 1 ELSE 0 END),0) active_count FROM {SYSTEM_B_EPISODE_TABLE} e LEFT JOIN {SYSTEM_B_EPISODE_SEGMENT_TABLE} s USING(episode_id) GROUP BY 1,2) WHERE active_count<>ma5_reentry_count+1"),
@@ -370,7 +417,9 @@ def audit_episodes(
         WHERE episode_confirmed_date BETWEEN ? AND ? GROUP BY 1 ORDER BY 1""",
         [acceptance_start_date, end_date],
     ).fetchdf().to_dict(orient="records")
-    return {"overall": overall, "yearly": yearly, "quality": quality, "evidence": sample_evidence(output, end_date=end_date)}
+    evidence = sample_evidence(output, end_date=end_date)
+    evidence["return_closure_diagnostics"] = closure_diagnostics
+    return {"overall": overall, "yearly": yearly, "quality": quality, "evidence": evidence}
 
 
 def sample_evidence(connection: duckdb.DuckDBPyConnection, *, end_date: date) -> dict[str, object]:

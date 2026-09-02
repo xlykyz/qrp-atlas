@@ -1,6 +1,6 @@
 # Implementation Plan: System B Episode 统计粒度细化 (Episode Segment)
 
-本方案基于 [`System B Episode 统计粒度细化设计.md`](file:///C:/Users/Ryan/Downloads/System%20B%20Episode%20%E7%BB%9F%E8%AE%A1%E7%B2%92%E5%BA%A6%E7%BB%86%E5%8C%96%E8%AE%BE%E8%AE%A1.md) 设计规范，在不改变任何现有状态机、Episode 规则和交易策略的前提下，为 System B 新增 **`system_b_episode_segment`** 纯下游派生层。
+本方案基于 [`01_System_B_Episode_统计粒度细化设计.md`](01_System_B_Episode_统计粒度细化设计.md) 设计规范，在不改变任何现有状态机、Episode 规则和交易策略的前提下，为 System B 新增 **`system_b_episode_segment`** 纯下游派生层。
 
 ## User Review Required
 
@@ -14,7 +14,7 @@
 
 ### 1. 契约与 Schema 层 (Contracts & Schema)
 
-#### [MODIFY] [contracts/system_b.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/contracts/system_b.py)
+#### [MODIFY] [`src/qrp_atlas/contracts/system_b.py`](../../../src/qrp_atlas/contracts/system_b.py)
 - 新增 Segment 标识与字段常量：
   - `SEGMENT_ID`, `SEGMENT_NO`, `SEGMENT_STATE`, `ACTIVE_SPRINT_NO`
   - `ANCHOR_DATE`, `START_DATE`, `END_DATE`, `TRADING_DAYS`
@@ -25,20 +25,20 @@
   - `SYSTEM_B_EPISODE_SEGMENT_VERSION = "system_b_episode_segment@1.0.0"`
 - 新增枚举 `SystemBSegmentState`（`ACTIVE`, `NON_ACTIVE`）。
 
-#### [MODIFY] [contracts/schema.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/contracts/schema.py)
-- 新增 `SYSTEM_B_EPISODE_SEGMENT` TableSchema 定义，主键为 `(segment_id,)`，完整定义所有 23 个字段类型与非空约束。
+#### [MODIFY] [`src/qrp_atlas/contracts/schema.py`](../../../src/qrp_atlas/contracts/schema.py)
+- 新增 `SYSTEM_B_EPISODE_SEGMENT` TableSchema 定义并正式注册进 `ALL_TABLES`，主键为 `(segment_id,)`，完整定义所有 23 个字段类型与非空约束。
 
-#### [MODIFY] [contracts/__init__.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/contracts/__init__.py)
+#### [MODIFY] [`src/qrp_atlas/contracts/__init__.py`](../../../src/qrp_atlas/contracts/__init__.py)
 - 导出上述新增的常量、枚举与 Schema 对象。
 
-#### [MODIFY] [deploy/duckdb/002_system_b_episode.sql](file:///e:/projects/qrp-atlas/deploy/duckdb/002_system_b_episode.sql)
+#### [MODIFY] [`deploy/duckdb/002_system_b_episode.sql`](../../../deploy/duckdb/002_system_b_episode.sql)
 - 追加 `CREATE TABLE IF NOT EXISTS system_b_episode_segment` DDL。
 
 ---
 
 ### 2. 指标派生层 (Indicators)
 
-#### [NEW] [indicators/system_b/segment.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/indicators/system_b/segment.py)
+#### [NEW] [`src/qrp_atlas/indicators/system_b/segment.py`](../../../src/qrp_atlas/indicators/system_b/segment.py)
 - 实现数据结构：`SystemBEpisodeSegmentResult(segments: pd.DataFrame)` 与自定义异常 `SystemBEpisodeSegmentError(ValueError)`。
 - 实现核心函数：`calculate_system_b_episode_segments(episodes: pd.DataFrame, observations: pd.DataFrame) -> SystemBEpisodeSegmentResult`：
   1. **输入验证**：严格检查 `episodes` 与 `observations` 所需列，拒绝无效空输入；
@@ -57,14 +57,14 @@
      - 未结束 Episode（`episode_end_date` 为 NaT/None）的最后一个 Segment 置为 `True`，其余置为 `False`。
   6. **返回标准 DataFrame**，与 `SYSTEM_B_EPISODE_SEGMENT` 列严格对齐。
 
-#### [MODIFY] [indicators/system_b/__init__.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/indicators/system_b/__init__.py)
+#### [MODIFY] [`src/qrp_atlas/indicators/system_b/__init__.py`](../../../src/qrp_atlas/indicators/system_b/__init__.py)
 - 导出 `calculate_system_b_episode_segments`, `SystemBEpisodeSegmentResult`, `SystemBEpisodeSegmentError`。
 
 ---
 
 ### 3. 数据管道与事务审计层 (Pipeline & Audit)
 
-#### [MODIFY] [pipeline/system_b_episode/service.py](file:///e:/projects/qrp-atlas/src/qrp_atlas/pipeline/system_b_episode/service.py)
+#### [MODIFY] [`src/qrp_atlas/pipeline/system_b_episode/service.py`](../../../src/qrp_atlas/pipeline/system_b_episode/service.py)
 - **Schema 确保**：`ensure_schema` 中加入 `connection.execute(SYSTEM_B_EPISODE_SEGMENT.duckdb_create_sql())`。
 - **事务清理顺序**：
   ```sql
@@ -81,7 +81,7 @@
   - `segment_no_gaps`：Segment 编号连续无缺口；
   - `adjacent_same_state`：相邻 Segment 状态必须不同；
   - `trading_days_mismatch`：Segment 交易日累加值与 Observation 行数相等；
-  - `boundary_mismatch`：首尾日期与 Observation 精确对齐；
+  - `segment_start_boundary_mismatch` / `segment_end_boundary_mismatch`：首尾日期与 Observation 精确对齐；
   - `first_anchor_mismatch`：首段 anchor_date 等于 episode_start_date；
   - `active_sprint_count_mismatch`：ACTIVE Segment 数等于 `ma5_reentry_count + 1`；
   - `return_closure_violation`：使用 `np.isclose(np.prod(1+segment_return), 1+episode_return, rtol=1e-10, atol=1e-12)` 进行严格连乘闭合校验，失败时抛出结构化字段（`episode_id`, `lhs`, `rhs`, `abs_error`, `rel_error`）。
@@ -90,7 +90,7 @@
 
 ### 4. 自动化测试 (Tests)
 
-#### [NEW] [tests/indicators/test_system_b_segment.py](file:///e:/projects/qrp-atlas/tests/indicators/test_system_b_segment.py)
+#### [NEW] [`tests/indicators/test_system_b_segment.py`](../../../tests/indicators/test_system_b_segment.py)
 - 完整覆盖设计文档中定义的 10 个测试用例：
   1. Case 1: 单轮 ACTIVE（`active_sprint_no = 1`）
   2. Case 2: 一次 reentry（`ACTIVE -> NON_ACTIVE -> ACTIVE`，2 个 ACTIVE，1 个重入）
@@ -103,8 +103,8 @@
   9. Case 9: 交易日自然日 Gap 处理
   10. Case 10: 确定性与重复计算输出一致性
 
-#### [MODIFY] [tests/pipeline/system_b_episode/test_production.py](file:///e:/projects/qrp-atlas/tests/pipeline/system_b_episode/test_production.py)
-- 增加对 `system_b_episode_segment` 生产写入、事务回滚与 Audit 校验的端到端集成测试。
+#### [MODIFY] [`tests/pipeline/system_b_episode/test_production.py`](../../../tests/pipeline/system_b_episode/test_production.py)
+- 增加对 `system_b_episode_segment` 生产写入、事务回滚、首尾日期边界校验与结构化 Return Closure 诊断的端到端集成测试。
 
 ---
 

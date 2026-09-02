@@ -130,6 +130,7 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("trading_calendar", (TRADE_DATE,)),
         ("stock_info", (TICKER,)),
         ("market_phase", (TRADE_DATE,)),
+        ("system_b_episode_segment", ("segment_id",)),
     ],
 )
 def test_known_primary_keys(table_name: str, expected_pk: tuple):
@@ -137,3 +138,32 @@ def test_known_primary_keys(table_name: str, expected_pk: tuple):
 
     table = get_table(table_name)
     assert table.primary_key == expected_pk
+
+
+def test_all_tableschema_instances_are_registered_in_all_tables():
+    """所有在 schema.py 中定义的 TableSchema 实例必须全部注册进 ALL_TABLES 和 TABLE_BY_NAME。"""
+    import inspect
+    from qrp_atlas.contracts import schema as schema_mod
+    from qrp_atlas.contracts.schema import TableSchema, ALL_TABLES, TABLE_BY_NAME, get_table
+
+    all_defined = [
+        obj for name, obj in inspect.getmembers(schema_mod)
+        if isinstance(obj, TableSchema)
+    ]
+    all_tables_set = set(ALL_TABLES)
+    missing = [t.name for t in all_defined if t not in all_tables_set]
+    assert not missing, f"TableSchema defined but not in ALL_TABLES: {missing}"
+
+    for t in all_defined:
+        assert t.name in TABLE_BY_NAME, f"Table {t.name} missing from TABLE_BY_NAME"
+        assert get_table(t.name) is t, f"get_table('{t.name}') failed to return instance"
+
+
+def test_system_b_episode_segment_schema_registration():
+    """验证 SYSTEM_B_EPISODE_SEGMENT 已经正确注册并可通过 get_table 访问。"""
+    from qrp_atlas.contracts import SYSTEM_B_EPISODE_SEGMENT, get_table
+
+    table = get_table("system_b_episode_segment")
+    assert table is SYSTEM_B_EPISODE_SEGMENT
+    assert table.primary_key == ("segment_id",)
+
