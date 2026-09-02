@@ -11,8 +11,10 @@ QRP v1.0 的权威架构说明见 [`docs/核心架构v1.0/QRP_v1.0_核心架构�
 QRP 的核心量化抽象由低到高为：
 
 ```text
-contracts → indicators → strategies
+contracts → stock_collections → indicators → strategies
 ```
+
+其中 `stock_collections` 是集合身份与 PIT 成员解析领域，不改变 `indicators` 的纯计算边界；调用方应先解析成员并准备标准输入，再调用 indicators。
 
 各层定位：
 
@@ -20,6 +22,7 @@ contracts → indicators → strategies
 contracts          定义标准数据与时间语义
 orchestration       通用 Job 编排、调度、资源 lease、状态持久化与结果审计
 pipeline            生产、版本化和读取标准数据；通过 job_adapter 接入 orchestration
+stock_collections   定义集合身份、生命周期并解析 PIT 成员关系
 indicators         计算客观指标、特征、因子与状态
 strategies         输出交易决策和目标
 backtest runtime   准备输入并运行策略
@@ -51,20 +54,23 @@ api                编排并暴露应用能力
 ```text
 pipeline/job_adapter → orchestration
 pipeline → contracts
+stock_collections → contracts
 indicators → contracts
 strategies → indicators / contracts
-backtest runtime → contracts / indicators / strategies / backtest engine
+backtest runtime → contracts / stock_collections / indicators / strategies / backtest engine
 backtest engine → backtest models
 backtest research → prepared data / indicators / strategies / backtest
 backtest product → strategies / runtime / research / engine / results
 results → backtest result models
 users → 自身领域对象与持久化协议
 auth → users
-api → auth / users / indicators / strategies / backtest / results
+api → auth / users / stock_collections / indicators / strategies / backtest / results
 frontend → api
 ```
 
-`orchestration/` 是业务无关的顶级 Job Runtime。它不得导入 `pipeline`、`indicators`、`strategies`、`backtest` 或 `api`，也不得理解 DuckDB 表、市场数据源、交易日期或业务质量规则。Pipeline Contract 的业务语义保留在 `pipeline/`，由 `pipeline/job_adapter.py` 将 `PipelineContract.pipeline_id` 映射为 `JobDefinition.job_id`。正式入口是 `qrp-atlas-jobs`；通用运行库使用 `job_runtime.sqlite3` 和 `job_result`，不得重新引入 `pipeline/runtime`。
+`stock_collections` 向 indicators 提供的是已经解析好的 PIT 成员事实；这不要求 indicators 直接 import 或主动调用 `stock_collections`。需要同时使用二者的运行层、产品层或 API 应先通过 `stock_collections` 准备成员输入，再调用纯计算 indicators。
+
+`orchestration/` 是业务无关的顶级 Job Runtime。它不得导入 `pipeline`、`stock_collections`、`indicators`、`strategies`、`backtest` 或 `api`，也不得理解 DuckDB 表、市场数据源、交易日期或业务质量规则。Pipeline Contract 的业务语义保留在 `pipeline/`，由 `pipeline/job_adapter.py` 将 `PipelineContract.pipeline_id` 映射为 `JobDefinition.job_id`。正式入口是 `qrp-atlas-jobs`；通用运行库使用 `job_runtime.sqlite3` 和 `job_result`，不得重新引入 `pipeline/runtime`。
 
 正式 `PipelineContract` 通过 `in_process_executor` 在 `qrp-atlas-jobs serve` 进程的线程 worker 内执行；只有普通兼容 Definition 可以通过 argv 子进程执行。正式 executor 不得自行启动写同一 QRP DuckDB 的子进程。
 
@@ -84,16 +90,19 @@ frontend → api
 禁止的典型依赖：
 
 ```text
-contracts → pipeline / indicators / strategies / backtest / api
-indicators → strategies / backtest / api
-strategies → pipeline / backtest / api / frontend
+contracts → pipeline / stock_collections / indicators / strategies / backtest / api
+stock_collections → pipeline / indicators / strategies / backtest / api
+indicators → stock_collections / strategies / backtest / api
+strategies → pipeline / stock_collections / backtest / api / frontend
 backtest engine → 具体指标、题材或具体策略
 backtest research → 修改历史策略决策
 users → auth 或量化核心
-auth → indicators / strategies / backtest engine
+auth → stock_collections / indicators / strategies / backtest engine
 api → frontend
 frontend → DuckDB、文件结果目录或 Python 策略对象
 ```
+
+`indicators → stock_collections` 的禁止项针对数据库加载、PIT 选择或领域服务依赖；指标计算应消费调用方准备好的结构化成员输入，不把 membership resolution 藏进纯计算函数。
 
 依赖方向描述的是模块职责，不要求为了形式统一而制造无意义的 import。
 
@@ -159,6 +168,47 @@ frontend → DuckDB、文件结果目录或 Python 策略对象
 
 完整 Contract 准入和源码组织规范见 [`docs/QRP产品蓝图v1.1/12_Pipeline正式开发规则.md`](../../docs/QRP产品蓝图v1.1/12_Pipeline正式开发规则.md)。
 
+## `stock_collections/`｜股票集合身份与 PIT 成员解析领域
+
+`stock_collections/` 是正式顶级领域，负责回答：
+
+> 一个具有稳定身份的股票集合，在指定 `as_of_date + knowledge_date + version_context` 下有哪些成员，这一成员结论来自什么事实和 revision？
+
+职责包括：
+
+- stable `collection_id` 与 Registry；
+- Collection lifecycle；
+- 领域 Membership repository；
+- PIT membership resolution；
+- `asset_id → collections` 反向查询；
+- membership provenance / explainability；
+- 对调用方提供标准化、可审计的成员结果。
+
+持久化字段、表结构、主键、可空性和 PIT 字段定义必须先进入 `contracts`；`stock_collections` 不复制或绕过 contracts。
+
+Task 04-A 当前生产实现边界固定为：
+
+```text
+collection_type = THEME
+member asset domain = EQUITY
+membership model = INTERVAL
+```
+
+`INDUSTRY`、`INDEX`、`SYSTEM_POOL`、`USER_DEFINED`、`RESEARCH` 等类型属于已批准的未来设计空间，但当前任务不得实现其 Adapter、Repository、生产路径或兼容占位逻辑。不得为了未来扩展提前建设 Asset Registry、跨资产 Collection 或 Universal Membership Table。
+
+Theme Membership 必须使用可回放的 PIT revision 语义；禁止 hard delete、静默覆盖历史 revision 或隐式 latest。重新调入形成新的 logical membership lifecycle，late revision 必须保持 knowledge time 与 effective time 的区别。
+
+`stock_collections` 可以在明确 repository 边界访问其领域持久化事实，但不得：
+
+- 直接承担 provider / 外部数据采集；
+- 计算 Theme 等权指数；
+- 计算 MA5 / MA10、趋势状态或 Episode；
+- 计算 M4 / M5 / M6；
+- 生成评分、策略动作、目标仓位或交易授权；
+- 依赖 `pipeline`、`indicators`、`strategies`、`backtest` 或 `api`。
+
+Theme Membership 与后续 M4 calculation eligibility 是两个不同事实层概念。上市实际交易日数 `<= 5` 或观察日停牌只影响 M4 计算资格，不得修改 Theme Membership。
+
 ## `indicators/`｜指标、特征与因子层
 
 `indicators/` 基于调用方准备好的标准数据，计算可复用的客观指标、特征、因子和状态事实。
@@ -176,14 +226,14 @@ Factor ⊂ Indicator
 约束：
 
 - 核心计算函数优先接收 DataFrame 或明确结构化输入；
-- 不主动查询数据库，不负责数据加载或 PIT 版本选择；
+- 不主动查询数据库，不负责数据加载、StockCollection membership resolution 或 PIT 版本选择；
 - 可以组合其他底层指标，但不得重复实现已有算法；
 - 输出应稳定、可测试，并明确公式、窗口、方向、可用时间和 NaN 语义；
 - 不输出 `ENTER`、`HOLD`、`EXIT`、`NO_ACTION` 等交易动作；
 - 不包含策略专属权重、Top-N、目标仓位或绝对否决偏好；
 - 不处理持仓、成交、成本、收益或未来结果评价；
 - 不写数据库；
-- 不依赖 `strategies`、`backtest` 或 `api`。
+- 不依赖 `stock_collections`、`strategies`、`backtest` 或 `api`。
 
 更具体的指标、因子、中性化和未来收益边界见 [`indicators/AGENTS.md`](indicators/AGENTS.md)。
 
@@ -228,13 +278,13 @@ Factor ⊂ Indicator
 
 - 读取策略定义；
 - 解析所需基础字段和指标；
-- 选择当时可用的 PIT 数据；
+- 选择当时可用的 PIT 数据与 StockCollection 成员事实；
 - 准备并校验策略输入；
 - 调用 indicators；
 - 运行 strategies；
 - 将标准决策或目标交给执行引擎。
 
-runtime 可以依赖 contracts、indicators、strategies 和通用 engine，但不得把具体策略知识写进 engine。
+runtime 可以依赖 contracts、stock_collections、indicators、strategies 和通用 engine，但不得把具体策略知识写进 engine。
 
 ### Backtest Engine
 
@@ -319,7 +369,7 @@ runtime 可以依赖 contracts、indicators、strategies 和通用 engine，但�
 
 - 可以依赖 `users`，但用户领域不得反向依赖认证机制；
 - 不保存 QRP 业务数据；
-- 不依赖 contracts、indicators、strategies 或执行引擎；
+- 不依赖 contracts、stock_collections、indicators、strategies 或执行引擎；
 - 不明文保存密码或会话 Token；
 - `local` 模式必须完全跳过 PostgreSQL；
 - `database` 模式必须显式启用，数据库失败时禁止自动降级。
@@ -332,6 +382,7 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 
 约束：
 
+- 可以编排 `stock_collections` 获取集合身份、PIT 成员和解释结果，但不得在路由中复制 Resolver 逻辑；
 - 不在路由中实现可复用指标；
 - 不在路由中实现策略条件或状态机；
 - 不在路由中实现成交、成本和绩效算法；
@@ -361,7 +412,7 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 ## 数据与副作用规则
 
 - 核心指标和策略计算优先保持纯函数，不隐式访问网络、数据库或全局状态；
-- 数据加载、网络请求和写库必须位于明确边界层；
+- 数据加载、网络请求和写库必须位于明确边界层；StockCollection 的领域持久化访问只能位于其 repository / service 边界，不得渗入 indicators；
 - 不原地修改调用方传入的 DataFrame，除非接口明确约定；
 - 日期排序、分组键、缺失值、重复行和非有限价格必须显式处理；
 - 任何可能影响 PIT 正确性的实现都必须避免未来数据泄漏；
@@ -376,6 +427,7 @@ API 负责将已有后端能力组织为稳定接口，可以协调多个模块�
 - contracts：字段、schema、主键、可空性、映射和时间语义；
 - orchestration：Definition/DAG 校验、认领、lease、heartbeat、并发与资源冲突、进程内执行、timeout/cancellation、retry、恢复、结果审计和业务反向依赖；
 - pipeline：外部映射、标准化、PIT 修订、正式 Contract 生命周期、ExecutionControl 传播、非法输入和入库边界；
+- stock_collections：stable identity、Registry PIT、membership lifecycle/revision、no-future-leakage、Resolver、reverse lookup、explainability、empty/not-found/not-available 区分；
 - indicators：单/多资产、排序、缺失值、窗口、输出和无未来泄漏；
 - strategies：定义、参数、注册表、版本、决策和状态转换；
 - backtest engine：成交时点、现实约束、成本、持仓、skipped、收益和回归；
@@ -394,7 +446,7 @@ python -m pytest
 
 ## 变更流程
 
-1. 先判断需求属于数据、事实、决策、执行、研究、产品、结果、身份还是应用编排。
+1. 先判断需求属于数据、集合成员事实、指标事实、决策、执行、研究、产品、结果、身份还是应用编排。
 2. 检查目标模块及其下层依赖，确认现有契约、公开接口和时间语义。
 3. 在正确模块中实现最小完整变更，避免跨层复制逻辑。
 4. 涉及公共结构时，先修改最底层事实来源，再依次更新上层消费者。
@@ -406,7 +458,7 @@ python -m pytest
 
 - 每次任务只修改与目标直接相关的模块；
 - 不借局部问题进行架构级重构；
-- 不把无关 pipeline、indicators、strategies、backtest、api、web 或 docs 改动混入同一任务；
+- 不把无关 pipeline、stock_collections、indicators、strategies、backtest、api、web 或 docs 改动混入同一任务；
 - 发现其他层问题时优先报告，只有阻塞当前目标或用户明确授权时才一并修复；
 - 不修改数据库文件、原始行情、生成结果或本地环境文件，除非任务明确要求；
 - 不把临时实验、mock 或 fixture 直接提升为正式产品实现；
@@ -417,7 +469,7 @@ python -m pytest
 新代码必须能够清楚回答：
 
 ```text
-它定义数据、生产数据、计算事实、作出决策、模拟交易、评价结果、编排产品、管理身份，还是暴露应用？
+它定义数据、生产数据、解析集合成员、计算事实、作出决策、模拟交易、评价结果、编排产品、管理身份，还是暴露应用？
 ```
 
 无法明确归属通常意味着职责混杂，应先重新划定边界再实现。
