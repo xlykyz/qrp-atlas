@@ -264,12 +264,15 @@ class StockCollectionRepository:
     def get_asset_memberships(
         self,
         collection_id: str,
-        asset_id: str,
+        asset_id: str | None = None,
         knowledge_date: date | None = None,
     ) -> list[ThemeMembershipRecord]:
-        """Fetch latest visible revisions of all membership lifecycles for an asset."""
+        """Fetch latest visible revisions of all membership lifecycles for an asset (or all assets if asset_id is None)."""
+        asset_filter = "AND asset_id = ?" if asset_id is not None else ""
         kd_filter = "AND available_trade_date <= ?" if knowledge_date is not None else ""
-        params: list[Any] = [collection_id, asset_id]
+        params: list[Any] = [collection_id]
+        if asset_id is not None:
+            params.append(asset_id)
         if knowledge_date is not None:
             params.append(knowledge_date)
 
@@ -284,7 +287,7 @@ class StockCollectionRepository:
                     ORDER BY available_trade_date DESC, ingested_at DESC
                 ) as rn
             FROM {THEME_MEMBERSHIP_HISTORY_TABLE}
-            WHERE collection_id = ? AND asset_id = ? {kd_filter}
+            WHERE collection_id = ? {asset_filter} {kd_filter}
         )
         SELECT
             membership_id, theme_id, collection_id, asset_id,

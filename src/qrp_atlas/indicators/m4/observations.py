@@ -122,24 +122,19 @@ def calculate_m4_raw_observations(
         board_returns["board_return"] = pd.to_numeric(board_returns["board_return"], errors="coerce")
         board_returns = board_returns.dropna()
 
-        # Combine all valid returns for ranking
-        all_returns = pd.concat(
-            [
-                board_returns["board_return"],
-                group[THEME_DAILY_RETURN].dropna(),
-            ]
-        ).unique()
-        # Sort descending
-        sorted_unique_returns = np.sort(all_returns)[::-1]
-        univ_size = len(board_returns) + len(group[THEME_DAILY_RETURN].dropna())
+        # Combine all valid returns for standard competition ranking:
+        # rank = (number of items with strictly greater return) + 1
+        valid_board_rets = board_returns["board_return"].to_numpy(dtype=float)
+        valid_theme_rets = group[THEME_DAILY_RETURN].dropna().to_numpy(dtype=float)
+        all_returns = np.concatenate([valid_board_rets, valid_theme_rets])
+        univ_size = len(all_returns)
 
         for _, row in group.iterrows():
             ret = row[THEME_DAILY_RETURN]
             if pd.isna(ret) or not math.isfinite(ret):
                 ranks.append(None)
             else:
-                # 1-based rank (number of returns strictly greater + 1)
-                rank = int((sorted_unique_returns > ret).sum()) + 1
+                rank = int((all_returns > ret).sum()) + 1
                 ranks.append(rank)
             univ_sizes.append(univ_size)
 

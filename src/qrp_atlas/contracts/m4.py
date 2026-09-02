@@ -24,6 +24,7 @@ EXCLUSION_REASON: Final[str] = "exclusion_reason"
 CUSTOM_INDEX_TREND_STATE: Final[str] = "custom_index_trend_state"
 CUSTOM_INDEX_TREND_RUN_DAYS: Final[str] = "custom_index_trend_run_days"
 CUSTOM_INDEX_EPISODE_ID: Final[str] = "custom_index_episode_id"
+KNOWLEDGE_DATE: Final[str] = "knowledge_date"
 
 # ── Value Constants ──
 QUALIFICATION_STATUS_NOT_CONFIGURED: Final[str] = "NOT_CONFIGURED"
@@ -38,6 +39,7 @@ THEME_CUSTOM_INDEX_DAILY_TABLE: Final[str] = "theme_custom_index_daily"
 THEME_CUSTOM_INDEX_STATE_TABLE: Final[str] = "theme_custom_index_state"
 THEME_CUSTOM_INDEX_EPISODE_TABLE: Final[str] = "theme_custom_index_episode"
 THEME_M4_OBSERVATION_TABLE: Final[str] = "theme_m4_observation"
+THEME_PRODUCTION_RUN_TABLE: Final[str] = "theme_production_run"
 
 THEME_CUSTOM_INDEX_VERSION: Final[str] = "theme_custom_index@1.0.0"
 THEME_CUSTOM_INDEX_STATE_VERSION: Final[str] = "theme_custom_index_state@1.0.0"

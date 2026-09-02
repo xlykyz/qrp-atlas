@@ -40,6 +40,7 @@ from qrp_atlas.contracts.m4 import (
     THEME_RETURN_RANK,
     TOTAL_MEMBER_COUNT,
 )
+from qrp_atlas.contracts.fields import THEME_PRODUCTION_RUN_TABLE
 from qrp_atlas.contracts.stock_collection import (
     COLLECTION_ID,
     CollectionScope,
@@ -48,6 +49,8 @@ from qrp_atlas.contracts.stock_collection import (
     THEME_MEMBERSHIP_HISTORY_TABLE,
     THEME_TABLE,
 )
+from qrp_atlas.pipeline.market_facts import query_confirmed_listing_facts
+from qrp_atlas.pipeline.theme.service import compute_deterministic_snapshot_id
 from qrp_atlas.stock_collections.models import StockCollectionQueryContext
 from qrp_atlas.stock_collections.resolver import StockCollectionResolver
 
@@ -74,6 +77,8 @@ class M4ObservationAuditReport:
     excluded_members: tuple[dict[str, Any], ...]
     limit_up_assets: tuple[str, ...]
     comparison_boards: tuple[dict[str, Any], ...]
+    is_reproducible: bool = True
+    discrepancy_reason: str | None = None
 
 
 class ThemeQueryService:
@@ -182,23 +187,22 @@ class ThemeQueryService:
         limit_up_assets = []
 
         if asset_ids:
-            # Listing days batch
-            list_sql = f"""
-            WITH stock_dates AS (
-                SELECT
-                    s.ticker AS asset_id,
-                    COUNT(c2.trade_date) AS confirmed_listing_trading_day_count
-                FROM stock_info s
-                JOIN trading_calendar c2
-                  ON c2.trade_date >= s.list_date
-                 AND c2.trade_date <= ?
-                 AND c2.is_open = true
-                WHERE s.ticker IN ({','.join(['?']*len(asset_ids))})
-                GROUP BY s.ticker
+            # Query confirmed listing facts using System B semantics
+            listing_df = query_confirmed_listing_facts(
+                self.con,
+                end_date=trade_date,
+                start_date=trade_date,
+                asset_ids=asset_ids,
             )
-            SELECT asset_id, confirmed_listing_trading_day_count FROM stock_dates
-            """
-            list_rows = dict(self.con.execute(list_sql, [trade_date, *asset_ids]).fetchall())
+            list_map = {}
+            if not listing_df.empty:
+                for _, row in listing_df.iterrows():
+                    list_map[row[ASSET_ID]] = (
+                        int(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
+                        if pd.notna(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
+                        else None,
+                        row.get("market_fact_status"),
+                    )
 
             # Suspension batch
             susp_sql = f"""
@@ -207,19 +211,21 @@ class ThemeQueryService:
             """
             susp_set = {r[0] for r in self.con.execute(susp_sql, [trade_date, *asset_ids]).fetchall()}
 
-            # Market snapshot batch
+            # Market snapshot batch: strictly use official is_limit_up
             snap_sql = f"""
-            SELECT ticker, pct_change, (pct_change >= 9.8) as is_lu
+            SELECT ticker, pct_change, is_limit_up
             FROM daily_market_snapshot
             WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(asset_ids))})
             """
-            snap_rows = {r[0]: (r[1], r[2]) for r in self.con.execute(snap_sql, [trade_date, *asset_ids]).fetchall()}
+            snap_rows = {r[0]: (r[1], bool(r[2])) for r in self.con.execute(snap_sql, [trade_date, *asset_ids]).fetchall()}
 
             for m in resolved_members:
-                list_days = list_rows.get(m.asset_id)
-                is_susp = m.asset_id in susp_set
+                list_info = list_map.get(m.asset_id)
+                list_days = list_info[0] if list_info else None
+                m_status = list_info[1] if list_info else None
+                is_susp = (m.asset_id in susp_set) or (m_status == "EXPLICIT_NON_TRADING")
 
-                if list_days is None:
+                if list_days is None or m_status == "UNRESOLVED_MISSING":
                     excluded.append({
                         "asset_id": m.asset_id,
                         "reason": "UNCONFIRMED_LISTING_DAYS",
@@ -256,6 +262,100 @@ class ThemeQueryService:
         ).fetchall()
         comparison_boards = [{"board_id": r[0], "return": r[1]} for r in comp_rows]
 
+        # 5. Detect source drift against persisted theme_production_run
+        is_reproducible = True
+        drift_status = None
+
+        if prod_run_id:
+            try:
+                run_row = self.con.execute(
+                    f"""
+                    SELECT target_start_date, target_end_date, knowledge_date,
+                           calculation_version, rule_version, comparison_universe_version, input_snapshot_id
+                    FROM {THEME_PRODUCTION_RUN_TABLE}
+                    WHERE production_run_id = ?
+                    """,
+                    [prod_run_id],
+                ).fetchone()
+
+                if run_row:
+                    r_start, r_end, r_kd, r_calc_v, r_rule_v, r_comp_v, r_snap_id = run_row
+
+                    min_date_row = self.con.execute(
+                        f"SELECT MIN(effective_from) FROM {THEME_TABLE} WHERE available_trade_date <= ?",
+                        [r_kd],
+                    ).fetchone()
+                    earliest_theme = min_date_row[0] if min_date_row and min_date_row[0] else r_start
+                    c_start = min(earliest_theme, r_start)
+
+                    recon_trade_dates = [
+                        r[0]
+                        for r in self.con.execute(
+                            "SELECT trade_date FROM trading_calendar WHERE trade_date BETWEEN ? AND ? AND is_open = true ORDER BY trade_date ASC",
+                            [c_start, r_end],
+                        ).fetchall()
+                    ]
+
+                    recon_themes = [
+                        (r[0], r[1])
+                        for r in self.con.execute(
+                            f"""
+                            WITH ranked AS (
+                                SELECT theme_id, collection_id, status,
+                                       row_number() OVER (PARTITION BY theme_id ORDER BY available_trade_date DESC, ingested_at DESC) as rn
+                                FROM {THEME_TABLE}
+                                WHERE available_trade_date <= ?
+                            )
+                            SELECT theme_id, collection_id FROM ranked WHERE rn = 1 AND status = 'ACTIVE'
+                            ORDER BY theme_id ASC
+                            """,
+                            [r_kd],
+                        ).fetchall()
+                    ]
+                    recon_colls = [t[1] for t in recon_themes]
+                    recon_mem = self.resolver.batch_resolve_members(recon_colls, recon_trade_dates, r_kd)
+                    recon_list = query_confirmed_listing_facts(self.con, end_date=r_end, start_date=c_start)
+                    recon_susp = self.con.execute(
+                        "SELECT ticker AS asset_id, trade_date, true AS is_suspended FROM suspend_d WHERE trade_date BETWEEN ? AND ?",
+                        [c_start, r_end],
+                    ).df()
+                    recon_mkt = self.con.execute(
+                        "SELECT ticker AS asset_id, trade_date, pct_change, close, is_limit_up FROM daily_market_snapshot WHERE trade_date BETWEEN ? AND ?",
+                        [c_start, r_end],
+                    ).df()
+                    recon_comp = self.con.execute(
+                        """
+                        SELECT index_code AS board_id, trade_date, pct_change / 100.0 AS board_return
+                        FROM ths_daily
+                        WHERE trade_date BETWEEN ? AND ?
+                          AND (index_code LIKE '881%' OR index_code LIKE '885%' OR index_code LIKE '886%')
+                        ORDER BY trade_date, index_code
+                        """,
+                        [c_start, r_end],
+                    ).df()
+
+                    recon_versions = {
+                        "calculation_version": r_calc_v,
+                        "rule_version": r_rule_v,
+                        "comparison_universe_version": r_comp_v,
+                    }
+
+                    reconstructed_digest = compute_deterministic_snapshot_id(
+                        themes=recon_themes,
+                        memberships=recon_mem,
+                        listing_df=recon_list,
+                        susp_df=recon_susp,
+                        market_df=recon_mkt,
+                        comp_boards_df=recon_comp,
+                        versions=recon_versions,
+                    )
+
+                    if reconstructed_digest != r_snap_id:
+                        is_reproducible = False
+                        drift_status = "CURRENT_SOURCE_DIFFERS_FROM_PRODUCTION_SNAPSHOT"
+            except Exception:
+                pass
+
         return M4ObservationAuditReport(
             theme_id=obs_row[0],
             collection_id=obs_row[1],
@@ -277,4 +377,6 @@ class ThemeQueryService:
             excluded_members=tuple(excluded),
             limit_up_assets=tuple(limit_up_assets),
             comparison_boards=tuple(comparison_boards),
+            is_reproducible=is_reproducible,
+            discrepancy_reason=drift_status,
         )

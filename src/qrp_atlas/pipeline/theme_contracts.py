@@ -34,6 +34,7 @@ from .contracts import (
     CheckResult,
     CompletionContract,
     ContractError,
+    DiagnosticLevel,
     ExecutionPolicy,
     FreshnessContract,
     IdempotencyContract,
@@ -41,6 +42,7 @@ from .contracts import (
     InputKind,
     NonTradingDayPolicy,
     OutputContract,
+    OutputResult,
     ParameterContract,
     ParameterType,
     PerformanceBudget,
@@ -145,6 +147,52 @@ def _check_source_structure(context: PipelineRunContext) -> CheckResult:
         )
 
 
+def _check_source_freshness(context: PipelineRunContext) -> CheckResult:
+    target = _target(context)
+    try:
+        con = duckdb.connect(str(context.settings.paths.duckdb_path), read_only=True)
+        try:
+            cal_row = con.execute(
+                "SELECT is_open FROM trading_calendar WHERE trade_date = ?",
+                [target],
+            ).fetchone()
+            if not cal_row:
+                return CheckResult.failure(
+                    "theme_m4_source_freshness",
+                    "THEME_M4_INPUTS_STALE",
+                    f"trading_calendar missing target date {target}",
+                )
+            is_open = bool(cal_row[0])
+            if not is_open:
+                return CheckResult.success("theme_m4_source_freshness", target_date=target.isoformat(), is_open=False)
+
+            dms_cnt = int(con.execute("SELECT COUNT(*) FROM daily_market_snapshot WHERE trade_date = ?", [target]).fetchone()[0])
+            if dms_cnt == 0:
+                return CheckResult.failure(
+                    "theme_m4_source_freshness",
+                    "THEME_M4_INPUTS_STALE",
+                    f"daily_market_snapshot missing target date {target}",
+                )
+
+            ths_cnt = int(con.execute("SELECT COUNT(*) FROM ths_daily WHERE trade_date = ?", [target]).fetchone()[0])
+            if ths_cnt == 0:
+                return CheckResult.failure(
+                    "theme_m4_source_freshness",
+                    "THEME_M4_INPUTS_STALE",
+                    f"ths_daily missing target date {target}",
+                )
+        finally:
+            con.close()
+    except Exception as exc:
+        return CheckResult.failure(
+            "theme_m4_source_freshness",
+            "THEME_M4_INPUTS_STALE",
+            f"Failed to check source freshness: {exc}",
+            exception=type(exc).__name__,
+        )
+    return CheckResult.success("theme_m4_source_freshness", target_date=target.isoformat(), is_open=True)
+
+
 def _source_input() -> InputContract:
     return InputContract(
         input_id="theme_m4_source_facts",
@@ -160,7 +208,7 @@ def _source_input() -> InputContract:
             maximum_lag_trading_days=0,
             non_trading_day_policy=NonTradingDayPolicy.ALLOW_CALENDAR_DATE,
             error_code="THEME_M4_INPUTS_STALE",
-            checker=lambda ctx: CheckResult.success("theme_m4_source_freshness"),
+            checker=_check_source_freshness,
         ),
     )
 
@@ -255,28 +303,48 @@ def _m4_outputs() -> tuple[OutputContract, ...]:
 
 def _execute_theme_m4(context: PipelineRunContext) -> BusinessExecution:
     target = _target(context)
+    kd_param = context.parameter_overrides.get("knowledge_date") if context.parameter_overrides else None
+    if kd_param:
+        if isinstance(kd_param, str):
+            knowledge_date = date.fromisoformat(kd_param)
+        elif isinstance(kd_param, date):
+            knowledge_date = kd_param
+        else:
+            knowledge_date = target
+    else:
+        knowledge_date = target
+
     con = duckdb.connect(str(context.settings.paths.duckdb_path))
     try:
         service = ThemePipelineService(con)
-        report = service.run_m4_daily(trade_date=target)
+        report = service.run_m4_daily(
+            trade_date=target,
+            knowledge_date=knowledge_date,
+            execution_control=context.execution_control,
+        )
         return BusinessExecution.success(
             metrics=PipelineMetrics(
-                input_row_count=report.total_index_rows,
-                output_row_count=report.total_observation_rows,
-                error_count=0,
-                duration_seconds=report.execution_seconds,
+                rows_read=report.total_index_rows,
+                rows_written=report.total_observation_rows,
+                database_write_seconds=report.execution_seconds,
+            ),
+            outputs=(
+                OutputResult(
+                    output_id="theme_m4_observations",
+                    rows_written=report.total_observation_rows,
+                    location="settings.paths.duckdb_path",
+                    completed=True,
+                ),
             ),
             diagnostics=(
-                PipelineDiagnostic("INFO", f"Theme count: {report.theme_count}"),
-                PipelineDiagnostic("INFO", f"Run ID: {report.production_run_id}"),
+                PipelineDiagnostic(code="INFO", level=DiagnosticLevel.INFO, message=f"Theme count: {report.theme_count}"),
+                PipelineDiagnostic(code="INFO", level=DiagnosticLevel.INFO, message=f"Run ID: {report.production_run_id}"),
+                PipelineDiagnostic(code="INFO", level=DiagnosticLevel.INFO, message=f"Input Snapshot ID: {report.input_snapshot_id}"),
+                PipelineDiagnostic(code="INFO", level=DiagnosticLevel.INFO, message=f"Knowledge date: {knowledge_date.isoformat()}"),
             ),
         )
     except Exception as exc:
-        return BusinessExecution.failure(
-            "THEME_M4_EXECUTION_FAILED",
-            str(exc),
-            exception=type(exc).__name__,
-        )
+        raise ContractError("THEME_M4_EXECUTION_FAILED", str(exc)) from exc
     finally:
         con.close()
 

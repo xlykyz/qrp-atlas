@@ -57,14 +57,21 @@ def test_resolver_dual_time_and_collection_availability_states(db):
             StockCollectionQueryContext(as_of_date=date(2026, 3, 1), knowledge_date=date(2026, 3, 1)),
         )
 
-    # 2. Knowledge Date before available_trade_date -> COLLECTION_NOT_AVAILABLE_AS_OF
-    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_AVAILABLE_AS_OF"):
+    # 2. Knowledge Date before available_trade_date -> COLLECTION_NOT_KNOWN_AT_KNOWLEDGE_DATE
+    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_KNOWN_AT_KNOWLEDGE_DATE"):
         resolver.resolve_collection(
             coll.collection_id,
             StockCollectionQueryContext(as_of_date=date(2026, 1, 15), knowledge_date=date(2026, 2, 28)),
         )
 
-    # 3. Late-known historical collection:
+    # 3. As-of Date before effective_from -> COLLECTION_NOT_EFFECTIVE_AT_AS_OF_DATE
+    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_EFFECTIVE_AT_AS_OF_DATE"):
+        resolver.resolve_collection(
+            coll.collection_id,
+            StockCollectionQueryContext(as_of_date=date(2025, 12, 31), knowledge_date=date(2026, 3, 1)),
+        )
+
+    # 4. Late-known historical collection:
     # Knowledge date is 2026-03-01 (visible), querying historical as_of_date 2026-01-15 (business valid)
     coll_resolved = resolver.resolve_collection(
         coll.collection_id,
@@ -72,7 +79,7 @@ def test_resolver_dual_time_and_collection_availability_states(db):
     )
     assert coll_resolved.collection_id == coll.collection_id
 
-    # 4. Collection exists but has empty membership
+    # 5. Collection exists but has empty membership
     members = resolver.resolve_members(
         coll.collection_id,
         StockCollectionQueryContext(as_of_date=date(2026, 1, 15), knowledge_date=date(2026, 3, 1)),

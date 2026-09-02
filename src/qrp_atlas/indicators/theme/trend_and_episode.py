@@ -130,6 +130,7 @@ def calculate_theme_index_trend_and_episodes(
 
     current_state: str | None = None
     prev_is_above: bool | None = None
+    prev_ma5_window_complete = False
     run_days = 0
 
     for idx, row in df.iterrows():
@@ -145,24 +146,29 @@ def calculate_theme_index_trend_and_episodes(
             is_above_ma5_list.append(None)
             current_state = None
             prev_is_above = None
+            prev_ma5_window_complete = False
             run_days = 0
             continue
 
         is_above = bool(close_val >= ma5_val)
         is_above_ma5_list.append(is_above)
 
-        if prev_is_above is None:
-            # First time MA5 is available -> Base state
+        if not is_above:
             new_state = "BASE"
-        elif not prev_is_above and is_above:
-            new_state = "CANDIDATE"
-        elif prev_is_above and is_above:
-            new_state = "ACTIVE"
+        elif prev_ma5_window_complete:
+            if not prev_is_above:
+                new_state = "CANDIDATE"
+            else:
+                new_state = "ACTIVE"
         else:
-            new_state = "BASE"
+            # First day MA5 complete with close >= ma5: lacks previous actual proof -> None
+            new_state = None
 
-        changed = (new_state != current_state)
-        if changed:
+        changed = (current_state is None or new_state != current_state)
+        if new_state is None:
+            run_days = 0
+            changed = False
+        elif changed:
             run_days = 1
         else:
             run_days += 1
@@ -174,6 +180,7 @@ def calculate_theme_index_trend_and_episodes(
 
         current_state = new_state
         prev_is_above = is_above
+        prev_ma5_window_complete = True
 
     df[TREND_STATE] = trend_states
     df[PREVIOUS_TREND_STATE] = prev_states
@@ -181,12 +188,13 @@ def calculate_theme_index_trend_and_episodes(
     df[CUSTOM_INDEX_TREND_RUN_DAYS] = run_days_list
     df[IS_ABOVE_OR_EQUAL_MA5] = is_above_ma5_list
 
-    # Episodes derivation
+    # Episodes derivation strictly matching System B semantics
     episodes: list[dict[str, Any]] = []
     episode_ids = [None] * len(df)
     current_episode: dict[str, Any] | None = None
     episode_no = 0
     start_price = 0.0
+    previous_below_ma10 = False
 
     for idx, row in df.iterrows():
         trade_date = row[TRADE_DATE]
@@ -195,7 +203,9 @@ def calculate_theme_index_trend_and_episodes(
         close_val = row[CLOSE]
         ma10_val = row[MA10]
 
-        if prev_state == "CANDIDATE" and state == "ACTIVE" and current_episode is None:
+        candidate_to_active = (prev_state == "CANDIDATE" and state == "ACTIVE")
+
+        if candidate_to_active and current_episode is None:
             # Start new episode
             prev_row = df.iloc[idx - 1]
             episode_no += 1
@@ -215,20 +225,34 @@ def calculate_theme_index_trend_and_episodes(
             # Assign episode_id to start date and confirmation date
             episode_ids[idx - 1] = ep_id
             episode_ids[idx] = ep_id
+            previous_below_ma10 = bool(pd.notna(ma10_val) and close_val < ma10_val)
             continue
 
         if current_episode is not None:
             episode_ids[idx] = current_episode[EPISODE_ID]
-            # Check re-entry
-            if prev_state != "ACTIVE" and state == "ACTIVE":
+            # Check re-entry: CANDIDATE -> ACTIVE inside an ongoing episode
+            if candidate_to_active:
                 current_episode[MA5_REENTRY_COUNT] += 1
 
-            # Check episode termination: MA10 complete and close < MA10
-            if pd.notna(ma10_val) and close_val < ma10_val:
+            # Check episode termination matching System B:
+            # trend_state != ACTIVE AND previous_below_ma10 AND close < ma10
+            is_end = bool(
+                state != "ACTIVE"
+                and previous_below_ma10
+                and pd.notna(ma10_val)
+                and close_val < ma10_val
+            )
+
+            if is_end:
                 current_episode[EPISODE_END_DATE] = trade_date
                 current_episode[EPISODE_RETURN] = float((close_val / start_price) - 1.0)
                 episodes.append(dict(current_episode))
                 current_episode = None
+                previous_below_ma10 = False
+            else:
+                previous_below_ma10 = bool(pd.notna(ma10_val) and close_val < ma10_val)
+        else:
+            previous_below_ma10 = bool(pd.notna(ma10_val) and close_val < ma10_val)
 
     if current_episode is not None:
         # Open episode at end of sequence

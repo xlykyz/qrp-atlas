@@ -135,3 +135,158 @@ def test_membership_identity_immutability_and_lifecycle_invariants(db):
     assert m2.membership_id != m1.membership_id
     assert m2.asset_id == "000001.SZ"
     assert m2.effective_from == date(2026, 5, 1)
+
+
+def test_orphan_and_mismatch_forbidden(db):
+    service = StockCollectionService(db)
+    thm_a, coll_a = service.create_canonical_theme(
+        theme_name="题材A",
+        source_key="THEME_A",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+    thm_b, coll_b = service.create_canonical_theme(
+        theme_name="题材B",
+        source_key="THEME_B",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # 1. Orphan membership: non-existent collection
+    with pytest.raises(StockCollectionError, match="COLLECTION_NOT_FOUND"):
+        service.add_member(
+            theme_id=thm_a.theme_id,
+            collection_id="COLL:THEME:QRP:NON_EXISTENT",
+            asset_id="000001.SZ",
+            effective_from=date(2026, 1, 1),
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # 2. Orphan membership: non-existent theme
+    with pytest.raises(StockCollectionError, match="THEME_NOT_FOUND"):
+        service.add_member(
+            theme_id="THM:QRP:NON_EXISTENT",
+            collection_id=coll_a.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 1, 1),
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # 3. Theme/Collection mismatch forbidden
+    with pytest.raises(StockCollectionError, match="THEME_COLLECTION_MISMATCH"):
+        service.add_member(
+            theme_id=thm_a.theme_id,
+            collection_id=coll_b.collection_id,
+            asset_id="000001.SZ",
+            effective_from=date(2026, 1, 1),
+            available_trade_date=date(2026, 1, 1),
+        )
+
+
+def test_membership_effective_from_immutability(db):
+    service = StockCollectionService(db)
+    thm, coll = service.create_canonical_theme(
+        theme_name="光伏",
+        source_key="SOLAR",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+    m = service.add_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="300750.SZ",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # Attempting to mutate effective_from must raise MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE
+    with pytest.raises(StockCollectionError, match="MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE"):
+        service.revise_member_late(
+            membership_id=m.membership_id,
+            effective_from=date(2025, 12, 1),
+            effective_to=None,
+            available_trade_date=date(2026, 2, 1),
+        )
+
+    # Same effective_from succeeds and keeps identity immutable
+    rev = service.revise_member_late(
+        membership_id=m.membership_id,
+        effective_from=date(2026, 1, 1),
+        effective_to=date(2026, 6, 1),
+        available_trade_date=date(2026, 2, 1),
+    )
+    assert rev.membership_id == m.membership_id
+    assert rev.effective_from == date(2026, 1, 1)
+    assert rev.effective_to == date(2026, 6, 1)
+
+
+def test_reentry_requires_previous_lifecycle_closed(db):
+    service = StockCollectionService(db)
+    thm, coll = service.create_canonical_theme(
+        theme_name="储能",
+        source_key="ENERGY_STORAGE",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+    # Open member (effective_to is None)
+    service.add_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="300750.SZ",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # Re-entry must fail because previous lifecycle is open
+    with pytest.raises(StockCollectionError, match="PREVIOUS_LIFECYCLE_NOT_CLOSED"):
+        service.reenter_member(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            asset_id="300750.SZ",
+            effective_from=date(2026, 3, 1),
+            available_trade_date=date(2026, 3, 1),
+        )
+
+
+def test_batch_append_atomic_and_rollback(db):
+    service = StockCollectionService(db)
+    thm, coll = service.create_canonical_theme(
+        theme_name="低空经济",
+        source_key="LOW_ALTITUDE",
+        effective_from=date(2026, 1, 1),
+        available_trade_date=date(2026, 1, 1),
+    )
+
+    # Batch with 1 invalid equity -> entire batch fails
+    entries = [
+        {"asset_id": "000001.SZ", "effective_from": date(2026, 1, 1)},
+        {"asset_id": "INVALID_ASSET_X", "effective_from": date(2026, 1, 1)},
+        {"asset_id": "300750.SZ", "effective_from": date(2026, 1, 1)},
+    ]
+    with pytest.raises(StockCollectionError, match="NON_EQUITY_ASSET"):
+        service.add_members_batch(
+            theme_id=thm.theme_id,
+            collection_id=coll.collection_id,
+            member_entries=entries,
+            available_trade_date=date(2026, 1, 1),
+        )
+
+    # Verify 0 records were inserted (atomic rollback)
+    members = service.repo.get_asset_memberships(coll.collection_id)
+    assert len(members) == 0
+
+    # Valid batch -> all inserted atomically
+    valid_entries = [
+        {"asset_id": "000001.SZ", "effective_from": date(2026, 1, 1)},
+        {"asset_id": "600519.SH", "effective_from": date(2026, 1, 1)},
+        {"asset_id": "300750.SZ", "effective_from": date(2026, 1, 1)},
+    ]
+    records = service.add_members_batch(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        member_entries=valid_entries,
+        available_trade_date=date(2026, 1, 1),
+    )
+    assert len(records) == 3
+    all_inserted = service.repo.get_asset_memberships(coll.collection_id)
+    assert len(all_inserted) == 3

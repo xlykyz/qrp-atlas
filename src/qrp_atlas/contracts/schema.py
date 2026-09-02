@@ -233,6 +233,8 @@ from .m4 import (
     THEME_CUSTOM_INDEX_STATE_TABLE,
     THEME_CUSTOM_INDEX_EPISODE_TABLE,
     THEME_M4_OBSERVATION_TABLE,
+    THEME_PRODUCTION_RUN_TABLE,
+    KNOWLEDGE_DATE,
 )
 
 
@@ -1292,6 +1294,30 @@ THEME_M4_OBSERVATION = TableSchema(
     primary_key=(THEME_ID, TRADE_DATE),
 )
 
+THEME_PRODUCTION_RUN = TableSchema(
+    name=THEME_PRODUCTION_RUN_TABLE,
+    columns=(
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec("run_type", "VARCHAR", nullable=False),
+        ColumnSpec("status", "VARCHAR", nullable=False),
+        ColumnSpec("target_start_date", "DATE"),
+        ColumnSpec("target_end_date", "DATE"),
+        ColumnSpec(KNOWLEDGE_DATE, "DATE", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(RULE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(COMPARISON_UNIVERSE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR", nullable=False),
+        ColumnSpec("theme_count", "BIGINT", nullable=False),
+        ColumnSpec("total_index_rows", "BIGINT", nullable=False),
+        ColumnSpec("total_observation_rows", "BIGINT", nullable=False),
+        ColumnSpec("error_code", "VARCHAR"),
+        ColumnSpec("error_detail", "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(COMPLETED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(PRODUCTION_RUN_ID,),
+)
+
 ALL_TABLES = (
     DAILY_MARKET_SNAPSHOT,
     MARKET_PHASE,
@@ -1336,6 +1362,7 @@ ALL_TABLES = (
     THEME_CUSTOM_INDEX_STATE,
     THEME_CUSTOM_INDEX_EPISODE,
     THEME_M4_OBSERVATION,
+    THEME_PRODUCTION_RUN,
 )
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}

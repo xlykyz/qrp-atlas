@@ -55,11 +55,18 @@ def calculate_m4_effective_members(
         df[IS_THEME_MEMBER] = True
 
     # Join listing trading day facts strictly
+    cols_to_join = [ASSET_ID, TRADE_DATE, CONFIRMED_LISTING_TRADING_DAY_COUNT]
+    has_status = not listing_trading_days.empty and "market_fact_status" in listing_trading_days.columns
+    if has_status:
+        cols_to_join.append("market_fact_status")
+
     if not listing_trading_days.empty and CONFIRMED_LISTING_TRADING_DAY_COUNT in listing_trading_days.columns:
-        l_df = listing_trading_days[[ASSET_ID, TRADE_DATE, CONFIRMED_LISTING_TRADING_DAY_COUNT]].copy()
+        l_df = listing_trading_days[cols_to_join].copy()
         df = df.merge(l_df, on=[ASSET_ID, TRADE_DATE], how="left")
     else:
         df[CONFIRMED_LISTING_TRADING_DAY_COUNT] = pd.NA
+        if has_status:
+            df["market_fact_status"] = pd.NA
 
     # Join suspension facts strictly
     if not suspensions.empty and IS_SUSPENDED in suspensions.columns:
@@ -70,8 +77,15 @@ def calculate_m4_effective_members(
 
     df[IS_SUSPENDED] = df[IS_SUSPENDED].fillna(False).astype(bool)
 
+    if has_status and "market_fact_status" in df.columns:
+        is_unresolved = df["market_fact_status"].eq("UNRESOLVED_MISSING")
+        is_explicit_non_trading = df["market_fact_status"].eq("EXPLICIT_NON_TRADING")
+        df[IS_SUSPENDED] = df[IS_SUSPENDED] | is_explicit_non_trading
+    else:
+        is_unresolved = pd.Series(False, index=df.index)
+
     listing_counts = pd.to_numeric(df[CONFIRMED_LISTING_TRADING_DAY_COUNT], errors="coerce")
-    is_missing_listing = listing_counts.isna()
+    is_missing_listing = listing_counts.isna() | is_unresolved
     is_le_5 = (~is_missing_listing) & (listing_counts <= 5)
     is_suspended = df[IS_SUSPENDED].astype(bool)
 
@@ -81,7 +95,7 @@ def calculate_m4_effective_members(
 
     reasons = pd.Series(pd.NA, index=df.index, dtype="string")
     reasons.loc[is_missing_listing] = DIAGNOSTIC_UNCONFIRMED_LISTING_DAYS
-    reasons.loc[is_le_5] = EXCLUSION_REASON_NEW_LISTING_LE_5
+    reasons.loc[(~is_missing_listing) & is_le_5] = EXCLUSION_REASON_NEW_LISTING_LE_5
     reasons.loc[(~is_missing_listing) & (~is_le_5) & is_suspended] = EXCLUSION_REASON_SUSPENDED
     df[EXCLUSION_REASON] = reasons
 

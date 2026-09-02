@@ -23,9 +23,7 @@ CREATE TABLE IF NOT EXISTS stock_collection (
 CREATE TABLE IF NOT EXISTS theme (
     theme_id VARCHAR NOT NULL,
     collection_id VARCHAR NOT NULL,
-    theme_name VARCHAR NOT NULL,
-    namespace VARCHAR NOT NULL,
-    source_key VARCHAR NOT NULL,
+    canonical_name VARCHAR NOT NULL,
     status VARCHAR NOT NULL,
     effective_from DATE NOT NULL,
     effective_to DATE,
@@ -42,7 +40,6 @@ CREATE TABLE IF NOT EXISTS theme_membership_history (
     theme_id VARCHAR NOT NULL,
     collection_id VARCHAR NOT NULL,
     asset_id VARCHAR NOT NULL,
-    weight DOUBLE,
     effective_from DATE NOT NULL,
     effective_to DATE,
     available_trade_date DATE NOT NULL,
@@ -125,4 +122,25 @@ CREATE TABLE IF NOT EXISTS theme_m4_observation (
     input_snapshot_id VARCHAR,
     created_at TIMESTAMP NOT NULL,
     PRIMARY KEY (theme_id, trade_date)
+);
+
+CREATE TABLE IF NOT EXISTS theme_production_run (
+    production_run_id VARCHAR NOT NULL,
+    run_type VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    target_start_date DATE,
+    target_end_date DATE,
+    knowledge_date DATE NOT NULL,
+    calculation_version VARCHAR NOT NULL,
+    rule_version VARCHAR NOT NULL,
+    comparison_universe_version VARCHAR NOT NULL,
+    input_snapshot_id VARCHAR NOT NULL,
+    theme_count BIGINT NOT NULL,
+    total_index_rows BIGINT NOT NULL,
+    total_observation_rows BIGINT NOT NULL,
+    error_code VARCHAR,
+    error_detail VARCHAR,
+    created_at TIMESTAMP NOT NULL,
+    completed_at TIMESTAMP,
+    PRIMARY KEY (production_run_id)
 );

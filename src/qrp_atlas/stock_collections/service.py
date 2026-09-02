@@ -120,6 +120,9 @@ class StockCollectionService:
             )
 
         # 2. Validate Theme & Collection exist and match
+        colls = self.repo.get_collection_revisions(collection_id)
+        if not colls:
+            raise StockCollectionError("COLLECTION_NOT_FOUND", f"Collection {collection_id} not found")
         themes = self.repo.get_theme_revisions(theme_id)
         if not themes:
             raise StockCollectionError("THEME_NOT_FOUND", f"Theme {theme_id} not found")
@@ -212,7 +215,7 @@ class StockCollectionService:
         self,
         *,
         membership_id: str,
-        effective_from: date,
+        effective_from: date | None = None,
         effective_to: date | None,
         available_trade_date: date,
         source: str = "MANUAL_REVISION",
@@ -226,10 +229,20 @@ class StockCollectionService:
             )
         latest = revisions[-1]
 
-        if effective_to is not None and effective_to <= effective_from:
+        # Enforce effective_from immutability for this membership lifecycle
+        if effective_from is not None and effective_from != latest.effective_from:
+            raise StockCollectionError(
+                "MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE",
+                f"effective_from is immutable for membership {membership_id} "
+                f"(existing: {latest.effective_from}, attempted: {effective_from})",
+            )
+
+        eff_from = latest.effective_from
+
+        if effective_to is not None and effective_to <= eff_from:
             raise StockCollectionError(
                 "INVALID_EFFECTIVE_INTERVAL",
-                f"effective_to ({effective_to}) must be > effective_from ({effective_from})",
+                f"effective_to ({effective_to}) must be > effective_from ({eff_from})",
             )
 
         # Check overlap with other lifecycles of same asset
@@ -240,7 +253,7 @@ class StockCollectionService:
         new_to = effective_to if effective_to is not None else date(9999, 12, 31)
         for lc in other_lifecycles:
             lc_to = lc.effective_to if lc.effective_to is not None else date(9999, 12, 31)
-            if max(effective_from, lc.effective_from) < min(new_to, lc_to):
+            if max(eff_from, lc.effective_from) < min(new_to, lc_to):
                 raise StockCollectionError(
                     "OVERLAPPING_MEMBERSHIP_LIFECYCLE",
                     f"Late revision overlaps with other lifecycle [{lc.effective_from}, {lc.effective_to})",
@@ -253,7 +266,7 @@ class StockCollectionService:
             collection_id=latest.collection_id,
             asset_id=latest.asset_id,
             weight=latest.weight,
-            effective_from=effective_from,
+            effective_from=eff_from,
             effective_to=effective_to,
             available_trade_date=available_trade_date,
             source=source,
@@ -282,8 +295,9 @@ class StockCollectionService:
         for lc in existing_lifecycles:
             if lc.effective_to is None or lc.effective_to > effective_from:
                 raise StockCollectionError(
-                    "OVERLAPPING_MEMBERSHIP_LIFECYCLE",
-                    f"Cannot reenter asset {asset_id}: existing lifecycle [{lc.effective_from}, {lc.effective_to}) is still active or overlaps",
+                    "PREVIOUS_LIFECYCLE_NOT_CLOSED",
+                    f"Cannot reenter asset {asset_id}: existing lifecycle "
+                    f"[{lc.effective_from}, {lc.effective_to}) must be closed before {effective_from}",
                 )
 
         return self.add_member(
@@ -297,3 +311,75 @@ class StockCollectionService:
             source=source,
             source_record_id=source_record_id,
         )
+
+    def add_members_batch(
+        self,
+        *,
+        theme_id: str,
+        collection_id: str,
+        member_entries: Sequence[dict[str, Any]],
+        available_trade_date: date,
+        source: str = "BATCH_MANUAL",
+    ) -> list[ThemeMembershipRecord]:
+        """Atomically add multiple members, rolling back all if any validation fails."""
+        colls = self.repo.get_collection_revisions(collection_id)
+        if not colls:
+            raise StockCollectionError("COLLECTION_NOT_FOUND", f"Collection {collection_id} not found")
+        themes = self.repo.get_theme_revisions(theme_id)
+        if not themes:
+            raise StockCollectionError("THEME_NOT_FOUND", f"Theme {theme_id} not found")
+        if themes[-1].collection_id != collection_id:
+            raise StockCollectionError(
+                "THEME_COLLECTION_MISMATCH",
+                f"Theme {theme_id} belongs to {themes[-1].collection_id}, not {collection_id}",
+            )
+
+        records_to_append: list[ThemeMembershipRecord] = []
+        now = datetime.now(timezone.utc)
+        all_intervals = [
+            (lc.asset_id, lc.effective_from, lc.effective_to or date(9999, 12, 31))
+            for lc in self.repo.get_asset_memberships(collection_id, None)
+        ]
+
+        for entry in member_entries:
+            asset_id = str(entry["asset_id"])
+            eff_from = entry["effective_from"]
+            eff_to = entry.get("effective_to")
+
+            if not self.repo.check_is_equity(asset_id):
+                raise StockCollectionError("NON_EQUITY_ASSET", f"Asset {asset_id} is not a valid EQUITY")
+
+            if eff_to is not None and eff_to <= eff_from:
+                raise StockCollectionError(
+                    "INVALID_EFFECTIVE_INTERVAL",
+                    f"effective_to ({eff_to}) must be > effective_from ({eff_from}) for {asset_id}",
+                )
+
+            new_to = eff_to if eff_to is not None else date(9999, 12, 31)
+            for ex_asset, ex_from, ex_to in all_intervals:
+                if ex_asset == asset_id and max(eff_from, ex_from) < min(new_to, ex_to):
+                    raise StockCollectionError(
+                        "OVERLAPPING_MEMBERSHIP_LIFECYCLE",
+                        f"Asset {asset_id} interval overlaps with [{ex_from}, {ex_to})",
+                    )
+            all_intervals.append((asset_id, eff_from, new_to))
+
+            membership_id = f"MEM:{theme_id}:{asset_id}:{uuid.uuid4().hex[:8].upper()}"
+            record = ThemeMembershipRecord(
+                membership_id=membership_id,
+                theme_id=theme_id,
+                collection_id=collection_id,
+                asset_id=asset_id,
+                weight=None,
+                effective_from=eff_from,
+                effective_to=eff_to,
+                available_trade_date=available_trade_date,
+                source=source,
+                source_record_id=entry.get("source_record_id"),
+                revision_id=str(uuid.uuid4()),
+                ingested_at=now,
+            )
+            records_to_append.append(record)
+
+        self.repo.append_membership_revisions(records_to_append)
+        return records_to_append

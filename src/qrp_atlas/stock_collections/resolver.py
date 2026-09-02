@@ -45,11 +45,21 @@ class StockCollectionResolver:
         visible = [r for r in revisions if r.available_trade_date <= context.knowledge_date]
         if not visible:
             raise StockCollectionError(
-                "COLLECTION_NOT_AVAILABLE_AS_OF",
+                "COLLECTION_NOT_KNOWN_AT_KNOWLEDGE_DATE",
                 f"Collection {collection_id} is not known as of knowledge_date {context.knowledge_date}",
             )
 
         latest = visible[-1]
+        is_effective = latest.effective_from <= context.as_of_date and (
+            latest.effective_to is None or context.as_of_date < latest.effective_to
+        )
+        if not is_effective:
+            raise StockCollectionError(
+                "COLLECTION_NOT_EFFECTIVE_AT_AS_OF_DATE",
+                f"Collection {collection_id} is not effective as of {context.as_of_date} "
+                f"(effective interval [{latest.effective_from}, {latest.effective_to}))",
+            )
+
         if latest.collection_scope not in context.allowed_scopes:
             raise StockCollectionError(
                 "SCOPE_NOT_ALLOWED",

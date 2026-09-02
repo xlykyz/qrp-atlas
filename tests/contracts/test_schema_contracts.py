@@ -189,3 +189,43 @@ def test_system_b_episode_segment_schema_registration():
     assert table is SYSTEM_B_EPISODE_SEGMENT
     assert table.primary_key == ("segment_id",)
 
+
+def test_ddl_and_contracts_schema_consistency(tmp_path):
+    """验证 deploy/duckdb/003_stock_collections_and_m4.sql 与 contracts/schema.py 100% 字段一致。"""
+    from pathlib import Path
+    from qrp_atlas.contracts.schema import TABLE_BY_NAME
+
+    ddl_path = Path("deploy/duckdb/003_stock_collections_and_m4.sql")
+    assert ddl_path.exists()
+    sql_text = ddl_path.read_text(encoding="utf-8")
+
+    db_path = tmp_path / "ddl_test.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(sql_text)
+        ddl_tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        expected_ddl_tables = {
+            "stock_collection",
+            "theme",
+            "theme_membership_history",
+            "theme_custom_index_daily",
+            "theme_custom_index_state",
+            "theme_custom_index_episode",
+            "theme_m4_observation",
+            "theme_production_run",
+        }
+        assert ddl_tables == expected_ddl_tables
+
+        for table_name in expected_ddl_tables:
+            table_schema = TABLE_BY_NAME[table_name]
+            cols_info = con.execute(
+                f"SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '{table_name}' ORDER BY ordinal_position"
+            ).fetchall()
+            actual_col_names = [r[0] for r in cols_info]
+            expected_col_names = list(table_schema.column_names())
+            assert actual_col_names == expected_col_names, (
+                f"Table {table_name} columns mismatch: actual {actual_col_names} vs expected {expected_col_names}"
+            )
+    finally:
+        con.close()
+

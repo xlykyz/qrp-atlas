@@ -288,6 +288,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         *(contract.pipeline_id for contract in SYSTEM_B_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_REPORT_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_INDUSTRY_CONTRACTS),
+        "theme_m4_production",
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert MARKET_DAILY_UPDATE.dependencies == ()
