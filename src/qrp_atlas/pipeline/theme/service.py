@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -137,6 +137,36 @@ class ThemeProductionReport:
     total_state_rows: int = 0
 
 
+@dataclass(frozen=True)
+class ThemeM4CalculatedFacts:
+    """Calculated Theme Custom Indices, states, episodes, and M4 observations.
+
+    Directly consumable by backtest, historical review, and lineage audit without
+    requiring physical database materialization.
+    """
+
+    theme_count: int
+    start_date: date
+    end_date: date
+    knowledge_date: date
+    calc_start_date: date
+    input_snapshot_id: str
+    daily_indices: pd.DataFrame
+    daily_states: pd.DataFrame
+    episodes: pd.DataFrame
+    m4_observations: pd.DataFrame
+    execution_seconds: float
+    all_episodes: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+def _to_date(val: Any) -> date:
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if hasattr(val, "date"):
+        return val.date()
+    return pd.to_datetime(val).date()
+
+
 class ThemePipelineService:
     """Production service for Theme Custom Indices and M4 Observations."""
 
@@ -219,24 +249,22 @@ class ThemePipelineService:
                 f"Failed to query THS comparison universe: {exc}",
             ) from exc
 
-    def rebuild_m4_facts(
+    def calculate_m4_facts(
         self,
         start_date: date,
         end_date: date,
-        context_start_date: date | None = None,
         knowledge_date: date | None = None,
-        production_run_id: str | None = None,
-        run_type: str = "REPLAY",
+        context_start_date: date | None = None,
         execution_control: Any | None = None,
-    ) -> ThemeProductionReport:
-        """Range rebuild or daily production of Theme Custom Indices and M4 Observations.
+    ) -> ThemeM4CalculatedFacts:
+        """Pure calculation core for Theme Custom Indices and M4 Observations.
 
-        Distinguishes calculation context range [context_start_date, end_date] from requested
-        output range [start_date, end_date].
+        Strictly decoupled from database persistence (100% read-only).
+        Used by both materializing production (DAILY, BACKFILL, CORRECTION) and
+        read-only historical PIT replay.
         """
         t0 = datetime.now(timezone.utc)
         kd = knowledge_date or end_date
-        run_id = production_run_id or f"RUN:THEME_M4:{uuid.uuid4().hex[:12].upper()}"
 
         themes = self._fetch_all_canonical_themes(kd)
         if not themes:
@@ -245,48 +273,31 @@ class ThemePipelineService:
         theme_map = {coll_id: theme_id for theme_id, coll_id in themes}
         coll_ids = list(theme_map.keys())
 
-        # Determine current materialized horizon for affected themes to enforce forward dependency closure
-        theme_ids = [t[0] for t in themes]
-        placeholders = ",".join(["?"] * len(theme_ids))
-        max_row = self.con.execute(
-            f"SELECT MAX(trade_date) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id IN ({placeholders})",
-            theme_ids,
-        ).fetchone()
-        current_materialized = max_row[0] if max_row and max_row[0] else None
-
-        affected_output_start = start_date
-        if current_materialized and current_materialized > end_date:
-            affected_output_end = current_materialized
-        else:
-            affected_output_end = end_date
-
         # Determine calculation context start: must start at earliest theme inception to preserve compounding
         if context_start_date is None:
             min_date_row = self.con.execute(
                 f"SELECT MIN(effective_from) FROM {THEME_TABLE} WHERE available_trade_date <= ?",
                 [kd],
             ).fetchone()
-            earliest_theme_date = min_date_row[0] if min_date_row and min_date_row[0] else affected_output_start
-            calc_start = min(earliest_theme_date, affected_output_start)
+            earliest_theme_date = min_date_row[0] if min_date_row and min_date_row[0] else start_date
+            calc_start = min(earliest_theme_date, start_date)
         else:
-            calc_start = min(context_start_date, affected_output_start)
+            calc_start = min(context_start_date, start_date)
 
-        calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, affected_output_end)
+        calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, end_date)
         if not calc_trade_dates:
             raise ThemePipelineError(
-                "NO_TRADING_DATES", f"No open trading dates between {calc_start} and {affected_output_end}"
+                "NO_TRADING_DATES", f"No open trading dates between {calc_start} and {end_date}"
             )
-
-        output_trade_dates = [d for d in calc_trade_dates if affected_output_start <= d <= affected_output_end]
 
         # 1. Fetch set-based memberships via batch Resolver across calculation range
         raw_memberships = self.resolver.batch_resolve_members(coll_ids, calc_trade_dates, kd)
 
         # 2. Fetch facts across calculation context range
-        listing_df = self._fetch_confirmed_listing_facts(calc_start, affected_output_end)
-        susp_df = self._fetch_suspension_facts(calc_start, affected_output_end)
-        market_df = self._fetch_market_snapshot(calc_start, affected_output_end)
-        comp_boards_df = self._fetch_comparison_boards(calc_start, affected_output_end)
+        listing_df = self._fetch_confirmed_listing_facts(calc_start, end_date)
+        susp_df = self._fetch_suspension_facts(calc_start, end_date)
+        market_df = self._fetch_market_snapshot(calc_start, end_date)
+        comp_boards_df = self._fetch_comparison_boards(calc_start, end_date)
 
         if execution_control is not None and hasattr(execution_control, "checkpoint"):
             execution_control.checkpoint()
@@ -370,30 +381,139 @@ class ThemePipelineService:
         start_dt = pd.to_datetime(start_date)
         end_dt = pd.to_datetime(end_date)
 
-        def _to_date(val: Any) -> date:
-            if isinstance(val, date) and not isinstance(val, datetime):
-                return val
-            if hasattr(val, "date"):
-                return val.date()
-            return pd.to_datetime(val).date()
-
         if not all_index_daily.empty:
             dates = pd.to_datetime(all_index_daily[TRADE_DATE])
-            written_index_daily = all_index_daily[(dates >= start_dt) & (dates <= end_dt)]
+            sliced_index_daily = all_index_daily[(dates >= start_dt) & (dates <= end_dt)].copy()
         else:
-            written_index_daily = pd.DataFrame()
+            sliced_index_daily = pd.DataFrame()
 
         if not all_states.empty:
             dates = pd.to_datetime(all_states[TRADE_DATE])
-            written_states = all_states[(dates >= start_dt) & (dates <= end_dt)]
+            sliced_states = all_states[(dates >= start_dt) & (dates <= end_dt)].copy()
         else:
-            written_states = pd.DataFrame()
+            sliced_states = pd.DataFrame()
 
         if not m4_obs_df.empty:
             dates = pd.to_datetime(m4_obs_df[TRADE_DATE])
-            written_m4_obs = m4_obs_df[(dates >= start_dt) & (dates <= end_dt)]
+            sliced_m4_obs = m4_obs_df[(dates >= start_dt) & (dates <= end_dt)].copy()
         else:
-            written_m4_obs = pd.DataFrame()
+            sliced_m4_obs = pd.DataFrame()
+
+        # Episodes touching or active within [start_date, end_date]
+        if not all_episodes.empty:
+            ep_rows = []
+            for r in all_episodes.itertuples(index=False):
+                st = _to_date(getattr(r, "episode_start_date"))
+                ed_val = getattr(r, "episode_end_date")
+                ed = _to_date(ed_val) if (ed_val is not None and pd.notna(ed_val)) else None
+                if st <= end_date and (ed is None or ed >= start_date):
+                    ep_rows.append(r)
+            sliced_episodes = pd.DataFrame(ep_rows) if ep_rows else pd.DataFrame(columns=all_episodes.columns)
+        else:
+            sliced_episodes = pd.DataFrame()
+
+        # Stamp deterministic snapshot id on sliced outputs
+        if not sliced_index_daily.empty:
+            sliced_index_daily[INPUT_SNAPSHOT_ID] = snap_id
+        if not sliced_states.empty:
+            sliced_states[INPUT_SNAPSHOT_ID] = snap_id
+        if not sliced_m4_obs.empty:
+            sliced_m4_obs[INPUT_SNAPSHOT_ID] = snap_id
+        if not sliced_episodes.empty:
+            sliced_episodes[INPUT_SNAPSHOT_ID] = snap_id
+
+        exec_sec = (datetime.now(timezone.utc) - t0).total_seconds()
+        return ThemeM4CalculatedFacts(
+            theme_count=len(themes),
+            start_date=start_date,
+            end_date=end_date,
+            knowledge_date=kd,
+            calc_start_date=calc_start,
+            input_snapshot_id=snap_id,
+            daily_indices=sliced_index_daily,
+            daily_states=sliced_states,
+            episodes=sliced_episodes,
+            m4_observations=sliced_m4_obs,
+            execution_seconds=exec_sec,
+            all_episodes=all_episodes,
+        )
+
+    def replay_m4_facts(
+        self,
+        start_date: date,
+        end_date: date,
+        knowledge_date: date,
+        context_start_date: date | None = None,
+        execution_control: Any | None = None,
+    ) -> ThemeM4CalculatedFacts:
+        """Historical Point-in-Time replay.
+
+        Strictly READ-ONLY and NON-MATERIALIZING:
+        - Re-executes the exact same calculation core as canonical production
+        - Does NOT open database write transactions
+        - Does NOT delete or overwrite canonical tables
+        - Does NOT insert production run records
+        - Returns full calculated facts directly consumable by backtest/audit
+        """
+        return self.calculate_m4_facts(
+            start_date=start_date,
+            end_date=end_date,
+            knowledge_date=knowledge_date,
+            context_start_date=context_start_date,
+            execution_control=execution_control,
+        )
+
+    def rebuild_m4_facts(
+        self,
+        start_date: date,
+        end_date: date,
+        context_start_date: date | None = None,
+        knowledge_date: date | None = None,
+        production_run_id: str | None = None,
+        run_type: str = "REPLAY",
+        execution_control: Any | None = None,
+    ) -> ThemeProductionReport:
+        """Range rebuild or daily production of Theme Custom Indices and M4 Observations.
+
+        Materializing: Writes canonical facts across the full forward dependency closure horizon
+        [affected_output_start, affected_output_end].
+        """
+        t0 = datetime.now(timezone.utc)
+        kd = knowledge_date or end_date
+        run_id = production_run_id or f"RUN:THEME_M4:{uuid.uuid4().hex[:12].upper()}"
+
+        themes = self._fetch_all_canonical_themes(kd)
+        if not themes:
+            raise ThemePipelineError("NO_ACTIVE_THEMES", f"No active themes as of {kd}")
+
+        # Determine current materialized horizon for affected themes to enforce forward dependency closure
+        theme_ids = [t[0] for t in themes]
+        placeholders = ",".join(["?"] * len(theme_ids))
+        max_row = self.con.execute(
+            f"SELECT MAX(trade_date) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id IN ({placeholders})",
+            theme_ids,
+        ).fetchone()
+        current_materialized = max_row[0] if max_row and max_row[0] else None
+
+        affected_output_start = start_date
+        if current_materialized and current_materialized > end_date:
+            affected_output_end = current_materialized
+        else:
+            affected_output_end = end_date
+
+        # Calculate facts covering the entire affected forward closure horizon
+        facts = self.calculate_m4_facts(
+            start_date=affected_output_start,
+            end_date=affected_output_end,
+            knowledge_date=kd,
+            context_start_date=context_start_date,
+            execution_control=execution_control,
+        )
+
+        written_index_daily = facts.daily_indices
+        written_states = facts.daily_states
+        written_m4_obs = facts.m4_observations
+        snap_id = facts.input_snapshot_id
 
         # 7. Single ACID Transaction Persistence with Scope Control
         now = datetime.now(timezone.utc)
@@ -429,8 +549,8 @@ class ThemePipelineService:
                 [*theme_ids, affected_output_start, affected_output_start],
             )
 
-            if not all_episodes.empty:
-                for r in all_episodes.itertuples(index=False):
+            if not facts.all_episodes.empty:
+                for r in facts.all_episodes.itertuples(index=False):
                     th_id = getattr(r, THEME_ID)
                     if th_id not in theme_ids:
                         continue
@@ -598,11 +718,16 @@ class ThemePipelineService:
             raise ThemePipelineError("PRODUCTION_TRANSACTION_FAILED", str(exc)) from exc
 
         exec_sec = (datetime.now(timezone.utc) - t0).total_seconds()
+        trade_dates_written = (
+            written_m4_obs[TRADE_DATE].unique()
+            if not written_m4_obs.empty
+            else (written_index_daily[TRADE_DATE].unique() if not written_index_daily.empty else [])
+        )
         return ThemeProductionReport(
             production_run_id=run_id,
             input_snapshot_id=snap_id,
             theme_count=len(themes),
-            trade_date_count=len(output_trade_dates),
+            trade_date_count=len(trade_dates_written),
             start_date=affected_output_start,
             end_date=affected_output_end,
             total_index_rows=len(written_index_daily),

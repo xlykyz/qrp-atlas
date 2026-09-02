@@ -266,16 +266,19 @@ class ThemeQueryService:
                         limit_up_assets.append(m.asset_id)
 
         # 4. Comparison universe batch
-        comp_rows = self.con.execute(
-            """
-            SELECT index_code, pct_change / 100.0
-            FROM ths_daily
-            WHERE trade_date = ?
-              AND (index_code LIKE '881%' OR index_code LIKE '885%' OR index_code LIKE '886%')
-            ORDER BY pct_change DESC
-            """,
-            [trade_date],
-        ).fetchall()
+        try:
+            comp_rows = self.con.execute(
+                """
+                SELECT index_code, pct_change / 100.0
+                FROM ths_daily
+                WHERE trade_date = ?
+                  AND (index_code LIKE '881%' OR index_code LIKE '885%' OR index_code LIKE '886%')
+                ORDER BY pct_change DESC
+                """,
+                [trade_date],
+            ).fetchall()
+        except Exception:
+            comp_rows = []
         comparison_boards = [{"board_id": r[0], "return": r[1]} for r in comp_rows]
 
         # 5. Detect source drift against persisted theme_production_run
@@ -294,7 +297,10 @@ class ThemeQueryService:
                     [prod_run_id],
                 ).fetchone()
 
-                if run_row:
+                if not run_row:
+                    is_reproducible = False
+                    drift_status = "AUDIT_RECONSTRUCTION_FAILED"
+                else:
                     r_start, r_end, r_kd, r_calc_v, r_rule_v, r_comp_v, r_snap_id = run_row
 
                     min_date_row = self.con.execute(
@@ -369,8 +375,15 @@ class ThemeQueryService:
                     if reconstructed_digest != r_snap_id:
                         is_reproducible = False
                         drift_status = "CURRENT_SOURCE_DIFFERS_FROM_PRODUCTION_SNAPSHOT"
+                    else:
+                        is_reproducible = True
+                        drift_status = None
             except Exception:
-                pass
+                is_reproducible = False
+                drift_status = "AUDIT_RECONSTRUCTION_FAILED"
+        else:
+            is_reproducible = False
+            drift_status = "AUDIT_RECONSTRUCTION_FAILED"
 
         return M4ObservationAuditReport(
             theme_id=obs_row[0],

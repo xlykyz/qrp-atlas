@@ -29,36 +29,96 @@
 - [src/qrp_atlas/indicators/m4/observations.py](../../../src/qrp_atlas/indicators/m4/observations.py)：
   - 统一为标准小数 ratio 收益率；比较 Universe 缺失或无数据时 fail closed，不降级为局部排名。
 
-### C. 管道契约与生产审计
+### C. 管道契约、生产物化与只读 Replay
 - [src/qrp_atlas/pipeline/theme/service.py](../../../src/qrp_atlas/pipeline/theme/service.py)：
-  - 集合化生产与历史重放服务，批量解析成员无 N+1；单 DuckDB 事务原子写入 4 张表；
+  - **解耦计算与持久化**：拆分出纯计算核心 `calculate_m4_facts`，100% 内存无副作用执行；
+  - **只读 Historical Replay**：新增专用入口 `replay_m4_facts(start_date, end_date, knowledge_date)`，返回不可变契约 `ThemeM4CalculatedFacts`，不写数据库、不产生事务；
+  - **修复 Forward Dependency Closure 写回范围**：Canonical 修订写回范围与切片范围严格对齐 `[affected_output_start, affected_output_end]`，保证 `08-11 ~ 08-14` 完整保留并以本次 correction run_id 重新写入，绝不删空；
   - `run_m4_daily` 保证历史连续计算窗口，与 `rebuild_m4_facts` 产生数值等价结果。
 - [src/qrp_atlas/pipeline/theme/query.py](../../../src/qrp_atlas/pipeline/theme/query.py)：
-  - 集合化 `audit_m4_observation` 服务，追溯当次 `production_run_id`、输入快照、涨停股票与基准排名。
+  - 集合化 `audit_m4_observation` 服务，追溯当次 `production_run_id`、输入快照、涨停股票与基准排名；
+  - 缺省 knowledge_date 自动反查生产记录；
+  - 审计重构依赖损坏或异常时严格 fail closed，判定 `is_reproducible = False` 与 `discrepancy_reason = "AUDIT_RECONSTRUCTION_FAILED"`。
 - [src/qrp_atlas/pipeline/theme_contracts.py](../../../src/qrp_atlas/pipeline/theme_contracts.py) & [src/qrp_atlas/pipeline/contract_catalog.py](../../../src/qrp_atlas/pipeline/contract_catalog.py)：
-  - 正式注册 `THEME_M4_PRODUCTION_CONTRACT`。
+  - 正式注册 `THEME_M4_PRODUCTION_CONTRACT`，声明全部 4 张 Canonical 业务事实表并对齐 `rows_written` 指标。
 - [src/qrp_atlas/contracts/schema.py](../../../src/qrp_atlas/contracts/schema.py) & [deploy/duckdb/003_stock_collections_and_m4.sql](../../../deploy/duckdb/003_stock_collections_and_m4.sql)：
-  - 为 4 张 Theme 生产表补充 `production_run_id` 和 `input_snapshot_id` 列。
+  - 为 4 张 Theme 生产表补充 `production_run_id` 和 `input_snapshot_id` 列，`theme_limit_up_count` 设为可空并保持 100% DDL 对齐。
 
 ### D. 范围清理
-- 恢复 `src/qrp_atlas/orchestration/definitions.py` 与 `src/qrp_atlas/pipeline/system_b/service.py` 到 `origin/develop/v1.1` 基线，不混入非任务改动。
+- 恢复 `src/qrp_atlas/orchestration/definitions.py`、`src/qrp_atlas/pipeline/system_b/service.py` 与 `tests/conftest.py` 到 `origin/develop/v1.1` 基线，不混入非任务改动。
 
 ---
 
-## 3. 测试验证结果
+## 3. 测试验证与基准性能实测结果
 
-执行本地测试套件，全部 117 项测试通过：
-
+### 3.1 专项测试结果
+执行 Theme 生产与回放专项测试套件：
 ```bash
-pytest tests/contracts/ tests/stock_collections/ tests/indicators/test_theme_effective_members.py tests/indicators/test_theme_custom_index.py tests/indicators/test_theme_trend_and_episode.py tests/indicators/test_m4_observations.py tests/pipeline/theme/ tests/pipeline/test_pipeline_contract.py tests/pipeline/test_pipeline_registry.py -v
+pytest tests/pipeline/theme/test_theme_production.py -v
+```
+输出（12 项测试全部通过）：
+```text
+tests/pipeline/theme/test_theme_production.py::test_full_replay_vs_daily_production_exact_value_equality PASSED [  8%]
+tests/pipeline/theme/test_theme_production.py::test_lineage_audit_and_input_snapshot_traceability PASSED [ 16%]
+tests/pipeline/theme/test_theme_production.py::test_targeted_replay_exact_zero_drift_on_overlapping_range PASSED [ 25%]
+tests/pipeline/theme/test_theme_production.py::test_option_a_daily_production_physical_scope_and_run_persistence PASSED [ 33%]
+tests/pipeline/theme/test_theme_production.py::test_input_snapshot_id_determinism PASSED [ 41%]
+tests/pipeline/theme/test_theme_production.py::test_source_drift_detection_in_lineage_audit PASSED [ 50%]
+tests/pipeline/theme/test_theme_production.py::test_historical_correction_forward_dependency_closure PASSED [ 58%]
+tests/pipeline/theme/test_theme_production.py::test_cross_range_existing_episode_update_on_historical_correction PASSED [ 66%]
+tests/pipeline/theme/test_theme_production.py::test_deterministic_replay_with_as_of_and_different_knowledge_dates PASSED [ 75%]
+tests/pipeline/theme/test_theme_production.py::test_replay_calculation_equivalence_with_canonical_rebuild PASSED [ 83%]
+tests/pipeline/theme/test_theme_production.py::test_audit_reconstruction_failure_fails_closed PASSED [ 91%]
+tests/pipeline/theme/test_theme_production.py::test_audit_defaults_to_persisted_production_knowledge_date PASSED [100%]
+
+============================= 12 passed in 4.67s ==============================
 ```
 
-输出：
-`117 passed in 3.37s`
+### 3.2 任务相关全量测试套件
+执行 Task 04-A 全部相关测试套件：
+```bash
+pytest tests/contracts/ tests/indicators/ tests/stock_collections/ tests/pipeline/theme/ tests/pipeline/test_theme_contracts.py -v
+```
+输出（298 项测试全部通过）：
+```text
+============================ 298 passed in 17.17s =============================
+```
+- `tests/contracts/`: 24 passed
+- `tests/indicators/`: 240 passed
+- `tests/stock_collections/`: 19 passed
+- `tests/pipeline/theme/`: 12 passed
+- `tests/pipeline/test_theme_contracts.py`: 3 passed
 
-### 关键专项验证点：
-1. `tests/pipeline/theme/test_theme_production.py::test_full_replay_vs_daily_production_exact_value_equality`：验证 Full Replay 与 逐日 Daily 生产生成的 `index_level`, `theme_daily_return`, `trend_state`, `m4_observations` **数值逐行 100% 精确等价**。
-2. `tests/pipeline/theme/test_theme_production.py::test_lineage_audit_and_input_snapshot_traceability`：验证 Lineage 审计无 N+1 查询，准确回溯 `production_run_id`、`input_snapshot_id` 及涨停列表。
-3. `tests/stock_collections/test_domain_invariants.py`：验证 1:1 原子创建、不可变身份校验及生命周期互斥不变量。
-4. `tests/stock_collections/test_resolver.py` & `tests/stock_collections/test_pit_membership.py`：验证双时间维度可见性与业务有效性隔离、Late Revision 与 Re-entry 语义。
-5. `tests/pipeline/test_pipeline_contract.py`：验证 CLI 契约静态与动态检验通过（29 个有效契约）。
+### 3.3 全量 `pytest tests/ -v` 本地环境阻塞说明
+- 执行 `pytest tests/ -v` 时，因本机环境为 Windows 原生开发环境，且本任务严格移除非 Task 04-A 越界补丁，在扫描收集外部非修改文件 `src/qrp_atlas/pipeline/system_b/service.py:7` 时遭遇 `ModuleNotFoundError: No module named 'resource'`（`resource` 为 Linux/Unix 专有库）。
+- 该阻塞属于外部平台基线约束，Task 04-A 自身涉及的 298 项测试完全独立且 100% 通过。
+
+### 3.4 语法与静态检查
+- `python -m compileall -q src tests`：零错误退出（exit code 0）
+- `git diff --check`：零空格/换行告警（exit code 0）
+
+### 3.5 代表性生产规模 Benchmark 证据
+运行测试脚本：
+```bash
+python scratch/benchmark_theme_m4.py
+```
+实测输出：
+```text
+=== Benchmark Results ===
+Themes processed:             50
+Stocks per theme:             25
+Total membership links:       1,250
+Historical inception window:  120 trading days (2026-01-05 to 2026-06-19)
+Market fact rows scanned:     60,000
+Comparison universe rows:     1,200
+Target date outputs written:
+  - Daily index rows:         50
+  - Trend state rows:         50
+  - Episodes tracked:         32
+  - M4 observations:          50
+Total elapsed time:           24.373 s
+Throughput (time per theme):  487.46 ms/theme
+Reported write & exec time:   24.371 s
+Python memory allocated/peak: 0.43 MB / 60.57 MB
+```
+在 50 个主题、1,250 个成员、半年回溯窗口及 60,000 条行情事实下，Option A 日间全量计算与落库耗时 **24.37 秒**，峰值内存 **60.57 MB**。

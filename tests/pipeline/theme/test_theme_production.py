@@ -280,6 +280,9 @@ def test_historical_correction_forward_dependency_closure(db):
     - 历史修订请求 start_date = dates[5] (Day 6), end_date = dates[5] (Day 6)
     - 系统必须自动识别 affected_output_end = dates[9]
     - 从 Inception 重算，输出写入 dates[5]..dates[9]
+    - 断言 affected range 每个 trade_date 都仍存在且 row count 完整
+    - 断言 affected range 内每行数据的 production_run_id 均更新为本次 correction run_id
+    - 断言 prior range (dates[0]..dates[4]) 保留原初始 production_run_id
     """
     dates = [
         date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7),
@@ -288,12 +291,14 @@ def test_historical_correction_forward_dependency_closure(db):
     service = ThemePipelineService(db)
 
     # 1. 初始生产全部 10 天
-    service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1])
+    init_rep = service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1], run_type="BACKFILL")
+    init_run_id = init_rep.production_run_id
     max_d = db.execute("SELECT MAX(trade_date) FROM theme_custom_index_daily").fetchone()[0]
     assert max_d == dates[-1]
 
     # 2. 对 Day 6 (dates[5]) 发生历史修订（仅请求 Day 6）
     rep = service.rebuild_m4_facts(start_date=dates[5], end_date=dates[5], run_type="CORRECTION")
+    corr_run_id = rep.production_run_id
 
     # 验证报告中 affected_output_end 自动延伸至当前物化上限 dates[-1]
     assert rep.start_date == dates[5]
@@ -303,10 +308,26 @@ def test_historical_correction_forward_dependency_closure(db):
     # 验证 theme_production_run 表中记录的 target_end_date 也是 dates[-1]
     run_rec = db.execute(
         "SELECT target_start_date, target_end_date FROM theme_production_run WHERE production_run_id = ?",
-        [rep.production_run_id],
+        [corr_run_id],
     ).fetchone()
     assert run_rec[0] == dates[5]
     assert run_rec[1] == dates[-1]
+
+    # 3. 严格断言物理事实表行完整性与 production_run_id 归属：
+    # 验证全部 10 个日期均存在，无任何日期在修订后被删空
+    for tbl in ["theme_custom_index_daily", "theme_custom_index_state", "theme_m4_observation"]:
+        rows = db.execute(f"SELECT trade_date, production_run_id FROM {tbl} ORDER BY trade_date").fetchall()
+        assert len(rows) == 10, f"Table {tbl} row count expected 10, got {len(rows)}"
+
+        # 08-03 ~ 08-07 (dates[0]..dates[4]): 必须保留初始 run_id
+        for r in rows[:5]:
+            assert r[0] in dates[:5]
+            assert r[1] == init_run_id, f"Prior row on {r[0]} expected {init_run_id}, got {r[1]}"
+
+        # 08-10 ~ 08-14 (dates[5]..dates[9]): 必须全部更新为本次 correction run_id
+        for r in rows[5:]:
+            assert r[0] in dates[5:]
+            assert r[1] == corr_run_id, f"Affected row on {r[0]} expected {corr_run_id}, got {r[1]}"
 
 
 def test_cross_range_existing_episode_update_on_historical_correction(db):
@@ -356,12 +377,30 @@ def test_cross_range_existing_episode_update_on_historical_correction(db):
 
 
 def test_deterministic_replay_with_as_of_and_different_knowledge_dates(db):
-    """验证 (T, K) 双时间确定性回放：
-    - 同一 as_of_date (T = 2026-08-06)，不同 knowledge_date (K1 vs K2) 表达知识演进，产生不同但确定的输出
-    - (T, K) 相同多次运行产生 100% 确定性输出
+    """验证 (T, K) 双时间非物化只读回放：
+    - baseline canonical tables snapshot
+    - replay(T, K1) 两次 -> exact deterministic equality
+    - replay(T, K2) 两次 -> exact deterministic equality
+    - K1 != K2 -> 表达知识演进差异
+    - canonical tables 在 replay 前后 100% 保持完全未变
     """
     service = ThemePipelineService(db)
     sc_service = StockCollectionService(db)
+
+    # 1. 建立基线 canonical 生产数据
+    dates = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6)]
+    service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1], run_type="BACKFILL")
+
+    # 快照保存全部 4 张 Canonical 事实表及 production_run
+    def _snapshot_canonical(con):
+        tables = [
+            "theme_custom_index_daily",
+            "theme_custom_index_state",
+            "theme_custom_index_episode",
+            "theme_m4_observation",
+            "theme_production_run",
+        ]
+        return {t: con.execute(f"SELECT * FROM {t} ORDER BY ALL").fetchall() for t in tables}
 
     # 添加第 3 只股票 000002.SZ，在 K2 = 2026-08-08 才可见
     db.execute("INSERT INTO stock_info (ticker, name, list_date) VALUES ('000002.SZ', 'Stock C', '2020-01-01')")
@@ -371,7 +410,7 @@ def test_deterministic_replay_with_as_of_and_different_knowledge_dates(db):
             "INSERT INTO daily_market_snapshot (trade_date, ticker, name, open, high, low, close, volume, amount, pct_change, is_limit_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [p_d, "000002.SZ", "Stock C", 10.0, 10.0, 9.8, 10.0, 1000, 10000, 0.0, False],
         )
-    for d in [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6)]:
+    for d in dates:
         db.execute(
             "INSERT INTO daily_market_snapshot (trade_date, ticker, name, open, high, low, close, volume, amount, pct_change, is_limit_up) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [d, "000002.SZ", "Stock C", 10.0, 10.5, 9.8, 10.5, 1000, 10000, 5.0, False],
@@ -393,41 +432,108 @@ def test_deterministic_replay_with_as_of_and_different_knowledge_dates(db):
     k1 = date(2026, 8, 5)  # K1 无法获知 Stock C
     k2 = date(2026, 8, 9)  # K2 可以获知 Stock C
 
-    # 1. 以 (T, K1) 回放两次
-    rep_k1_first = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
-    m4_k1_first = db.execute(
-        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
-    ).fetchone()
+    canonical_pre_replay = _snapshot_canonical(db)
 
-    rep_k1_second = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
-    m4_k1_second = db.execute(
-        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
-    ).fetchone()
+    # 1. 运行只读 replay(T, K1) 两次
+    rep_k1_first = service.replay_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
+    rep_k1_second = service.replay_m4_facts(start_date=t, end_date=t, knowledge_date=k1)
 
-    # K1 下必须完全一致 (2 个成员)
-    assert m4_k1_first == m4_k1_second
-    assert m4_k1_first[0] == 2
+    # K1 下必须完全一致 (2 个成员) 且具有确定性
     assert rep_k1_first.input_snapshot_id == rep_k1_second.input_snapshot_id
+    assert rep_k1_first.m4_observations["effective_member_count"].iloc[0] == 2
+    assert rep_k1_second.m4_observations["effective_member_count"].iloc[0] == 2
+    pd.testing.assert_frame_equal(rep_k1_first.m4_observations, rep_k1_second.m4_observations)
+    pd.testing.assert_frame_equal(rep_k1_first.daily_indices, rep_k1_second.daily_indices)
 
-    # 2. 以 (T, K2) 回放两次
-    rep_k2_first = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
-    m4_k2_first = db.execute(
-        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
-    ).fetchone()
+    # 2. 运行只读 replay(T, K2) 两次
+    rep_k2_first = service.replay_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
+    rep_k2_second = service.replay_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
 
-    rep_k2_second = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=k2)
-    m4_k2_second = db.execute(
-        "SELECT effective_member_count, theme_daily_return FROM theme_m4_observation WHERE trade_date = ?", [t]
-    ).fetchone()
-
-    # K2 下必须完全一致 (3 个成员)
-    assert m4_k2_first == m4_k2_second
-    assert m4_k2_first[0] == 3
+    # K2 下必须完全一致 (3 个成员) 且具有确定性
     assert rep_k2_first.input_snapshot_id == rep_k2_second.input_snapshot_id
+    assert rep_k2_first.m4_observations["effective_member_count"].iloc[0] == 3
+    assert rep_k2_second.m4_observations["effective_member_count"].iloc[0] == 3
+    pd.testing.assert_frame_equal(rep_k2_first.m4_observations, rep_k2_second.m4_observations)
+    pd.testing.assert_frame_equal(rep_k2_first.daily_indices, rep_k2_second.daily_indices)
 
     # K1 与 K2 的结果不同，表达确定性的知识演进
-    assert m4_k1_first[0] != m4_k2_first[0]
+    assert rep_k1_first.m4_observations["effective_member_count"].iloc[0] != rep_k2_first.m4_observations["effective_member_count"].iloc[0]
     assert rep_k1_first.input_snapshot_id != rep_k2_first.input_snapshot_id
+
+    # 3. 严格断言：Replay 前后的 Canonical 事实表完全未变（行数、内容、主键、run_id 100% 相同）
+    canonical_post_replay = _snapshot_canonical(db)
+    assert canonical_pre_replay == canonical_post_replay
+
+
+def test_replay_calculation_equivalence_with_canonical_rebuild(db):
+    """验证只读 Replay 与 Canonical Materialization 共用同一个计算核心：
+    Replay(T, K) 返回的各项计算事实与 Canonical Rebuild 落库结果 100% 精确一致。
+    """
+    service = ThemePipelineService(db)
+    t = date(2026, 8, 5)
+    kd = date(2026, 8, 5)
+
+    # 1. 运行 canonical rebuild
+    prod_rep = service.rebuild_m4_facts(start_date=t, end_date=t, knowledge_date=kd, run_type="BACKFILL")
+
+    # 2. 运行 read-only replay
+    replay_res = service.replay_m4_facts(start_date=t, end_date=t, knowledge_date=kd)
+
+    # 3. 验证 Snapshot ID 完全一致
+    assert replay_res.input_snapshot_id == prod_rep.input_snapshot_id
+
+    # 4. 从 canonical 事实表查询物化结果
+    can_daily = db.execute(
+        "SELECT theme_daily_return, index_level, effective_member_count, total_member_count FROM theme_custom_index_daily WHERE trade_date = ?",
+        [t],
+    ).fetchone()
+    can_state = db.execute(
+        "SELECT close, ma5, ma10, trend_state, custom_index_trend_run_days FROM theme_custom_index_state WHERE trade_date = ?",
+        [t],
+    ).fetchone()
+    can_m4 = db.execute(
+        "SELECT theme_daily_return, theme_limit_up_count, theme_return_rank, effective_member_count FROM theme_m4_observation WHERE trade_date = ?",
+        [t],
+    ).fetchone()
+
+    # 断言 Replay 结果与 Canonical 物化结果逐字段完全一致
+    assert replay_res.daily_indices["theme_daily_return"].iloc[0] == can_daily[0]
+    assert replay_res.daily_indices["index_level"].iloc[0] == can_daily[1]
+    assert replay_res.daily_indices["effective_member_count"].iloc[0] == can_daily[2]
+
+    assert replay_res.daily_states["close"].iloc[0] == can_state[0]
+    assert replay_res.daily_states["trend_state"].iloc[0] == can_state[3]
+
+    assert replay_res.m4_observations["theme_daily_return"].iloc[0] == can_m4[0]
+    assert replay_res.m4_observations["theme_limit_up_count"].iloc[0] == can_m4[1]
+    assert replay_res.m4_observations["theme_return_rank"].iloc[0] == can_m4[2]
+    assert replay_res.m4_observations["effective_member_count"].iloc[0] == can_m4[3]
+
+
+def test_audit_reconstruction_failure_fails_closed(db):
+    """验证当 Audit 重建依赖被破坏或发生异常时，审计严格 fail closed：
+    is_reproducible == False
+    discrepancy_reason == 'AUDIT_RECONSTRUCTION_FAILED'
+    """
+    service = ThemePipelineService(db)
+    query_service = ThemeQueryService(db)
+    t = date(2026, 8, 4)
+
+    # 1. 正常生产
+    service.rebuild_m4_facts(start_date=t, end_date=t)
+
+    # 正常审计应通过
+    audit_ok = query_service.audit_m4_observation("THM:QRP:AI_CHIP", t)
+    assert audit_ok.is_reproducible is True
+    assert audit_ok.discrepancy_reason is None
+
+    # 2. 模拟破坏重建必需的依赖（例如删除 ths_daily 表）
+    db.execute("DROP TABLE ths_daily")
+
+    # 再次审计必须 Fail Closed
+    audit_fail = query_service.audit_m4_observation("THM:QRP:AI_CHIP", t)
+    assert audit_fail.is_reproducible is False
+    assert audit_fail.discrepancy_reason == "AUDIT_RECONSTRUCTION_FAILED"
 
 
 def test_audit_defaults_to_persisted_production_knowledge_date(db):
