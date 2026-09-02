@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
 import shutil
 import time
 import uuid
@@ -207,7 +210,9 @@ def _validate_staging(
 
 
 def _peak_memory_mb() -> float:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    if resource is not None and hasattr(resource, "getrusage"):
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    return 0.0
 
 
 def _make_staging_dir(root: Path, run_id: str) -> Path:

@@ -71,9 +71,14 @@ def parse_definition(payload: Mapping[str, Any]) -> JobDefinition:
     working_directory_value = payload.get("working_directory")
     if working_directory_value is not None and not isinstance(working_directory_value, str):
         raise DefinitionValidationError("working_directory must be a string or null")
-    working_directory = Path(working_directory_value) if working_directory_value else None
-    if working_directory is not None and not working_directory.is_absolute():
-        raise DefinitionValidationError("working_directory must be an absolute path")
+    if working_directory_value:
+        from pathlib import PurePosixPath, PureWindowsPath
+        is_abs = PurePosixPath(working_directory_value).is_absolute() or PureWindowsPath(working_directory_value).is_absolute()
+        if not is_abs:
+            raise DefinitionValidationError("working_directory must be an absolute path")
+        working_directory = Path(working_directory_value)
+    else:
+        working_directory = None
     dependencies = _string_tuple(payload.get("dependencies", []), "dependencies")
     timeout_seconds = payload.get("timeout_seconds")
     if timeout_seconds is not None and (not isinstance(timeout_seconds, int) or timeout_seconds <= 0):

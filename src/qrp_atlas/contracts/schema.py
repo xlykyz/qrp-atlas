@@ -200,6 +200,40 @@ from .system_b import (
     ENTRY_REASON, EXIT_REASON, METRICS_JSON, COMPLETED_RUN_ID,
     POOL_COMPLETED_AT, SYSTEM_B_POOL_RULE_VERSION,
 )
+from .stock_collection import (
+    COLLECTION_ID,
+    COLLECTION_TYPE,
+    COLLECTION_SCOPE,
+    NAMESPACE,
+    SOURCE_KEY,
+    CANONICAL_NAME,
+    MEMBERSHIP_MODEL,
+    STATUS,
+    THEME_ID,
+    MEMBERSHIP_ID,
+    STOCK_COLLECTION_TABLE,
+    THEME_TABLE,
+    THEME_MEMBERSHIP_HISTORY_TABLE,
+)
+from .m4 import (
+    THEME_DAILY_RETURN,
+    THEME_LIMIT_UP_COUNT,
+    THEME_RETURN_RANK,
+    EFFECTIVE_MEMBER_COUNT,
+    TOTAL_MEMBER_COUNT,
+    COMPARISON_UNIVERSE_SIZE,
+    COMPARISON_UNIVERSE_VERSION,
+    QUALIFICATION_STATUS,
+    INDEX_LEVEL,
+    BASE_LEVEL,
+    CUSTOM_INDEX_TREND_STATE,
+    CUSTOM_INDEX_TREND_RUN_DAYS,
+    CUSTOM_INDEX_EPISODE_ID,
+    THEME_CUSTOM_INDEX_DAILY_TABLE,
+    THEME_CUSTOM_INDEX_STATE_TABLE,
+    THEME_CUSTOM_INDEX_EPISODE_TABLE,
+    THEME_M4_OBSERVATION_TABLE,
+)
 
 
 @dataclass(frozen=True)
@@ -1114,7 +1148,187 @@ EARNINGS_FORECAST_EVENT = TableSchema(
     primary_key=(REVISION_ID,),
 )
 
-ALL_TABLES = (DAILY_MARKET_SNAPSHOT, MARKET_PHASE, TRADE_EXECUTION, STOCK_INFO, STOCK_INFO_HISTORICAL_IDENTITY, TRADING_CALENDAR, ADJ_FACTOR_CHANGES, CNINFO_RESEARCH_VISITS, RESEARCH_REPORT_STOCK, RESEARCH_REPORT_INDUSTRY, INDEX_BASIC, INDEX_DAILY, ETF_DAILY, ETF_ADJ_FACTOR, ZT_POOL, DT_POOL, DAILY_BASIC, SUSPEND_D, SYSTEM_B_STATE_OBSERVATION, SYSTEM_B_PRODUCTION_RUN, SYSTEM_B_EPISODE, SYSTEM_B_EPISODE_OBSERVATION, SYSTEM_B_EPISODE_SEGMENT, SYSTEM_B_POOL_MEMBERSHIP, SYSTEM_B_POOL_RUN, IRM_INTERACTION_QA, LIMIT_STEP, THS_DAILY, STK_HIGH_SHOCK, INCOME_STATEMENT, BALANCE_SHEET, CASHFLOW_STATEMENT, FINANCIAL_INDICATOR, INDUSTRY_MEMBERSHIP_HISTORY, INDEX_COMPONENT_HISTORY, EARNINGS_FORECAST_EVENT)
+STOCK_COLLECTION = TableSchema(
+    name=STOCK_COLLECTION_TABLE,
+    columns=(
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_TYPE, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_SCOPE, "VARCHAR", nullable=False),
+        ColumnSpec(NAMESPACE, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_KEY, "VARCHAR", nullable=False),
+        ColumnSpec(CANONICAL_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(MEMBERSHIP_MODEL, "VARCHAR", nullable=False),
+        ColumnSpec(STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(EFFECTIVE_FROM, "DATE", nullable=False),
+        ColumnSpec(EFFECTIVE_TO, "DATE"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
+        ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(COLLECTION_ID, REVISION_ID),
+)
+
+THEME = TableSchema(
+    name=THEME_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CANONICAL_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(EFFECTIVE_FROM, "DATE", nullable=False),
+        ColumnSpec(EFFECTIVE_TO, "DATE"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
+        ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, REVISION_ID),
+)
+
+THEME_MEMBERSHIP_HISTORY = TableSchema(
+    name=THEME_MEMBERSHIP_HISTORY_TABLE,
+    columns=(
+        ColumnSpec(MEMBERSHIP_ID, "VARCHAR", nullable=False),
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(EFFECTIVE_FROM, "DATE", nullable=False),
+        ColumnSpec(EFFECTIVE_TO, "DATE"),
+        ColumnSpec(AVAILABLE_TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
+        ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(MEMBERSHIP_ID, REVISION_ID),
+)
+
+THEME_CUSTOM_INDEX_DAILY = TableSchema(
+    name=THEME_CUSTOM_INDEX_DAILY_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(THEME_DAILY_RETURN, "DOUBLE"),
+        ColumnSpec(INDEX_LEVEL, "DOUBLE"),
+        ColumnSpec(BASE_LEVEL, "DOUBLE", nullable=False),
+        ColumnSpec(EFFECTIVE_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(TOTAL_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, TRADE_DATE),
+)
+
+THEME_CUSTOM_INDEX_STATE = TableSchema(
+    name=THEME_CUSTOM_INDEX_STATE_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(CLOSE, "DOUBLE"),
+        ColumnSpec(MA5, "DOUBLE"),
+        ColumnSpec(MA10, "DOUBLE"),
+        ColumnSpec(TREND_STATE, "VARCHAR"),
+        ColumnSpec(PREVIOUS_TREND_STATE, "VARCHAR"),
+        ColumnSpec(CUSTOM_INDEX_TREND_RUN_DAYS, "BIGINT", nullable=False),
+        ColumnSpec(IS_ABOVE_OR_EQUAL_MA5, "BOOLEAN"),
+        ColumnSpec(STATE_CHANGED, "BOOLEAN"),
+        ColumnSpec(RULE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, TRADE_DATE),
+)
+
+THEME_CUSTOM_INDEX_EPISODE = TableSchema(
+    name=THEME_CUSTOM_INDEX_EPISODE_TABLE,
+    columns=(
+        ColumnSpec(EPISODE_ID, "VARCHAR", nullable=False),
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(EPISODE_NO, "BIGINT", nullable=False),
+        ColumnSpec(EPISODE_START_DATE, "DATE", nullable=False),
+        ColumnSpec(EPISODE_CONFIRMED_DATE, "DATE", nullable=False),
+        ColumnSpec(EPISODE_END_DATE, "DATE"),
+        ColumnSpec(MA5_REENTRY_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(EPISODE_RETURN, "DOUBLE"),
+        ColumnSpec(RULE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(EPISODE_ID,),
+)
+
+THEME_M4_OBSERVATION = TableSchema(
+    name=THEME_M4_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(THEME_DAILY_RETURN, "DOUBLE"),
+        ColumnSpec(THEME_LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_RETURN_RANK, "BIGINT"),
+        ColumnSpec(EFFECTIVE_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(TOTAL_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(COMPARISON_UNIVERSE_SIZE, "BIGINT", nullable=False),
+        ColumnSpec(COMPARISON_UNIVERSE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CUSTOM_INDEX_TREND_STATE, "VARCHAR"),
+        ColumnSpec(CUSTOM_INDEX_TREND_RUN_DAYS, "BIGINT"),
+        ColumnSpec(CUSTOM_INDEX_EPISODE_ID, "VARCHAR"),
+        ColumnSpec(QUALIFICATION_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, TRADE_DATE),
+)
+
+ALL_TABLES = (
+    DAILY_MARKET_SNAPSHOT,
+    MARKET_PHASE,
+    TRADE_EXECUTION,
+    STOCK_INFO,
+    STOCK_INFO_HISTORICAL_IDENTITY,
+    TRADING_CALENDAR,
+    ADJ_FACTOR_CHANGES,
+    CNINFO_RESEARCH_VISITS,
+    RESEARCH_REPORT_STOCK,
+    RESEARCH_REPORT_INDUSTRY,
+    INDEX_BASIC,
+    INDEX_DAILY,
+    ETF_DAILY,
+    ETF_ADJ_FACTOR,
+    ZT_POOL,
+    DT_POOL,
+    DAILY_BASIC,
+    SUSPEND_D,
+    SYSTEM_B_STATE_OBSERVATION,
+    SYSTEM_B_PRODUCTION_RUN,
+    SYSTEM_B_EPISODE,
+    SYSTEM_B_EPISODE_OBSERVATION,
+    SYSTEM_B_EPISODE_SEGMENT,
+    SYSTEM_B_POOL_MEMBERSHIP,
+    SYSTEM_B_POOL_RUN,
+    IRM_INTERACTION_QA,
+    LIMIT_STEP,
+    THS_DAILY,
+    STK_HIGH_SHOCK,
+    INCOME_STATEMENT,
+    BALANCE_SHEET,
+    CASHFLOW_STATEMENT,
+    FINANCIAL_INDICATOR,
+    INDUSTRY_MEMBERSHIP_HISTORY,
+    INDEX_COMPONENT_HISTORY,
+    EARNINGS_FORECAST_EVENT,
+    STOCK_COLLECTION,
+    THEME,
+    THEME_MEMBERSHIP_HISTORY,
+    THEME_CUSTOM_INDEX_DAILY,
+    THEME_CUSTOM_INDEX_STATE,
+    THEME_CUSTOM_INDEX_EPISODE,
+    THEME_M4_OBSERVATION,
+)
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
 
@@ -1168,3 +1382,14 @@ def init_irm_database(con) -> None:
         init_irm_database(con)
     """
     con.execute(IRM_INTERACTION_QA.duckdb_create_sql())
+
+
+def init_stock_collections_database(con) -> None:
+    """初始化 StockCollection 领域数据库，创建 stock_collection、theme 及 theme_membership_history 契约表。
+
+    Args:
+        con: DuckDB 连接对象
+    """
+    con.execute(STOCK_COLLECTION.duckdb_create_sql())
+    con.execute(THEME.duckdb_create_sql())
+    con.execute(THEME_MEMBERSHIP_HISTORY.duckdb_create_sql())

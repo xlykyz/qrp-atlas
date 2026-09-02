@@ -131,6 +131,13 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("stock_info", (TICKER,)),
         ("market_phase", (TRADE_DATE,)),
         ("system_b_episode_segment", ("segment_id",)),
+        ("stock_collection", ("collection_id", "revision_id")),
+        ("theme", ("theme_id", "revision_id")),
+        ("theme_membership_history", ("membership_id", "revision_id")),
+        ("theme_custom_index_daily", ("theme_id", "trade_date")),
+        ("theme_custom_index_state", ("theme_id", "trade_date")),
+        ("theme_custom_index_episode", ("episode_id",)),
+        ("theme_m4_observation", ("theme_id", "trade_date")),
     ],
 )
 def test_known_primary_keys(table_name: str, expected_pk: tuple):
@@ -138,6 +145,21 @@ def test_known_primary_keys(table_name: str, expected_pk: tuple):
 
     table = get_table(table_name)
     assert table.primary_key == expected_pk
+
+
+def test_init_stock_collections_database_creates_tables(tmp_path):
+    """init_stock_collections_database() 在独立库创建 stock_collection/theme/theme_membership_history 契约表。"""
+    from qrp_atlas.contracts import init_stock_collections_database
+
+    db_path = tmp_path / "stock_collections.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        init_stock_collections_database(con)
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        expected = {"stock_collection", "theme", "theme_membership_history"}
+        assert tables == expected
+    finally:
+        con.close()
 
 
 def test_all_tableschema_instances_are_registered_in_all_tables():
