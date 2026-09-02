@@ -44,10 +44,12 @@ def test_rebuild_uses_state_table_and_official_sma(tmp_path: Path):
     first=rebuild_episodes(state.resolve(),output.resolve(),end_date=pd.Timestamp("2026-01-23").date(),acceptance_start_date=ACCEPTANCE_START)
     second=rebuild_episodes(state.resolve(),output.resolve(),end_date=pd.Timestamp("2026-01-23").date(),acceptance_start_date=ACCEPTANCE_START)
     assert first["episode_rows"]==second["episode_rows"]==1
+    assert first["segment_rows"]==second["segment_rows"]>=1
     assert first["state_input_database"]==str(state.resolve())
     con=duckdb.connect(str(output),read_only=True)
     assert con.execute("select count(*) from system_b_episode").fetchone()[0]==1
     assert con.execute("select count(*) from system_b_episode_observation").fetchone()[0]>0
+    assert con.execute("select count(*) from system_b_episode_segment").fetchone()[0]>0
     con.close()
 
 
@@ -133,3 +135,35 @@ def test_cli_config_path_is_independent_of_current_directory(tmp_path: Path,monk
         capsys.readouterr()
     assert calls[0][0]==calls[1][0]==configured
     assert calls[0][1]==calls[1][1]==output
+
+
+def test_audit_rejects_segment_invariants(tmp_path: Path):
+    output = duckdb.connect(str(tmp_path / "audit_seg.duckdb"))
+    ensure_schema(output)
+    # Valid Episode
+    output.execute("""INSERT INTO system_b_episode VALUES
+        ('A_EP_0001','A',1,DATE '2026-01-01',DATE '2026-01-02',DATE '2026-01-05',0,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01')""")
+    # Observations: 2 days (Jan 02: ACTIVE, Jan 05: ACTIVE)
+    output.execute("""INSERT INTO system_b_episode_observation VALUES
+        (DATE '2026-01-02','A','A_EP_0001',1,0,10.0,9.0,8.0,'ACTIVE','CANDIDATE','CANDIDATE->ACTIVE',0.0,0.0,0.0,0,TRUE,FALSE,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01'),
+        (DATE '2026-01-05','A','A_EP_0001',2,1,12.0,9.5,8.5,'ACTIVE','ACTIVE',NULL,0.2,0.2,0.0,0,FALSE,FALSE,'r','system_b_episode@1.0.0__user_20260727',TIMESTAMP '2026-01-01')""")
+    # Segment: inject wrong return (0.1 instead of 0.2) to trigger return_closure_violations
+    output.execute("""INSERT INTO system_b_episode_segment VALUES
+        ('A_EP_0001_SEG_001','A_EP_0001','A',1,'ACTIVE',1,DATE '2026-01-01',DATE '2026-01-02',DATE '2026-01-05',2,10.0,10.0,12.0,0.10,12.0,DATE '2026-01-05',0.10,0.0,TRUE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01')""")
+    
+    source = duckdb.connect()
+    audit = audit_episodes(output, source, acceptance_start_date=pd.Timestamp("2013-01-01").date(), end_date=pd.Timestamp("2026-07-24").date())
+    assert audit["quality"]["return_closure_violations"] == 1
+    assert audit["quality"]["orphan_segments"] == 0
+    assert audit["quality"]["trading_days_mismatch"] == 0
+    assert audit["quality"]["active_sprint_count_mismatch"] == 0
+
+    # Inject orphan segment
+    output.execute("""INSERT INTO system_b_episode_segment VALUES
+        ('ORPHAN_SEG_001','NON_EXISTENT','A',1,'ACTIVE',1,DATE '2026-01-01',DATE '2026-01-02',DATE '2026-01-05',2,10.0,10.0,12.0,0.20,12.0,DATE '2026-01-05',0.20,0.0,TRUE,'system_b_episode@1.0.0__user_20260727','system_b_episode_segment@1.0.0','r',TIMESTAMP '2026-01-01')""")
+    audit2 = audit_episodes(output, source, acceptance_start_date=pd.Timestamp("2013-01-01").date(), end_date=pd.Timestamp("2026-07-24").date())
+    assert audit2["quality"]["orphan_segments"] == 1
+
+    source.close()
+    output.close()
+

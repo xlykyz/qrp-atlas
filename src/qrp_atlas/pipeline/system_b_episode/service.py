@@ -15,11 +15,18 @@ from qrp_atlas.contracts import (
     RULE_VERSION, SYSTEM_B_2_0_PARAMETER_SET_ID, SYSTEM_B_2_0_RULE_VERSION_SET_ID,
     SYSTEM_B_CALCULATION_VERSION, SYSTEM_B_EPISODE, SYSTEM_B_EPISODE_OBSERVATION,
     SYSTEM_B_EPISODE_OBSERVATION_TABLE, SYSTEM_B_EPISODE_RULE_VERSION,
+    SYSTEM_B_EPISODE_SEGMENT, SYSTEM_B_EPISODE_SEGMENT_TABLE,
+    SYSTEM_B_EPISODE_SEGMENT_VERSION, SOURCE_EPISODE_RULE_VERSION,
+    SEGMENT_VERSION,
     SYSTEM_B_EPISODE_TABLE, SYSTEM_B_STATE_OBSERVATION_TABLE, TICKER, TRADE_DATE,
     TREND_STATE,
 )
+import numpy as np
 from qrp_atlas.indicators import IndicatorRequest, calculate_indicators
-from qrp_atlas.indicators.system_b import calculate_system_b_episodes
+from qrp_atlas.indicators.system_b import (
+    calculate_system_b_episodes,
+    calculate_system_b_episode_segments,
+)
 
 ACCEPTANCE_START_DATE = date(2013, 1, 1)
 
@@ -66,6 +73,7 @@ def open_state_input(path: Path) -> tuple[Path, duckdb.DuckDBPyConnection]:
 def ensure_schema(connection: duckdb.DuckDBPyConnection) -> None:
     connection.execute(SYSTEM_B_EPISODE.duckdb_create_sql())
     connection.execute(SYSTEM_B_EPISODE_OBSERVATION.duckdb_create_sql())
+    connection.execute(SYSTEM_B_EPISODE_SEGMENT.duckdb_create_sql())
 
 
 def inspect_state_input(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
@@ -148,6 +156,10 @@ def rebuild_episodes(
             output.execute("BEGIN")
             ensure_schema(output)
             output.execute(
+                f"DELETE FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} WHERE segment_version=?",
+                [SYSTEM_B_EPISODE_SEGMENT_VERSION],
+            )
+            output.execute(
                 f"DELETE FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE} WHERE rule_version=?",
                 [SYSTEM_B_EPISODE_RULE_VERSION],
             )
@@ -155,7 +167,7 @@ def rebuild_episodes(
                 f"DELETE FROM {SYSTEM_B_EPISODE_TABLE} WHERE rule_version=?",
                 [SYSTEM_B_EPISODE_RULE_VERSION],
             )
-            episode_rows = observation_rows = excluded_null_state = excluded_indicator_warmup = 0
+            episode_rows = observation_rows = segment_rows = excluded_null_state = excluded_indicator_warmup = 0
             for offset in range(0, len(assets), asset_batch_size):
                 batch = assets[offset:offset + asset_batch_size]
                 placeholders = ",".join("?" for _ in batch)
@@ -188,10 +200,22 @@ def rebuild_episodes(
                 observation_frame = result.observations.loc[
                     result.observations["episode_id"].isin(kept_ids)
                 ].copy()
+                if not episode_frame.empty and not observation_frame.empty:
+                    seg_res = calculate_system_b_episode_segments(episode_frame, observation_frame)
+                    segment_frame = seg_res.segments.copy()
+                else:
+                    segment_frame = pd.DataFrame(columns=[column.name for column in SYSTEM_B_EPISODE_SEGMENT.columns])
+
                 for frame in (episode_frame, observation_frame):
                     frame[CREATED_RUN_ID] = run_id
                     frame[RULE_VERSION] = SYSTEM_B_EPISODE_RULE_VERSION
                     frame[CREATED_AT] = now
+                if not segment_frame.empty:
+                    segment_frame[CREATED_RUN_ID] = run_id
+                    segment_frame[SOURCE_EPISODE_RULE_VERSION] = SYSTEM_B_EPISODE_RULE_VERSION
+                    segment_frame[SEGMENT_VERSION] = SYSTEM_B_EPISODE_SEGMENT_VERSION
+                    segment_frame[CREATED_AT] = now
+
                 if not episode_frame.empty:
                     output.register("episode_batch", episode_frame)
                     columns = ",".join(column.name for column in SYSTEM_B_EPISODE.columns)
@@ -202,8 +226,15 @@ def rebuild_episodes(
                     columns = ",".join(column.name for column in SYSTEM_B_EPISODE_OBSERVATION.columns)
                     output.execute(f"INSERT INTO {SYSTEM_B_EPISODE_OBSERVATION_TABLE} ({columns}) SELECT {columns} FROM episode_observation_batch")
                     output.unregister("episode_observation_batch")
+                if not segment_frame.empty:
+                    output.register("episode_segment_batch", segment_frame)
+                    columns = ",".join(column.name for column in SYSTEM_B_EPISODE_SEGMENT.columns)
+                    output.execute(f"INSERT INTO {SYSTEM_B_EPISODE_SEGMENT_TABLE} ({columns}) SELECT {columns} FROM episode_segment_batch")
+                    output.unregister("episode_segment_batch")
+
                 episode_rows += len(episode_frame)
                 observation_rows += len(observation_frame)
+                segment_rows += len(segment_frame)
             audit = audit_episodes(output, source, acceptance_start_date=acceptance_start_date, end_date=end_date)
             violations = {key: value for key, value in audit["quality"].items() if value and key != "shared_boundary_days"}
             if violations:
@@ -214,6 +245,7 @@ def rebuild_episodes(
                 "episode_output_database": str(output_path), "acceptance_start_date": str(acceptance_start_date),
                 "effective_end_date": str(end_date), "output_rebuild_strategy": "transactional rule-version replacement",
                 "episode_rows": episode_rows, "observation_rows": observation_rows,
+                "segment_rows": segment_rows,
                 "excluded_null_state_rows": excluded_null_state,
                 "excluded_indicator_warmup_rows": excluded_indicator_warmup,
                 **state, **audit,
@@ -255,12 +287,61 @@ def audit_episodes(
         "reentry_total", "episodes_with_reentry", "average_duration", "median_duration",
         "longest_asset_id", "longest_episode_id", "longest_duration",
     ), overall_row, strict=True))
+    # Return closure audit (using np.isclose)
+    closure_rows = output.execute(f"""
+        SELECT s.episode_id, s.segment_no, s.segment_return, o.episode_return as latest_episode_return
+        FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} s
+        JOIN (
+            SELECT episode_id, episode_return,
+                   row_number() OVER(PARTITION BY episode_id ORDER BY trade_date DESC) rn
+            FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE}
+        ) o ON o.episode_id = s.episode_id AND o.rn = 1
+        ORDER BY s.episode_id, s.segment_no
+    """).fetchall()
+
+    closure_violations = 0
+    if closure_rows:
+        from itertools import groupby
+        for ep_id, group in groupby(closure_rows, key=lambda r: r[0]):
+            items = list(group)
+            seg_returns = np.array([r[2] for r in items], dtype=np.float64)
+            latest_ret = float(items[0][3])
+            seg_factor = float(np.prod(1.0 + seg_returns))
+            ep_factor = 1.0 + latest_ret
+            if not np.isclose(seg_factor, ep_factor, rtol=1e-10, atol=1e-12):
+                closure_violations += 1
+
     quality = {
         "multiple_open_episodes": q(f"SELECT count(*) FROM (SELECT asset_id FROM {SYSTEM_B_EPISODE_TABLE} WHERE episode_end_date IS NULL GROUP BY 1 HAVING count(*)>1)"),
         "duplicate_episode_id": q(f"SELECT count(*)-count(DISTINCT episode_id) FROM {SYSTEM_B_EPISODE_TABLE}"),
         "duplicate_episode_keys": q(f"SELECT count(*) FROM (SELECT asset_id,episode_no FROM {SYSTEM_B_EPISODE_TABLE} GROUP BY 1,2 HAVING count(*)>1)"),
         "duplicate_daily_keys": q(f"SELECT count(*) FROM (SELECT trade_date,asset_id FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE} GROUP BY 1,2 HAVING count(*)>1)"),
         "orphan_daily_observations": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE} o LEFT JOIN {SYSTEM_B_EPISODE_TABLE} e USING(episode_id) WHERE e.episode_id IS NULL"),
+        "orphan_segments": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} s LEFT JOIN {SYSTEM_B_EPISODE_TABLE} e USING(episode_id) WHERE e.episode_id IS NULL"),
+        "duplicate_segment_id": q(f"SELECT count(*)-count(DISTINCT segment_id) FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE}"),
+        "duplicate_segment_keys": q(f"SELECT count(*) FROM (SELECT episode_id,segment_no FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} GROUP BY 1,2 HAVING count(*)>1)"),
+        "segment_no_gaps": q(f"SELECT count(*) FROM (SELECT episode_id,min(segment_no) mn,max(segment_no) mx,count(*) n FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} GROUP BY 1 HAVING mx-mn+1<>n)"),
+        "adjacent_same_state": q(f"SELECT count(*) FROM (SELECT *,lag(segment_state) OVER(PARTITION BY episode_id ORDER BY segment_no) prev_state FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE}) WHERE prev_state IS NOT NULL AND segment_state=prev_state"),
+        "trading_days_mismatch": q(f"""
+            WITH seg_agg AS (
+                SELECT episode_id, coalesce(sum(trading_days), 0) AS seg_days
+                FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE}
+                GROUP BY episode_id
+            ),
+            obs_agg AS (
+                SELECT episode_id, count(*) AS obs_days
+                FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE}
+                GROUP BY episode_id
+            )
+            SELECT count(*)
+            FROM {SYSTEM_B_EPISODE_TABLE} e
+            LEFT JOIN seg_agg s USING(episode_id)
+            LEFT JOIN obs_agg o USING(episode_id)
+            WHERE coalesce(s.seg_days, 0) <> coalesce(o.obs_days, 0)
+        """),
+        "first_anchor_mismatch": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_SEGMENT_TABLE} s JOIN {SYSTEM_B_EPISODE_TABLE} e USING(episode_id) WHERE s.segment_no=1 AND s.anchor_date<>e.episode_start_date"),
+        "active_sprint_count_mismatch": q(f"SELECT count(*) FROM (SELECT e.episode_id,e.ma5_reentry_count,coalesce(sum(CASE WHEN s.segment_state='ACTIVE' THEN 1 ELSE 0 END),0) active_count FROM {SYSTEM_B_EPISODE_TABLE} e LEFT JOIN {SYSTEM_B_EPISODE_SEGMENT_TABLE} s USING(episode_id) GROUP BY 1,2) WHERE active_count<>ma5_reentry_count+1"),
+        "return_closure_violations": closure_violations,
         "start_after_confirmed": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_TABLE} WHERE episode_start_date>episode_confirmed_date"),
         "confirmed_after_end": q(f"SELECT count(*) FROM {SYSTEM_B_EPISODE_TABLE} WHERE episode_end_date IS NOT NULL AND episode_confirmed_date>episode_end_date"),
         "start_before_previous_end": q(f"SELECT count(*) FROM (SELECT *,lag(episode_end_date) OVER(PARTITION BY asset_id ORDER BY episode_no) previous_end FROM {SYSTEM_B_EPISODE_TABLE}) WHERE previous_end IS NOT NULL AND episode_start_date<previous_end"),

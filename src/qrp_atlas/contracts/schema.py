@@ -190,6 +190,11 @@ from .system_b import (
     IS_EPISODE_CONFIRMED, IS_EPISODE_END, MA10, MA5_REENTRY_COUNT,
     PEAK_RETURN, RULE_VERSION, STATE_TRANSITION,
     SYSTEM_B_EPISODE_OBSERVATION_TABLE, SYSTEM_B_EPISODE_TABLE,
+    SYSTEM_B_EPISODE_SEGMENT_TABLE,
+    ACTIVE_SPRINT_NO, ANCHOR_CLOSE, ANCHOR_DATE, END_CLOSE, END_DATE,
+    IS_OPEN, MAX_DRAWDOWN, PEAK_CLOSE, PEAK_DATE, SEGMENT_ID, SEGMENT_NO,
+    SEGMENT_RETURN, SEGMENT_STATE, SEGMENT_VERSION, SOURCE_EPISODE_RULE_VERSION,
+    START_CLOSE, START_DATE, TRADING_DAYS,
     SYSTEM_B_POOL_MEMBERSHIP_TABLE, SYSTEM_B_POOL_RUN_TABLE,
     POOL_TYPE, MEMBERSHIP_STATE, POOL_CYCLE_NO, ENTRY_DATE, EXIT_DATE,
     ENTRY_REASON, EXIT_REASON, METRICS_JSON, COMPLETED_RUN_ID,
@@ -847,6 +852,36 @@ SYSTEM_B_EPISODE_OBSERVATION = TableSchema(
         ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
     ),
     primary_key=(TRADE_DATE, ASSET_ID, RULE_VERSION),
+)
+
+SYSTEM_B_EPISODE_SEGMENT = TableSchema(
+    name=SYSTEM_B_EPISODE_SEGMENT_TABLE,
+    columns=(
+        ColumnSpec(SEGMENT_ID, "VARCHAR", nullable=False),
+        ColumnSpec(EPISODE_ID, "VARCHAR", nullable=False),
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(SEGMENT_NO, "INTEGER", nullable=False),
+        ColumnSpec(SEGMENT_STATE, "VARCHAR", nullable=False),
+        ColumnSpec(ACTIVE_SPRINT_NO, "INTEGER"),
+        ColumnSpec(ANCHOR_DATE, "DATE", nullable=False),
+        ColumnSpec(START_DATE, "DATE", nullable=False),
+        ColumnSpec(END_DATE, "DATE", nullable=False),
+        ColumnSpec(TRADING_DAYS, "INTEGER", nullable=False),
+        ColumnSpec(ANCHOR_CLOSE, "DOUBLE", nullable=False),
+        ColumnSpec(START_CLOSE, "DOUBLE", nullable=False),
+        ColumnSpec(END_CLOSE, "DOUBLE", nullable=False),
+        ColumnSpec(SEGMENT_RETURN, "DOUBLE", nullable=False),
+        ColumnSpec(PEAK_CLOSE, "DOUBLE", nullable=False),
+        ColumnSpec(PEAK_DATE, "DATE", nullable=False),
+        ColumnSpec(PEAK_RETURN, "DOUBLE", nullable=False),
+        ColumnSpec(MAX_DRAWDOWN, "DOUBLE", nullable=False),
+        ColumnSpec(IS_OPEN, "BOOLEAN", nullable=False),
+        ColumnSpec(SOURCE_EPISODE_RULE_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(SEGMENT_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(SEGMENT_ID,),
 )
 
 SYSTEM_B_POOL_MEMBERSHIP = TableSchema(
