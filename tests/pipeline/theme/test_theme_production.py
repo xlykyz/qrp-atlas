@@ -292,20 +292,23 @@ def test_historical_correction_forward_dependency_closure(db):
 
     # 1. 初始生产全部 10 天
     init_rep = service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1], run_type="BACKFILL")
-    init_run_id = init_rep.production_run_id
     max_d = db.execute("SELECT MAX(trade_date) FROM theme_custom_index_daily").fetchone()[0]
     assert max_d == dates[-1]
+
+    initial_run_ids = {
+        tbl: db.execute(f"SELECT trade_date, production_run_id FROM {tbl} ORDER BY trade_date").fetchall()
+        for tbl in ["theme_custom_index_daily", "theme_custom_index_state", "theme_m4_observation"]
+    }
 
     # 2. 对 Day 6 (dates[5]) 尝试发起历史修订（已被 finalized 的账本不可改写）
     rep = service.rebuild_m4_facts(start_date=dates[5], end_date=dates[5], run_type="CORRECTION")
 
     # 3. 严格断言物理事实表行不可篡改性与原始 production_run_id 归属：
-    # 验证全部 10 个日期均保留，且全部保持初始 init_run_id，历史账本绝对不被重述
+    # 验证全部 10 个日期均保留，且全部保持初始 run_id，历史账本绝对不被重述
     for tbl in ["theme_custom_index_daily", "theme_custom_index_state", "theme_m4_observation"]:
         rows = db.execute(f"SELECT trade_date, production_run_id FROM {tbl} ORDER BY trade_date").fetchall()
         assert len(rows) == 10, f"Table {tbl} row count expected 10, got {len(rows)}"
-        for r in rows:
-            assert r[1] == init_run_id, f"Finalized row on {r[0]} expected immutable {init_run_id}, got {r[1]}"
+        assert rows == initial_run_ids[tbl], f"Finalized rows in {tbl} mutated after correction attempt!"
 
 
 def test_cross_range_existing_episode_update_on_historical_correction(db):

@@ -118,84 +118,155 @@ class ThemeAdapter:
                 ]
             )
 
-        coll_filter_c = "AND collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
+        coll_filter_c = "AND c.collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")" if enforce_admission_cutoff else "AND collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
         coll_filter_m = "AND m.collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
-        admission_clause = (
-            "AND m.ingested_at < (d.trade_date + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'"
-            if enforce_admission_cutoff
-            else ""
-        )
 
-        sql = f"""
-        WITH dates AS (
-            SELECT unnest(?::DATE[]) as trade_date
-        ),
-        visible_collections AS (
+        if enforce_admission_cutoff:
+            # Production mode: strictly anchored to each trade_date D
+            # available_trade_date <= d.trade_date AND ingested_at < AdmissionCutoff(d.trade_date)
+            # Never dependent on caller knowledge_date
+            sql = f"""
+            WITH dates AS (
+                SELECT unnest(?::DATE[]) as trade_date
+            ),
+            visible_collections AS (
+                SELECT
+                    d.trade_date,
+                    c.collection_id,
+                    c.effective_from AS coll_effective_from,
+                    c.effective_to AS coll_effective_to,
+                    c.status AS coll_status,
+                    row_number() OVER (
+                        PARTITION BY c.collection_id, d.trade_date
+                        ORDER BY c.ingested_at DESC, c.available_trade_date DESC
+                    ) as rn
+                FROM dates d
+                JOIN {STOCK_COLLECTION_TABLE} c
+                  ON c.available_trade_date <= d.trade_date
+                 AND c.ingested_at < (d.trade_date + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'
+                 {coll_filter_c}
+            ),
+            latest_collections AS (
+                SELECT * FROM visible_collections WHERE rn = 1 AND coll_status = 'ACTIVE'
+            ),
+            visible_revisions AS (
+                SELECT
+                    d.trade_date,
+                    m.membership_id,
+                    m.theme_id,
+                    m.collection_id,
+                    m.asset_id,
+                    m.effective_from,
+                    m.effective_to,
+                    m.available_trade_date,
+                    m.revision_id,
+                    row_number() OVER (
+                        PARTITION BY m.membership_id, d.trade_date
+                        ORDER BY m.ingested_at DESC, m.available_trade_date DESC
+                    ) as rn
+                FROM dates d
+                JOIN {THEME_MEMBERSHIP_HISTORY_TABLE} m
+                  ON m.available_trade_date <= d.trade_date
+                 AND m.ingested_at < (d.trade_date + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'
+                 {coll_filter_m}
+            ),
+            latest_revisions AS (
+                SELECT * FROM visible_revisions WHERE rn = 1
+            )
             SELECT
-                collection_id,
-                effective_from AS coll_effective_from,
-                effective_to AS coll_effective_to,
-                status AS coll_status,
-                row_number() OVER (
-                    PARTITION BY collection_id
-                    ORDER BY ingested_at DESC, available_trade_date DESC
-                ) as rn
-            FROM {STOCK_COLLECTION_TABLE}
-            WHERE available_trade_date <= ?
-              {coll_filter_c}
-        ),
-        latest_collections AS (
-            SELECT * FROM visible_collections WHERE rn = 1 AND coll_status = 'ACTIVE'
-        ),
-        visible_revisions AS (
+                r.collection_id,
+                r.asset_id,
+                r.trade_date,
+                r.membership_id,
+                r.revision_id,
+                r.effective_from,
+                r.effective_to,
+                r.available_trade_date
+            FROM latest_revisions r
+            JOIN latest_collections c
+              ON r.collection_id = c.collection_id AND r.trade_date = c.trade_date
+            WHERE r.effective_from <= r.trade_date
+              AND (r.effective_to IS NULL OR r.trade_date < r.effective_to)
+              AND c.coll_effective_from <= r.trade_date
+              AND (c.coll_effective_to IS NULL OR r.trade_date < c.coll_effective_to)
+            ORDER BY r.collection_id, r.trade_date, r.asset_id
+            """
+            params: list[Any] = [
+                list(trade_dates),
+                *collection_ids,
+                *collection_ids,
+            ]
+        else:
+            # Research / General query mode: anchored to caller knowledge_date
+            sql = f"""
+            WITH dates AS (
+                SELECT unnest(?::DATE[]) as trade_date
+            ),
+            visible_collections AS (
+                SELECT
+                    collection_id,
+                    effective_from AS coll_effective_from,
+                    effective_to AS coll_effective_to,
+                    status AS coll_status,
+                    row_number() OVER (
+                        PARTITION BY collection_id
+                        ORDER BY ingested_at DESC, available_trade_date DESC
+                    ) as rn
+                FROM {STOCK_COLLECTION_TABLE}
+                WHERE available_trade_date <= ?
+                  {coll_filter_c}
+            ),
+            latest_collections AS (
+                SELECT * FROM visible_collections WHERE rn = 1 AND coll_status = 'ACTIVE'
+            ),
+            visible_revisions AS (
+                SELECT
+                    d.trade_date,
+                    m.membership_id,
+                    m.theme_id,
+                    m.collection_id,
+                    m.asset_id,
+                    m.effective_from,
+                    m.effective_to,
+                    m.available_trade_date,
+                    m.revision_id,
+                    row_number() OVER (
+                        PARTITION BY m.membership_id, d.trade_date
+                        ORDER BY m.ingested_at DESC, m.available_trade_date DESC
+                    ) as rn
+                FROM dates d
+                JOIN {THEME_MEMBERSHIP_HISTORY_TABLE} m
+                  ON 1=1 {coll_filter_m}
+                 AND m.available_trade_date <= ?
+            ),
+            latest_revisions AS (
+                SELECT * FROM visible_revisions WHERE rn = 1
+            )
             SELECT
-                d.trade_date,
-                m.membership_id,
-                m.theme_id,
-                m.collection_id,
-                m.asset_id,
-                m.effective_from,
-                m.effective_to,
-                m.available_trade_date,
-                m.revision_id,
-                row_number() OVER (
-                    PARTITION BY m.membership_id, d.trade_date
-                    ORDER BY m.ingested_at DESC, m.available_trade_date DESC
-                ) as rn
-            FROM dates d
-            JOIN {THEME_MEMBERSHIP_HISTORY_TABLE} m
-              ON 1=1 {coll_filter_m}
-             {admission_clause}
-             AND m.available_trade_date <= ?
-        ),
-        latest_revisions AS (
-            SELECT * FROM visible_revisions WHERE rn = 1
-        )
-        SELECT
-            r.collection_id,
-            r.asset_id,
-            r.trade_date,
-            r.membership_id,
-            r.revision_id,
-            r.effective_from,
-            r.effective_to,
-            r.available_trade_date
-        FROM latest_revisions r
-        JOIN latest_collections c
-          ON r.collection_id = c.collection_id
-        WHERE r.effective_from <= r.trade_date
-          AND (r.effective_to IS NULL OR r.trade_date < r.effective_to)
-          AND c.coll_effective_from <= r.trade_date
-          AND (c.coll_effective_to IS NULL OR r.trade_date < c.coll_effective_to)
-        ORDER BY r.collection_id, r.trade_date, r.asset_id
-        """
-        params: list[Any] = [
-            list(trade_dates),
-            knowledge_date,
-            *collection_ids,
-            *collection_ids,
-            knowledge_date,
-        ]
+                r.collection_id,
+                r.asset_id,
+                r.trade_date,
+                r.membership_id,
+                r.revision_id,
+                r.effective_from,
+                r.effective_to,
+                r.available_trade_date
+            FROM latest_revisions r
+            JOIN latest_collections c
+              ON r.collection_id = c.collection_id
+            WHERE r.effective_from <= r.trade_date
+              AND (r.effective_to IS NULL OR r.trade_date < r.effective_to)
+              AND c.coll_effective_from <= r.trade_date
+              AND (c.coll_effective_to IS NULL OR r.trade_date < c.coll_effective_to)
+            ORDER BY r.collection_id, r.trade_date, r.asset_id
+            """
+            params = [
+                list(trade_dates),
+                knowledge_date,
+                *collection_ids,
+                *collection_ids,
+                knowledge_date,
+            ]
         return self.con.execute(sql, params).df()
 
 

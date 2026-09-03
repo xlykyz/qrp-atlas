@@ -183,7 +183,7 @@ def test_orphan_and_mismatch_forbidden(db):
         )
 
 
-def test_membership_effective_from_immutability(db):
+def test_membership_effective_from_revision(db):
     service = StockCollectionService(db)
     thm, coll = service.create_canonical_theme(
         theme_name="光伏",
@@ -199,8 +199,8 @@ def test_membership_effective_from_immutability(db):
         available_trade_date=date(2026, 1, 1),
     )
 
-    # Attempting to mutate effective_from must raise MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE
-    with pytest.raises(StockCollectionError, match="MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE"):
+    # Attempting to revise effective_from outside collection bounds must raise error
+    with pytest.raises(StockCollectionError, match="MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE"):
         service.revise_member_late(
             membership_id=m.membership_id,
             effective_from=date(2025, 12, 1),
@@ -208,15 +208,16 @@ def test_membership_effective_from_immutability(db):
             available_trade_date=date(2026, 2, 1),
         )
 
-    # Same effective_from succeeds and keeps identity immutable
+    # Valid revision of effective_from succeeds and preserves membership_id identity
     rev = service.revise_member_late(
         membership_id=m.membership_id,
-        effective_from=date(2026, 1, 1),
+        effective_from=date(2026, 1, 15),
         effective_to=date(2026, 6, 1),
         available_trade_date=date(2026, 2, 1),
     )
     assert rev.membership_id == m.membership_id
-    assert rev.effective_from == date(2026, 1, 1)
+    assert rev.revision_id != m.revision_id
+    assert rev.effective_from == date(2026, 1, 15)
     assert rev.effective_to == date(2026, 6, 1)
 
 

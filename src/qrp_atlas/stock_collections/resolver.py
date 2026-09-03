@@ -91,7 +91,7 @@ class StockCollectionResolver:
         self,
         collection_ids: Sequence[str],
         trade_dates: Sequence[date],
-        knowledge_date: date,
+        knowledge_date: date | None = None,
         allowed_scopes: tuple[str, ...] = ("CANONICAL",),
         enforce_admission_cutoff: bool = False,
     ) -> pd.DataFrame:
@@ -110,6 +110,8 @@ class StockCollectionResolver:
                 ]
             )
 
+        kd = knowledge_date if knowledge_date is not None else max(trade_dates)
+
         # Validate collections visibility at knowledge_date
         for coll_id in collection_ids:
             revisions = self.repo.get_collection_revisions(coll_id)
@@ -117,11 +119,11 @@ class StockCollectionResolver:
                 raise StockCollectionError(
                     "COLLECTION_NOT_FOUND", f"Collection {coll_id} does not exist"
                 )
-            visible = [r for r in revisions if r.available_trade_date <= knowledge_date]
+            visible = [r for r in revisions if r.available_trade_date <= kd]
             if not visible:
                 raise StockCollectionError(
                     "COLLECTION_NOT_KNOWN_AT_KNOWLEDGE_DATE",
-                    f"Collection {coll_id} is not known as of knowledge_date {knowledge_date}",
+                    f"Collection {coll_id} is not known as of knowledge_date {kd}",
                 )
             latest = visible[-1]
             if latest.collection_scope not in allowed_scopes:
@@ -138,7 +140,7 @@ class StockCollectionResolver:
         return self.theme_adapter.batch_resolve_members(
             collection_ids,
             trade_dates,
-            knowledge_date,
+            kd,
             enforce_admission_cutoff=enforce_admission_cutoff,
         )
 

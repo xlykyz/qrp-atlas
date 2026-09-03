@@ -285,7 +285,7 @@ class StockCollectionService:
         *,
         membership_id: str,
         effective_from: date | None = None,
-        effective_to: date | None,
+        effective_to: date | None | object = ...,
         available_trade_date: date,
         source: str = "MANUAL_REVISION",
         source_record_id: str | None = None,
@@ -298,28 +298,22 @@ class StockCollectionService:
             )
         latest = revisions[-1]
 
-        # Enforce effective_from immutability for this membership lifecycle
-        if effective_from is not None and effective_from != latest.effective_from:
-            raise StockCollectionError(
-                "MEMBERSHIP_EFFECTIVE_FROM_IMMUTABLE",
-                f"effective_from is immutable for membership {membership_id} "
-                f"(existing: {latest.effective_from}, attempted: {effective_from})",
-            )
-
-        eff_from = latest.effective_from
+        # Allow revising effective_from if provided, otherwise inherit old value
+        eff_from = effective_from if effective_from is not None else latest.effective_from
+        eff_to = latest.effective_to if effective_to is ... else effective_to
 
         # Validate bounds against canonical Theme & Collection lifecycle
         self._validate_membership_bounds(
             collection_id=latest.collection_id,
             theme_id=latest.theme_id,
             effective_from=eff_from,
-            effective_to=effective_to,
+            effective_to=eff_to,
         )
 
-        if effective_to is not None and effective_to <= eff_from:
+        if eff_to is not None and eff_to <= eff_from:
             raise StockCollectionError(
                 "INVALID_EFFECTIVE_INTERVAL",
-                f"effective_to ({effective_to}) must be > effective_from ({eff_from})",
+                f"effective_to ({eff_to}) must be > effective_from ({eff_from})",
             )
 
         # Check overlap with other lifecycles of same asset
@@ -327,7 +321,7 @@ class StockCollectionService:
             lc for lc in self.repo.get_asset_memberships(latest.collection_id, latest.asset_id)
             if lc.membership_id != membership_id
         ]
-        new_to = effective_to if effective_to is not None else date(9999, 12, 31)
+        new_to = eff_to if eff_to is not None else date(9999, 12, 31)
         for lc in other_lifecycles:
             lc_to = lc.effective_to if lc.effective_to is not None else date(9999, 12, 31)
             if max(eff_from, lc.effective_from) < min(new_to, lc_to):
@@ -344,7 +338,7 @@ class StockCollectionService:
             asset_id=latest.asset_id,
             weight=latest.weight,
             effective_from=eff_from,
-            effective_to=effective_to,
+            effective_to=eff_to,
             available_trade_date=available_trade_date,
             source=source,
             source_record_id=source_record_id or latest.source_record_id,

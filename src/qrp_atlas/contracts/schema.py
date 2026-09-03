@@ -1447,6 +1447,47 @@ def init_irm_database(con) -> None:
     con.execute(IRM_INTERACTION_QA.duckdb_create_sql())
 
 
+def migrate_stock_collections_ingested_at_to_timestamptz(con) -> None:
+    """显式将 StockCollection 领域表历史遗留的 naive TIMESTAMP ingested_at 迁移为 TIMESTAMPTZ。
+
+    历史生产代码写入的是 UTC 时间 (datetime.now(timezone.utc))，但在 DuckDB naive TIMESTAMP 列中
+    丢失了时区标记。通过 timezone('UTC', ingested_at) 明确其为 UTC，避免依赖当前 session TimeZone 设置。
+    若迁移失败或最终 schema 断言不满足，必须 fail-closed 抛出异常。
+    """
+    tables = (STOCK_COLLECTION_TABLE, THEME_TABLE, THEME_MEMBERSHIP_HISTORY_TABLE)
+    for tbl in tables:
+        type_row = con.execute(
+            """
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name = ? AND column_name = 'ingested_at'
+            """,
+            [tbl],
+        ).fetchone()
+        if not type_row:
+            continue
+        data_type = type_row[0].upper()
+        if data_type == "TIMESTAMP":
+            con.execute(
+                f"ALTER TABLE {tbl} ALTER COLUMN {INGESTED_AT} TYPE TIMESTAMPTZ USING timezone('UTC', {INGESTED_AT})"
+            )
+
+    # 迁移后严格断言 schema：三个核心表的 ingested_at 必须为 TIMESTAMP WITH TIME ZONE
+    for tbl in tables:
+        curr_row = con.execute(
+            """
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name = ? AND column_name = 'ingested_at'
+            """,
+            [tbl],
+        ).fetchone()
+        if curr_row:
+            curr_type = curr_row[0].upper()
+            if curr_type not in ("TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ"):
+                raise RuntimeError(
+                    f"Schema assertion failed for {tbl}.{INGESTED_AT}: expected TIMESTAMPTZ, found {curr_type}"
+                )
+
+
 def init_stock_collections_database(con) -> None:
     """初始化 StockCollection 领域数据库，创建 stock_collection、theme、theme_membership_history 及 theme_effective_member_daily 契约表。
 
@@ -1458,10 +1499,5 @@ def init_stock_collections_database(con) -> None:
     con.execute(THEME_MEMBERSHIP_HISTORY.duckdb_create_sql())
     con.execute(THEME_EFFECTIVE_MEMBER_DAILY.duckdb_create_sql())
 
-    # Safe idempotent migration of ingested_at to TIMESTAMP WITH TIME ZONE if existing tables were created with naive TIMESTAMP
-    for tbl in (THEME_MEMBERSHIP_HISTORY_TABLE, THEME_TABLE, STOCK_COLLECTION_TABLE):
-        try:
-            con.execute(f"ALTER TABLE {tbl} ALTER COLUMN {INGESTED_AT} TYPE TIMESTAMPTZ")
-        except Exception:
-            pass
+    migrate_stock_collections_ingested_at_to_timestamptz(con)
 

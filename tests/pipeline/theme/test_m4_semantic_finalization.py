@@ -48,6 +48,7 @@ from qrp_atlas.contracts.m4 import (
     THEME_CUSTOM_INDEX_STATE_TABLE,
     THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
     THEME_M4_OBSERVATION_TABLE,
+    THEME_PRODUCTION_RUN_TABLE,
 )
 from qrp_atlas.contracts.schema import init_database, init_stock_collections_database
 from qrp_atlas.contracts.stock_collection import (
@@ -57,6 +58,7 @@ from qrp_atlas.contracts.stock_collection import (
 )
 from qrp_atlas.indicators.theme.effective_members import calculate_m4_effective_members
 from qrp_atlas.pipeline.theme.service import ThemePipelineService
+from qrp_atlas.stock_collections.adapters.theme import ThemeAdapter
 from qrp_atlas.stock_collections.service import StockCollectionService
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -933,25 +935,30 @@ def test_p0_3_multi_theme_partial_failure_and_retry_recovery(f_db):
         [thm_main[0], thm_main[1], d, now],
     )
 
-    # 检查状态：thm_main 已完成，thm_b 未完成
+    # 检查状态：thm_main 存在部分脏数据，thm_b 未完成
     finalized = service._get_finalized_theme_ids(d)
     assert thm_main[0] in finalized
     assert thm_b.theme_id not in finalized
 
-    # 2. 执行生产 Retry：系统不得因存在部分 finalized 行而整日短路！
+    # 2. 执行生产 Retry：以整日为原子单位重试，整日以同一个 snapshot 完整提交
     rep = service.run_m4_daily(trade_date=d)
 
-    # 3. 验证 thm_b 现已成功完成
+    # 3. 验证两个 Theme 均成功完成
     finalized_retry = service._get_finalized_theme_ids(d)
     assert thm_b.theme_id in finalized_retry
     assert thm_main[0] in finalized_retry
 
-    # 4. 验证 thm_main 原有的 production_run_id = 'partial_run' 保持未被覆盖或破坏
+    # 4. 验证同一 D 所有 canonical facts 使用一致的 D-day production snapshot / run lineage
     main_fact = f_db.execute(
-        f"SELECT production_run_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
+        f"SELECT production_run_id, input_snapshot_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
         [thm_main[0], d],
     ).fetchone()
-    assert main_fact[0] == "partial_run"
+    b_fact = f_db.execute(
+        f"SELECT production_run_id, input_snapshot_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
+        [thm_b.theme_id, d],
+    ).fetchone()
+    assert main_fact == b_fact
+    assert main_fact[0] == rep.production_run_id
 
 
 # ==============================================================================
@@ -1248,23 +1255,19 @@ def test_p0_theme_d_materialization_atomic_transaction_rollback(f_db, monkeypatc
     with pytest.raises(Exception, match="Simulated Database Crash"):
         service.run_m4_daily(trade_date=d)
 
-    # 1. 验证 Theme A 已经先一步成功 COMMIT，完全不受影响
+    # 1. 验证整个 Trading-Day D 已经完整 ROLLBACK，不得保留同一 D 的部分 finalized Themes
     finalized_after_fail = service._get_finalized_theme_ids(d)
-    assert thm_a[0] in finalized_after_fail
+    assert thm_a[0] not in finalized_after_fail
     assert thm_b.theme_id not in finalized_after_fail
 
-    # 2. 验证 Theme B 在各表中完全不存在半成品 (全部被 ROLLBACK 擦除)
-    cnt_eff_b = f_db.execute(f"SELECT COUNT(*) FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0]
-    cnt_idx_b = f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0]
-    cnt_st_b = f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0]
-    cnt_obs_b = f_db.execute(f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0]
+    # 2. 验证整个 Trading-Day D 在各事实表中完全不存在半成品 (Theme A 与 Theme B 全部被 ROLLBACK)
+    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchone()[0] == 0
+    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchone()[0] == 0
+    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?", [d]).fetchone()[0] == 0
+    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [d]).fetchone()[0] == 0
+    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_PRODUCTION_RUN_TABLE} WHERE target_start_date = ?", [d]).fetchone()[0] == 0
 
-    assert cnt_eff_b == 0
-    assert cnt_idx_b == 0
-    assert cnt_st_b == 0
-    assert cnt_obs_b == 0
-
-    # 3. 解除异常，执行 Retry：Theme B 必须完整重新生产且 COMMIT
+    # 3. 解除异常，执行 Retry：整日以同一个 snapshot 完整提交
     proxy.fail = False
     rep = service.run_m4_daily(trade_date=d)
 
@@ -1272,11 +1275,19 @@ def test_p0_theme_d_materialization_atomic_transaction_rollback(f_db, monkeypatc
     assert thm_a[0] in finalized_after_retry
     assert thm_b.theme_id in finalized_after_retry
 
-    # 4. 验证 Theme B 现已完整写入全部 5 个事实
-    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0] > 0
-    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0] == 1
-    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0] == 1
-    assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_b.theme_id, d]).fetchone()[0] == 1
+    # 4. 新增断言：同一 D 所有 canonical facts 使用一致的 D-day production snapshot / run lineage
+    eff_runs = f_db.execute(f"SELECT DISTINCT production_run_id, input_snapshot_id FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchall()
+    idx_runs = f_db.execute(f"SELECT DISTINCT production_run_id, input_snapshot_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchall()
+    st_runs = f_db.execute(f"SELECT DISTINCT production_run_id, input_snapshot_id FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?", [d]).fetchall()
+    obs_runs = f_db.execute(f"SELECT DISTINCT production_run_id, input_snapshot_id FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [d]).fetchall()
+    prod_runs = f_db.execute(f"SELECT production_run_id, input_snapshot_id FROM {THEME_PRODUCTION_RUN_TABLE} WHERE target_start_date = ?", [d]).fetchall()
+
+    assert len(eff_runs) == 1
+    assert len(idx_runs) == 1
+    assert len(st_runs) == 1
+    assert len(obs_runs) == 1
+    assert len(prod_runs) == 1
+    assert eff_runs[0] == idx_runs[0] == st_runs[0] == obs_runs[0] == prod_runs[0]
 
 
 # ==============================================================================
@@ -1353,5 +1364,310 @@ def test_p0_p1_expected_themes_frozen_in_historical_semantics(f_db):
     assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_x.theme_id, d]).fetchone()[0] == 0
     assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_x.theme_id, d]).fetchone()[0] == 0
     assert f_db.execute(f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_x.theme_id, d]).fetchone()[0] == 0
+
+
+# ==============================================================================
+# Final Review Item 1: 修复 effective_from revision，finalized 历史保持不可篡改
+# ==============================================================================
+def test_review_item1_membership_effective_from_revision_preserves_finalized_facts(f_db):
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    # 初始添加成员自 2026-08-04 起
+    m = sc.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="000001.SZ",
+        effective_from=date(2026, 8, 4),
+        available_trade_date=date(2026, 8, 4),
+    )
+
+    # 生产完成 2026-08-04
+    d4 = date(2026, 8, 4)
+    service.run_m4_daily(trade_date=d4)
+
+    # 记录 2026-08-04 finalized 事实快照
+    before_eff = f_db.execute(f"SELECT * FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+    before_idx = f_db.execute(f"SELECT * FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+    before_obs = f_db.execute(f"SELECT * FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+
+    # 后续修订 effective_from 从 2026-08-04 修正为 2026-08-03
+    sc_later = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 10, 10, 0, 0, tzinfo=timezone.utc))
+    rev = sc_later.revise_member_late(
+        membership_id=m.membership_id,
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 10),
+    )
+    assert rev.membership_id == m.membership_id
+    assert rev.revision_id != m.revision_id
+    assert rev.effective_from == date(2026, 8, 3)
+
+    # 严格验证：已 finalized 的 2026-08-04 事实行百分之百 bit-stable，未发生任何变化
+    after_eff = f_db.execute(f"SELECT * FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+    after_idx = f_db.execute(f"SELECT * FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+    after_obs = f_db.execute(f"SELECT * FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [d4]).fetchall()
+
+    assert after_eff == before_eff
+    assert after_idx == before_idx
+    assert after_obs == before_obs
+
+
+# ==============================================================================
+# Final Review Item 2: 禁止回写历史 finalized observation (D-1 bit-stable)
+# ==============================================================================
+def test_review_item2_episode_confirmation_does_not_rewrite_prior_finalized_observation(f_db):
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    sc.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="000001.SZ",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 3),
+    )
+
+    dates = [
+        date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7),
+        date(2026, 8, 10), date(2026, 8, 11),
+    ]
+
+    # 前 4 天基准推进
+    for dt in dates[:4]:
+        service.run_m4_daily(trade_date=dt)
+
+    # 第 5 天 (dates[4])：下跌进入 BASE，使 is_above 变为 False
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = -15.0 WHERE trade_date = ?", [dates[4]])
+    service.run_m4_daily(trade_date=dates[4])
+    st4 = f_db.execute(f"SELECT trend_state FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?", [dates[4]]).fetchone()[0]
+    assert st4 == "BASE"
+
+    # 第 6 天 (dates[5])：反弹大幅上涨突破 MA5，进入 CANDIDATE
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 20.0 WHERE trade_date = ?", [dates[5]])
+    service.run_m4_daily(trade_date=dates[5])
+
+    st5 = f_db.execute(f"SELECT trend_state FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?", [dates[5]]).fetchone()[0]
+    assert st5 == "CANDIDATE"
+
+    # 快照保存 D-1 (Day 5) 的 observation 行
+    obs5_before = f_db.execute(f"SELECT * FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [dates[5]]).fetchone()
+
+    # 第 7 天 (dates[6])：再次上涨，维持在 MA5 之上，状态变为 ACTIVE，确认触发 Episode
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 5.0 WHERE trade_date = ?", [dates[6]])
+    service.run_m4_daily(trade_date=dates[6])
+
+    st6 = f_db.execute(f"SELECT trend_state FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?", [dates[6]]).fetchone()[0]
+    assert st6 == "ACTIVE"
+
+    ep_row = f_db.execute(f"SELECT episode_id, episode_start_date, episode_confirmed_date FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE}").fetchone()
+    assert ep_row is not None
+    assert ep_row[1] == dates[5]
+    assert ep_row[2] == dates[6]
+
+    # 核心断言：D-1 (dates[5]) 的 observation 行严禁被 UPDATE 回写，保持 100% bit-stable
+    obs5_after = f_db.execute(f"SELECT * FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?", [dates[5]]).fetchone()
+    assert obs5_after == obs5_before
+
+
+# ==============================================================================
+# Final Review Item 4: production_run 与 facts 不存在 orphan lineage
+# ==============================================================================
+def test_review_item4_zero_orphan_lineage_across_all_facts(f_db):
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    sc.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="000001.SZ",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 3),
+    )
+
+    dates = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+    service.rebuild_m4_facts(start_date=dates[0], end_date=dates[-1], run_type="REBUILD")
+
+    fact_tables = [
+        THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
+        THEME_CUSTOM_INDEX_DAILY_TABLE,
+        THEME_CUSTOM_INDEX_STATE_TABLE,
+        THEME_M4_OBSERVATION_TABLE,
+    ]
+
+    for tbl in fact_tables:
+        orphan_runs = f_db.execute(
+            f"""
+            SELECT DISTINCT f.production_run_id
+            FROM {tbl} f
+            LEFT JOIN {THEME_PRODUCTION_RUN_TABLE} r ON f.production_run_id = r.production_run_id
+            WHERE r.production_run_id IS NULL
+            """
+        ).fetchall()
+        assert len(orphan_runs) == 0, f"Table {tbl} has orphan production_run_ids: {orphan_runs}"
+
+
+# ==============================================================================
+# Final Review Item 5: Custom Index 真正消费正式 effective-member fact
+# ==============================================================================
+def test_review_item5_custom_index_consumes_persisted_facts(f_db):
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    sc.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="000001.SZ",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 3),
+    )
+
+    d = date(2026, 8, 3)
+
+    class TrackingCon:
+        def __init__(self, real):
+            self._real = real
+            self.persisted_eff_selected = False
+
+        def execute(self, sql, *args, **kwargs):
+            if "SELECT collection_id, theme_id, asset_id, trade_date" in sql and THEME_EFFECTIVE_MEMBER_DAILY_TABLE in sql:
+                self.persisted_eff_selected = True
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    tracker = TrackingCon(f_db)
+    service.con = tracker
+    service.run_m4_daily(trade_date=d)
+
+    assert tracker.persisted_eff_selected is True, "Custom Index must query persisted theme_effective_member_daily"
+
+
+# ==============================================================================
+# Final Review Item 6: Production admission 不得依赖 caller knowledge_date
+# ==============================================================================
+def test_review_item6_production_admission_independent_of_caller_knowledge_date(f_db):
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 3, 8, 30, 0, tzinfo=timezone.utc))
+    thm, coll = sc.create_canonical_theme(
+        theme_name="测试解耦",
+        source_key="TEST_DECOUPLE",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 3),
+    )
+    # 成员在 D 日 09:00 前录入，但 available_trade_date 为 D+1 (2026-08-04)
+    sc.add_member(
+        theme_id=thm.theme_id,
+        collection_id=coll.collection_id,
+        asset_id="600519.SH",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 4),
+    )
+
+    adapter = ThemeAdapter(f_db)
+
+    # 无论调用方传入的 knowledge_date 是 D(08-03)、D+1(08-04) 还是未来(08-10)，
+    # Production admission 在 D 日的行为严格一致（因为其 available_trade_date > D，故 D 日均不可见）
+    df_d = adapter.batch_resolve_members([coll.collection_id], [date(2026, 8, 3)], knowledge_date=date(2026, 8, 3), enforce_admission_cutoff=True)
+    df_d_plus_1 = adapter.batch_resolve_members([coll.collection_id], [date(2026, 8, 3)], knowledge_date=date(2026, 8, 4), enforce_admission_cutoff=True)
+    df_future = adapter.batch_resolve_members([coll.collection_id], [date(2026, 8, 3)], knowledge_date=date(2026, 8, 10), enforce_admission_cutoff=True)
+
+    assert df_d.empty
+    assert df_d_plus_1.empty
+    assert df_future.empty
+
+
+# ==============================================================================
+# Final Review Item 7: 建立显式 TIMESTAMPTZ migration 并验证 fail-closed
+# ==============================================================================
+def test_review_item7_explicit_timestamptz_migration():
+    from qrp_atlas.contracts.schema import migrate_stock_collections_ingested_at_to_timestamptz
+    test_con = duckdb.connect(":memory:")
+
+    test_con.execute("""
+    CREATE TABLE stock_collection (
+        collection_id VARCHAR, ingested_at TIMESTAMP
+    );
+    CREATE TABLE theme (
+        theme_id VARCHAR, ingested_at TIMESTAMP
+    );
+    CREATE TABLE theme_membership_history (
+        membership_id VARCHAR, ingested_at TIMESTAMP
+    );
+    """)
+
+    test_con.execute("INSERT INTO stock_collection VALUES ('C1', '2026-08-03 00:59:59')")
+    test_con.execute("INSERT INTO theme VALUES ('T1', '2026-08-03 00:59:59')")
+    test_con.execute("INSERT INTO theme_membership_history VALUES ('M1', '2026-08-03 00:59:59')")
+
+    migrate_stock_collections_ingested_at_to_timestamptz(test_con)
+
+    col_types = test_con.execute("""
+        SELECT table_name, data_type FROM information_schema.columns
+        WHERE table_name IN ('stock_collection', 'theme', 'theme_membership_history')
+          AND column_name = 'ingested_at'
+    """).fetchall()
+
+    for tbl, dtype in col_types:
+        assert dtype.upper() == "TIMESTAMP WITH TIME ZONE", f"{tbl} column type is {dtype}"
+
+    is_before = test_con.execute("""
+        SELECT ingested_at < '2026-08-03 09:00:00+08'::TIMESTAMPTZ FROM stock_collection
+    """).fetchone()[0]
+    assert is_before is True
+
+
+# ==============================================================================
+# Final Review Item 8: 分离 Production Theme Universe 与 Research Replay Universe
+# ==============================================================================
+def test_review_item8_separate_production_and_replay_theme_universe(f_db):
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm_main = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    sc.add_member(
+        theme_id=thm_main[0],
+        collection_id=thm_main[1],
+        asset_id="000001.SZ",
+        effective_from=date(2026, 8, 3),
+        available_trade_date=date(2026, 8, 3),
+    )
+
+    d = date(2026, 8, 3)
+
+    # 1. 正常生产并 finalize D 日
+    service.run_m4_daily(trade_date=d)
+
+    # 2. 随后在 2026-08-10 研究定义后视镜主题，生效区间回溯覆盖 2026-08-03
+    sc_later = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 10, 10, 0, 0, tzinfo=timezone.utc))
+    thm_hindsight, coll_hindsight = sc_later.create_canonical_theme(
+        theme_name="后视镜主题",
+        source_key="HINDSIGHT_THEME",
+        effective_from=d,
+        available_trade_date=date(2026, 8, 10),
+    )
+    sc_later.add_member(
+        theme_id=thm_hindsight.theme_id,
+        collection_id=coll_hindsight.collection_id,
+        asset_id="600519.SH",
+        effective_from=d,
+        available_trade_date=date(2026, 8, 10),
+    )
+
+    # 3. Production ExpectedThemes(D) 不得包含后视镜主题 (不可篡改冻结)
+    prod_themes = service._fetch_all_canonical_themes(d)
+    assert thm_hindsight.theme_id not in [t[0] for t in prod_themes]
+
+    # 4. Research Replay 在 knowledge_date=2026-08-10 下能够看到后视镜主题
+    replay_themes = service._fetch_replay_canonical_themes(as_of_date=d, knowledge_date=date(2026, 8, 10))
+    assert thm_hindsight.theme_id in [t[0] for t in replay_themes]
+
+    # 5. Production D 日事实表完全不受污染
+    facts = f_db.execute(f"SELECT DISTINCT theme_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchall()
+    assert thm_hindsight.theme_id not in [f[0] for f in facts]
+
 
 
