@@ -192,6 +192,8 @@ def test_dc_hot_single_day_execution_and_fixed_params(tmp_path: Path, monkeypatc
     result = harness.run(trade_date=date(2026, 3, 2))
 
     assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.api_requests == 1
+    assert result.metrics.batches == 1
     # Fixed parameters check (Section 3.1 & 21.4)
     assert len(client.dc_hot_calls) == 1
     assert client.dc_hot_calls[0] == {
@@ -252,6 +254,8 @@ def test_ths_hot_single_day_execution_and_fixed_params(tmp_path: Path, monkeypat
     result = harness.run(trade_date=date(2026, 3, 2))
 
     assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.api_requests == 1
+    assert result.metrics.batches == 1
     # Fixed parameters check (Section 3.2 & 21.4)
     assert len(client.ths_hot_calls) == 1
     assert client.ths_hot_calls[0] == {
@@ -310,6 +314,8 @@ def test_date_range_executed_as_single_batch(tmp_path: Path, monkeypatch) -> Non
     result = harness.run(parameter_overrides={"start_date": "2026-03-02", "end_date": "2026-03-04"})
 
     assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.api_requests == 3
+    assert result.metrics.batches == 1
     # 3 provider calls (once per day)
     assert len(client.dc_hot_calls) == 3
     assert [c["trade_date"] for c in client.dc_hot_calls] == ["20260302", "20260303", "20260304"]
@@ -592,6 +598,8 @@ def test_ths_hot_date_range_executed_as_single_batch(tmp_path: Path, monkeypatch
     result = harness.run(parameter_overrides={"start_date": "2026-03-02", "end_date": "2026-03-04"})
 
     assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.api_requests == 3
+    assert result.metrics.batches == 1
     assert len(client.ths_hot_calls) == 3
 
     # Exactly ONE raw and clean CSV written
@@ -676,3 +684,70 @@ def test_database_write_failure_rolls_back_entire_batch(tmp_path: Path, monkeypa
         assert con.execute("SELECT COUNT(*) FROM dc_hot").fetchone()[0] == 1
     finally:
         con.close()
+
+
+def test_batch_raw_provider_schema_drift_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    _initialise_database(settings)
+
+    # 1. dc_hot schema drift across date range
+    client_dc = _FakePopularityTushare()
+    orig_dc_hot = client_dc.dc_hot
+
+    def _drifted_dc_hot(*args, **kwargs):
+        df = orig_dc_hot(*args, **kwargs)
+        if kwargs.get("trade_date") == "20260303":
+            # Day 2 returns an extra raw column from provider
+            drifted = df.copy()
+            drifted["extra_unexpected_field"] = "drift"
+            return drifted
+        return df
+
+    client_dc.dc_hot = _drifted_dc_hot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.dc_hot_contracts.get_tushare_pro",
+        lambda **_kwargs: client_dc,
+    )
+
+    harness_dc = ContractTestHarness(DC_HOT_INGEST, settings)
+    result_dc = harness_dc.run(parameter_overrides={"start_date": "2026-03-02", "end_date": "2026-03-03"})
+
+    assert result_dc.status is ResultStatus.FAILED
+    assert any(d.code == "DC_HOT_API_PARTIAL" for d in result_dc.diagnostics)
+
+    con = duckdb.connect(str(settings.paths.duckdb_path), read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM dc_hot").fetchone()[0] == 0
+    finally:
+        con.close()
+
+    # 2. ths_hot schema drift across date range
+    client_ths = _FakePopularityTushare()
+    orig_ths_hot = client_ths.ths_hot
+
+    def _drifted_ths_hot(*args, **kwargs):
+        df = orig_ths_hot(*args, **kwargs)
+        if kwargs.get("trade_date") == "20260303":
+            # Day 2 returns columns with different order or missing field
+            cols = [c for c in df.columns if c != "concept"]
+            return df[cols]
+        return df
+
+    client_ths.ths_hot = _drifted_ths_hot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "qrp_atlas.pipeline.ths_hot_contracts.get_tushare_pro",
+        lambda **_kwargs: client_ths,
+    )
+
+    harness_ths = ContractTestHarness(THS_HOT_INGEST, settings)
+    result_ths = harness_ths.run(parameter_overrides={"start_date": "2026-03-02", "end_date": "2026-03-03"})
+
+    assert result_ths.status is ResultStatus.FAILED
+    assert any(d.code == "THS_HOT_API_PARTIAL" for d in result_ths.diagnostics)
+
+    con = duckdb.connect(str(settings.paths.duckdb_path), read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM ths_hot").fetchone()[0] == 0
+    finally:
+        con.close()
+

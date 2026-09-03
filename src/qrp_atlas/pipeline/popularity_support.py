@@ -218,6 +218,7 @@ def fetch_dc_hot_range(
     """Fetch dc_hot across target_window, concatenate into one Raw DataFrame, and write Raw CSV."""
     frames: list[pd.DataFrame] = []
     empty_dates: list[date] = []
+    expected_raw_columns: list[str] | None = None
     rows_read = 0
     api_requests = 0
 
@@ -236,6 +237,15 @@ def fetch_dc_hot_range(
         if checked.empty:
             empty_dates.append(requested_date)
         else:
+            current_columns = list(checked.columns)
+            if expected_raw_columns is None:
+                expected_raw_columns = current_columns
+            elif current_columns != expected_raw_columns:
+                raise ContractError(
+                    "PROVIDER_SCHEMA_DRIFT",
+                    f"dc_hot raw columns drifted on {requested_date.isoformat()}: "
+                    f"expected {expected_raw_columns}, got {current_columns}",
+                )
             rows_read += len(checked)
             frames.append(checked)
 
@@ -261,6 +271,7 @@ def fetch_ths_hot_range(
     """Fetch ths_hot across target_window, concatenate into one Raw DataFrame, and write Raw CSV."""
     frames: list[pd.DataFrame] = []
     empty_dates: list[date] = []
+    expected_raw_columns: list[str] | None = None
     rows_read = 0
     api_requests = 0
 
@@ -279,6 +290,15 @@ def fetch_ths_hot_range(
         if checked.empty:
             empty_dates.append(requested_date)
         else:
+            current_columns = list(checked.columns)
+            if expected_raw_columns is None:
+                expected_raw_columns = current_columns
+            elif current_columns != expected_raw_columns:
+                raise ContractError(
+                    "PROVIDER_SCHEMA_DRIFT",
+                    f"ths_hot raw columns drifted on {requested_date.isoformat()}: "
+                    f"expected {expected_raw_columns}, got {current_columns}",
+                )
             rows_read += len(checked)
             frames.append(checked)
 

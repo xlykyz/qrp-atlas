@@ -77,6 +77,7 @@ def _translate_provider_error(exc: ContractError) -> ContractError:
     if exc.code in {
         "PROVIDER_RESPONSE_INVALID",
         "PROVIDER_SCHEMA_MISSING",
+        "PROVIDER_SCHEMA_DRIFT",
         "PROVIDER_DATE_INVALID",
         "PROVIDER_SCOPE_MISMATCH",
     }:
@@ -148,7 +149,7 @@ def execute_dc_hot_ingest(context: PipelineRunContext) -> BusinessExecution:
                 "database_write": completed_at - normalized_at,
             },
             api_requests=api_requests,
-            batches=api_requests,
+            batches=1,
         ),
         outputs=(
             OutputResult(
