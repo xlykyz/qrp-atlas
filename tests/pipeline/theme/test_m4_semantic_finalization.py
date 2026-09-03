@@ -1603,7 +1603,7 @@ def test_review_item7_explicit_timestamptz_migration():
     test_con.execute("INSERT INTO theme VALUES ('T1', '2026-08-03 00:59:59')")
     test_con.execute("INSERT INTO theme_membership_history VALUES ('M1', '2026-08-03 00:59:59')")
 
-    migrate_stock_collections_ingested_at_to_timestamptz(test_con)
+    migrate_stock_collections_ingested_at_to_timestamptz(test_con, source_timezone="UTC")
 
     col_types = test_con.execute("""
         SELECT table_name, data_type FROM information_schema.columns
@@ -1668,6 +1668,182 @@ def test_review_item8_separate_production_and_replay_theme_universe(f_db):
     # 5. Production D 日事实表完全不受污染
     facts = f_db.execute(f"SELECT DISTINCT theme_id FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?", [d]).fetchall()
     assert thm_hindsight.theme_id not in [f[0] for f in facts]
+
+
+# ==============================================================================
+# Closeout Item 1: TIMESTAMPTZ migration 显式、非自动、来源时区必须可验证并 fail-closed
+# ==============================================================================
+def test_closeout_item1_explicit_timestamptz_migration_requires_verified_source_tz():
+    from qrp_atlas.contracts.schema import migrate_stock_collections_ingested_at_to_timestamptz
+    test_con = duckdb.connect(":memory:")
+
+    test_con.execute("""
+    CREATE TABLE stock_collection (
+        collection_id VARCHAR, ingested_at TIMESTAMP
+    );
+    CREATE TABLE theme (
+        theme_id VARCHAR, ingested_at TIMESTAMP
+    );
+    CREATE TABLE theme_membership_history (
+        membership_id VARCHAR, ingested_at TIMESTAMP
+    );
+    """)
+
+    test_con.execute("INSERT INTO stock_collection VALUES ('C1', '2026-08-03 00:59:59')")
+    test_con.execute("INSERT INTO theme VALUES ('T1', '2026-08-03 00:59:59')")
+    test_con.execute("INSERT INTO theme_membership_history VALUES ('M1', '2026-08-03 00:59:59')")
+
+    # 1. 未指定有效 source_timezone 或传入非法时区名时必须 fail-closed
+    with pytest.raises(ValueError, match="Explicit source_timezone string must be provided"):
+        migrate_stock_collections_ingested_at_to_timestamptz(test_con, source_timezone="")
+
+    with pytest.raises(ValueError, match="Invalid source_timezone"):
+        migrate_stock_collections_ingested_at_to_timestamptz(test_con, source_timezone="NON_EXISTENT_TZ")
+
+    # 2. 调用方明确指定已验证来源时区为 UTC，显式执行迁移
+    migrate_stock_collections_ingested_at_to_timestamptz(test_con, source_timezone="UTC")
+
+    col_types = test_con.execute("""
+        SELECT table_name, data_type FROM information_schema.columns
+        WHERE table_name IN ('stock_collection', 'theme', 'theme_membership_history')
+          AND column_name = 'ingested_at'
+    """).fetchall()
+
+    for tbl, dtype in col_types:
+        assert dtype.upper() == "TIMESTAMP WITH TIME ZONE", f"{tbl} column type is {dtype}"
+
+
+# ==============================================================================
+# Closeout Item 2: Replay 去除 canonical path-dependent anchor，形成自身历史路径
+# ==============================================================================
+def test_closeout_item2_replay_independent_of_canonical_path_anchor(f_db):
+    """
+    生产 D1 时只有 A；
+    之后 hindsight membership 使 D1 应为 A+B；
+    Replay D1..D2；
+    断言 D2 index 基于 replay D1，而不是 canonical D1。
+    """
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+    thm = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    d1 = date(2026, 8, 3)
+    d2 = date(2026, 8, 4)
+
+    # 1. 生产时 D1 只有成员 A (000001.SZ)
+    sc.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="000001.SZ",
+        effective_from=d1,
+        available_trade_date=d1,
+    )
+
+    # 模拟 000001.SZ 在 D1 涨 10% (0.10)，在 D2 涨 10% (0.10)
+    # 模拟 600519.SH 在 D1 涨 0% (0.00)，在 D2 涨 0% (0.00)
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 10.0 WHERE trade_date = ? AND ticker = '000001.SZ'", [d1])
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 10.0 WHERE trade_date = ? AND ticker = '000001.SZ'", [d2])
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 0.0 WHERE trade_date = ? AND ticker = '600519.SH'", [d1])
+    f_db.execute("UPDATE daily_market_snapshot SET pct_change = 0.0 WHERE trade_date = ? AND ticker = '600519.SH'", [d2])
+
+    # 生产完成 D1
+    service.run_m4_daily(trade_date=d1)
+
+    # 查出 canonical D1 index level: Inception 1000 * 1.10 = 1100.0
+    canonical_d1_level = f_db.execute(
+        f"SELECT index_level FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
+        [thm[0], d1]
+    ).fetchone()[0]
+    assert pytest.approx(canonical_d1_level, 0.01) == 1100.0
+
+    # 2. 随后录入后视镜成员 B (600519.SH)，生效区间回溯覆盖 D1，录入可用时刻在 2026-08-10
+    sc_hindsight = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 10, 10, 0, 0, tzinfo=timezone.utc))
+    sc_hindsight.add_member(
+        theme_id=thm[0],
+        collection_id=thm[1],
+        asset_id="600519.SH",
+        effective_from=d1,
+        available_trade_date=date(2026, 8, 10),
+    )
+
+    # 3. Replay D1..D2，knowledge_date = 2026-08-10
+    # 在这个 knowledge_date 下，D1 的成员为 A+B
+    # A 涨 10%, B 涨 0% -> D1 daily return = (10% + 0%) / 2 = 5%
+    # Replay D1 index level = 1000 * 1.05 = 1050.0 (而 canonical D1 为 1100.0)
+    # D2 成员也是 A+B -> D2 daily return = 5%
+    # 如果基于 Replay D1: D2 level = 1050 * 1.05 = 1102.5
+    replay_res = service.replay_m4_facts(start_date=d1, end_date=d2, knowledge_date=date(2026, 8, 10))
+    replay_idx = replay_res.daily_indices
+    replay_dates = pd.to_datetime(replay_idx["trade_date"]).dt.date
+    d1_rep = replay_idx[replay_dates == d1].iloc[0]
+    d2_rep = replay_idx[replay_dates == d2].iloc[0]
+
+    assert pytest.approx(float(d1_rep["theme_daily_return"]), 0.001) == 0.05
+    assert pytest.approx(float(d1_rep["index_level"]), 0.01) == 1050.0
+
+    assert pytest.approx(float(d2_rep["theme_daily_return"]), 0.001) == 0.05
+    # 核心断言：D2 index 基于 Replay D1 (1050 * 1.05 = 1102.5)，而不是 Canonical D1 (1155.0)!
+    assert pytest.approx(float(d2_rep["index_level"]), 0.01) == 1102.5
+    assert float(d2_rep["index_level"]) != 1155.0
+
+
+# ==============================================================================
+# Closeout Item 3: audit snapshot reconstruction 对齐 Production ExpectedThemes(D)
+# ==============================================================================
+def test_closeout_item3_audit_snapshot_reconstruction_aligns_with_expected_themes(f_db):
+    """
+    Theme X 在 D 10:00 创建且 available_trade_date=D；
+    D production 正确排除 X；
+    立即 audit D；
+    不得因 X 导致虚假的 snapshot drift。
+    """
+    from qrp_atlas.pipeline.theme.query import ThemeQueryService
+    service = ThemePipelineService(f_db)
+    query_svc = ThemeQueryService(f_db)
+
+    # 1. 早上 08:00 创建 Theme A (标准主题)
+    sc_early = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 3, 8, 0, 0, tzinfo=timezone.utc))
+    thm_a = f_db.execute(f"SELECT theme_id, collection_id FROM {THEME_TABLE} WHERE theme_id = 'THM:QRP:AI_CHIP'").fetchone()
+
+    d = date(2026, 8, 3)
+    sc_early.add_member(
+        theme_id=thm_a[0],
+        collection_id=thm_a[1],
+        asset_id="000001.SZ",
+        effective_from=d,
+        available_trade_date=d,
+    )
+
+    # 2. D 日 10:00 (盘中/盘后，晚于 09:00 cutoff) 创建 Theme X，声明 available_trade_date=D
+    # 2026-08-03 10:00 Shanghai 是 2026-08-03 02:00 UTC
+    sc_10am = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 3, 2, 0, 0, tzinfo=timezone.utc))
+    thm_x, coll_x = sc_10am.create_canonical_theme(
+        theme_name="盘中晚录主题X",
+        source_key="LATE_THEME_X",
+        effective_from=d,
+        available_trade_date=d,
+    )
+    sc_10am.add_member(
+        theme_id=thm_x.theme_id,
+        collection_id=coll_x.collection_id,
+        asset_id="600519.SH",
+        effective_from=d,
+        available_trade_date=d,
+    )
+
+    # 3. 执行 D 日正式生产
+    service.run_m4_daily(trade_date=d)
+
+    # 验证生产事实排除了 Theme X
+    obs_x = f_db.execute(f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE theme_id = ? AND trade_date = ?", [thm_x.theme_id, d]).fetchone()[0]
+    assert obs_x == 0
+
+    # 4. 立即 audit D 日 Theme A 的 observation
+    audit_report = query_svc.audit_m4_observation(theme_id=thm_a[0], trade_date=d)
+
+    # 核心断言：不得因 Theme X 导致虚假的 snapshot drift
+    assert audit_report.is_reproducible is True
+    assert audit_report.discrepancy_reason is None
 
 
 

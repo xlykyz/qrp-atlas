@@ -353,20 +353,25 @@ class ThemeQueryService:
                         for r in self.con.execute(
                             f"""
                             WITH ranked AS (
-                                SELECT theme_id, collection_id, status,
+                                SELECT theme_id, collection_id, status, effective_from, effective_to,
                                        row_number() OVER (PARTITION BY theme_id ORDER BY available_trade_date DESC, ingested_at DESC) as rn
                                 FROM {THEME_TABLE}
-                                WHERE available_trade_date <= ?
+                                WHERE ingested_at < (CAST(? AS DATE) + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'
+                                  AND available_trade_date <= ?
                             )
-                            SELECT theme_id, collection_id FROM ranked WHERE rn = 1 AND status = 'ACTIVE'
+                            SELECT theme_id, collection_id FROM ranked
+                            WHERE rn = 1
+                              AND status = 'ACTIVE'
+                              AND effective_from <= ?
+                              AND (effective_to IS NULL OR effective_to > ?)
                             ORDER BY theme_id ASC
                             """,
-                            [audit_kd],
+                            [trade_date, trade_date, trade_date, trade_date],
                         ).fetchall()
                     ]
                     recon_colls = [t[1] for t in recon_themes]
                     recon_mem = self.resolver.batch_resolve_members(
-                        recon_colls, recon_trade_dates, audit_kd, enforce_admission_cutoff=True
+                        recon_colls, recon_trade_dates, trade_date, enforce_admission_cutoff=True
                     )
                     recon_list = query_confirmed_listing_facts(self.con, end_date=trade_date, start_date=trade_date)
                     recon_susp = self.con.execute(

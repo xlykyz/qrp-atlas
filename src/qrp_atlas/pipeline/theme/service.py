@@ -455,21 +455,10 @@ class ThemePipelineService:
                 execution_control.checkpoint()
 
             coll_eff = eff_members_df[eff_members_df[COLLECTION_ID] == coll_id]
-            # Fetch anchor before calc_start from finalized ledger if available
-            anchor_row = self.con.execute(
-                f"""
-                SELECT index_level
-                FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
-                WHERE theme_id = ? AND trade_date < ?
-                ORDER BY trade_date DESC
-                LIMIT 1
-                """,
-                [theme_id, calc_start],
-            ).fetchone()
-            prev_level = float(anchor_row[0]) if anchor_row and anchor_row[0] is not None else DEFAULT_BASE_LEVEL
-
+            # Replay forms its own historical path starting from DEFAULT_BASE_LEVEL at calc_start.
+            # It NEVER queries canonical theme_custom_index_daily for previous level or prior history.
             idx_df = calculate_theme_equal_weight_index(
-                coll_eff, market_df, previous_cumulative_index_level=prev_level
+                coll_eff, market_df, previous_cumulative_index_level=DEFAULT_BASE_LEVEL
             )
             if idx_df.empty:
                 continue
@@ -477,26 +466,7 @@ class ThemePipelineService:
             idx_df[THEME_ID] = theme_id
             index_daily_list.append(idx_df)
 
-            prior_idx = self.con.execute(
-                f"""
-                SELECT trade_date, theme_daily_return, index_level, base_level,
-                       effective_member_count, total_member_count, theme_id
-                FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
-                WHERE theme_id = ? AND trade_date < ?
-                ORDER BY trade_date ASC
-                """,
-                [theme_id, calc_start],
-            ).df()
-            if not prior_idx.empty:
-                prior_idx[COLLECTION_ID] = coll_id
-                prior_idx[TRADE_DATE] = pd.to_datetime(prior_idx[TRADE_DATE]).dt.date
-                idx_df_copy = idx_df.copy()
-                idx_df_copy[TRADE_DATE] = pd.to_datetime(idx_df_copy[TRADE_DATE]).dt.date
-                combined_idx = pd.concat([prior_idx, idx_df_copy], ignore_index=True).drop_duplicates(subset=[TRADE_DATE], keep="last")
-            else:
-                combined_idx = idx_df
-
-            trend_res = calculate_theme_index_trend_and_episodes(combined_idx, theme_id=theme_id)
+            trend_res = calculate_theme_index_trend_and_episodes(idx_df, theme_id=theme_id)
             states_df = trend_res.daily_states.copy()
             states_df[THEME_ID] = theme_id
             target_dates_set = set(self._fetch_trading_calendar_dates(start_date, end_date))

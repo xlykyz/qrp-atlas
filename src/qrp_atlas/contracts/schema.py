@@ -1447,13 +1447,22 @@ def init_irm_database(con) -> None:
     con.execute(IRM_INTERACTION_QA.duckdb_create_sql())
 
 
-def migrate_stock_collections_ingested_at_to_timestamptz(con) -> None:
+def migrate_stock_collections_ingested_at_to_timestamptz(con, source_timezone: str) -> None:
     """显式将 StockCollection 领域表历史遗留的 naive TIMESTAMP ingested_at 迁移为 TIMESTAMPTZ。
 
-    历史生产代码写入的是 UTC 时间 (datetime.now(timezone.utc))，但在 DuckDB naive TIMESTAMP 列中
-    丢失了时区标记。通过 timezone('UTC', ingested_at) 明确其为 UTC，避免依赖当前 session TimeZone 设置。
+    要求调用方显式指定 legacy naive 时间戳的原始时区 (source_timezone)，例如 'UTC' 或 'Asia/Shanghai'。
+    严禁默认无条件假定。迁移通过 USING timezone(?, ingested_at) 精确解释并转为 aware TIMESTAMPTZ。
     若迁移失败或最终 schema 断言不满足，必须 fail-closed 抛出异常。
     """
+    if not source_timezone or not isinstance(source_timezone, str):
+        raise ValueError("Explicit source_timezone string must be provided (e.g. 'UTC' or 'Asia/Shanghai')")
+
+    # 验证 DuckDB 是否支持该时区名
+    try:
+        con.execute("SELECT timezone(?, '2026-01-01 00:00:00'::TIMESTAMP)", [source_timezone])
+    except Exception as exc:
+        raise ValueError(f"Invalid source_timezone '{source_timezone}': {exc}") from exc
+
     tables = (STOCK_COLLECTION_TABLE, THEME_TABLE, THEME_MEMBERSHIP_HISTORY_TABLE)
     for tbl in tables:
         type_row = con.execute(
@@ -1468,7 +1477,7 @@ def migrate_stock_collections_ingested_at_to_timestamptz(con) -> None:
         data_type = type_row[0].upper()
         if data_type == "TIMESTAMP":
             con.execute(
-                f"ALTER TABLE {tbl} ALTER COLUMN {INGESTED_AT} TYPE TIMESTAMPTZ USING timezone('UTC', {INGESTED_AT})"
+                f"ALTER TABLE {tbl} ALTER COLUMN {INGESTED_AT} TYPE TIMESTAMPTZ USING timezone('{source_timezone}', {INGESTED_AT})"
             )
 
     # 迁移后严格断言 schema：三个核心表的 ingested_at 必须为 TIMESTAMP WITH TIME ZONE
@@ -1491,6 +1500,10 @@ def migrate_stock_collections_ingested_at_to_timestamptz(con) -> None:
 def init_stock_collections_database(con) -> None:
     """初始化 StockCollection 领域数据库，创建 stock_collection、theme、theme_membership_history 及 theme_effective_member_daily 契约表。
 
+    注意：新创建的表结构本身已直接定义为 TIMESTAMPTZ。
+    对于历史遗留已存在的 naive TIMESTAMP 数据库，不得在此自动隐式迁移，必须由调用方显式调用
+    migrate_stock_collections_ingested_at_to_timestamptz(con, source_timezone=...)。
+
     Args:
         con: DuckDB 连接对象
     """
@@ -1498,6 +1511,4 @@ def init_stock_collections_database(con) -> None:
     con.execute(THEME.duckdb_create_sql())
     con.execute(THEME_MEMBERSHIP_HISTORY.duckdb_create_sql())
     con.execute(THEME_EFFECTIVE_MEMBER_DAILY.duckdb_create_sql())
-
-    migrate_stock_collections_ingested_at_to_timestamptz(con)
 
