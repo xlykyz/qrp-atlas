@@ -73,6 +73,7 @@ from .fields import (
     EFFECTIVE_TO, INDEX_CODE, SNAPSHOT_DATE, WEIGHT,
     FIRST_ANNOUNCEMENT_DATE, FORECAST_TYPE, PROFIT_CHANGE_MIN, PROFIT_CHANGE_MAX,
     NET_PROFIT_MIN, NET_PROFIT_MAX, LAST_PARENT_NET, SUMMARY, CHANGE_REASON,
+    CURRENT_PRICE, RANK_POSITION, SOURCE_RANK_TIME, HOT, CONCEPT, RANK_REASON,
 )
 
 
@@ -243,6 +244,29 @@ TUSHARE_STK_HIGH_SHOCK: Dict[str, str] = {
     "trade_market": TRADE_MARKET,
     "reason": REASON,
     "period": PERIOD,
+}
+
+TUSHARE_DC_HOT: Dict[str, str] = {
+    "trade_date": TRADE_DATE,
+    "ts_code": TICKER,
+    "ts_name": NAME,
+    "rank": RANK_POSITION,
+    "pct_change": PCT_CHANGE,
+    "current_price": CURRENT_PRICE,
+    "rank_time": SOURCE_RANK_TIME,
+}
+
+TUSHARE_THS_HOT: Dict[str, str] = {
+    "trade_date": TRADE_DATE,
+    "ts_code": TICKER,
+    "ts_name": NAME,
+    "rank": RANK_POSITION,
+    "pct_change": PCT_CHANGE,
+    "current_price": CURRENT_PRICE,
+    "hot": HOT,
+    "concept": CONCEPT,
+    "rank_reason": RANK_REASON,
+    "rank_time": SOURCE_RANK_TIME,
 }
 
 EASTMONEY_RESEARCH_REPORT: Dict[str, str] = {
@@ -454,6 +478,8 @@ SOURCE_MAPPINGS = {
     "tushare_limit_step": TUSHARE_LIMIT_STEP,
     "tushare_ths_daily": TUSHARE_THS_DAILY,
     "tushare_stk_high_shock": TUSHARE_STK_HIGH_SHOCK,
+    "tushare_dc_hot": TUSHARE_DC_HOT,
+    "tushare_ths_hot": TUSHARE_THS_HOT,
     "eastmoney_research_report": EASTMONEY_RESEARCH_REPORT,
     "eastmoney_research_industry": EASTMONEY_RESEARCH_INDUSTRY,
     "eastmoney_research_visits": EASTMONEY_RESEARCH_VISITS,

@@ -277,6 +277,16 @@ from .fields import (
     SUMMARY,
     CHANGE_REASON,
     FINALIZED_AT,
+    CURRENT_PRICE,
+    LIST_NAME,
+    RANK_POSITION,
+    SOURCE_RANK_TIME,
+    SNAPSHOT_SEQ,
+    SNAPSHOT_STARTED_AT,
+    SNAPSHOT_COMPLETED_AT,
+    HOT,
+    CONCEPT,
+    RANK_REASON,
 )
 
 
@@ -304,6 +314,8 @@ from .schema import (
     LIMIT_STEP,
     THS_DAILY,
     STK_HIGH_SHOCK,
+    DC_HOT,
+    THS_HOT,
     SYSTEM_B_STATE_OBSERVATION,
     SYSTEM_B_PRODUCTION_RUN,
     SYSTEM_B_EPISODE,
@@ -428,6 +440,8 @@ from .mappings import (
     TUSHARE_LIMIT_STEP,
     TUSHARE_THS_DAILY,
     TUSHARE_STK_HIGH_SHOCK,
+    TUSHARE_DC_HOT,
+    TUSHARE_THS_HOT,
     TUSHARE_FORECAST,
 )
 
@@ -1075,4 +1089,19 @@ __all__ = [
     "THEME_CUSTOM_INDEX_EPISODE",
     "THEME_M4_OBSERVATION",
     "THEME_PRODUCTION_RUN",
+    # ── M5 Popularity (dc_hot / ths_hot) ──
+    "CURRENT_PRICE",
+    "LIST_NAME",
+    "RANK_POSITION",
+    "SOURCE_RANK_TIME",
+    "SNAPSHOT_SEQ",
+    "SNAPSHOT_STARTED_AT",
+    "SNAPSHOT_COMPLETED_AT",
+    "HOT",
+    "CONCEPT",
+    "RANK_REASON",
+    "DC_HOT",
+    "THS_HOT",
+    "TUSHARE_DC_HOT",
+    "TUSHARE_THS_HOT",
 ]

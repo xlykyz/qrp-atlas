@@ -150,6 +150,16 @@ from .fields import (
     SUMMARY,
     CHANGE_REASON,
     FINALIZED_AT,
+    CURRENT_PRICE,
+    LIST_NAME,
+    RANK_POSITION,
+    SOURCE_RANK_TIME,
+    SNAPSHOT_SEQ,
+    SNAPSHOT_STARTED_AT,
+    SNAPSHOT_COMPLETED_AT,
+    HOT,
+    CONCEPT,
+    RANK_REASON,
 )
 from .system_b import (
     ACTUAL_PAIR_CONTIGUOUS,
@@ -781,6 +791,49 @@ STK_HIGH_SHOCK = TableSchema(
     primary_key=(TRADE_DATE, TICKER, REASON, PERIOD),
 )
 
+DC_HOT = TableSchema(
+    name="dc_hot",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(LIST_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(RANK_POSITION, "INTEGER", nullable=False),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(CURRENT_PRICE, "DOUBLE"),
+        ColumnSpec(SOURCE_RANK_TIME, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_SEQ, "INTEGER", nullable=False),
+        ColumnSpec(SNAPSHOT_STARTED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_COMPLETED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION),
+)
+
+THS_HOT = TableSchema(
+    name="ths_hot",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(LIST_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(RANK_POSITION, "INTEGER", nullable=False),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(CURRENT_PRICE, "DOUBLE"),
+        ColumnSpec(HOT, "DOUBLE"),
+        ColumnSpec(CONCEPT, "VARCHAR"),
+        ColumnSpec(RANK_REASON, "VARCHAR"),
+        ColumnSpec(SOURCE_RANK_TIME, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_SEQ, "INTEGER", nullable=False),
+        ColumnSpec(SNAPSHOT_STARTED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_COMPLETED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION),
+)
+
 SYSTEM_B_STATE_OBSERVATION = TableSchema(
     name=SYSTEM_B_STATE_OBSERVATION_TABLE,
     columns=(
@@ -1375,6 +1428,8 @@ ALL_TABLES = (
     LIMIT_STEP,
     THS_DAILY,
     STK_HIGH_SHOCK,
+    DC_HOT,
+    THS_HOT,
     INCOME_STATEMENT,
     BALANCE_SHEET,
     CASHFLOW_STATEMENT,

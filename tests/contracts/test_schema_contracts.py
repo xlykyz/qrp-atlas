@@ -20,6 +20,8 @@ from qrp_atlas.contracts import (
     DAILY_MARKET_SNAPSHOT,
     TICKER,
     TRADE_DATE,
+    RANK_POSITION,
+    SNAPSHOT_SEQ,
     init_database,
     init_irm_database,
 )
@@ -138,6 +140,8 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("theme_custom_index_state", ("theme_id", "trade_date")),
         ("theme_custom_index_episode", ("episode_id",)),
         ("theme_m4_observation", ("theme_id", "trade_date")),
+        ("dc_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
+        ("ths_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
     ],
 )
 def test_known_primary_keys(table_name: str, expected_pk: tuple):
@@ -156,7 +160,12 @@ def test_init_stock_collections_database_creates_tables(tmp_path):
     try:
         init_stock_collections_database(con)
         tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-        expected = {"stock_collection", "theme", "theme_membership_history"}
+        expected = {
+            "stock_collection",
+            "theme",
+            "theme_membership_history",
+            "theme_effective_member_daily",
+        }
         assert tables == expected
     finally:
         con.close()
@@ -213,6 +222,7 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
             "theme_custom_index_episode",
             "theme_m4_observation",
             "theme_production_run",
+            "theme_effective_member_daily",
         }
         assert ddl_tables == expected_ddl_tables
 
