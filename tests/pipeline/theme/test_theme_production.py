@@ -1,6 +1,6 @@
 """Tests for Theme M4 production pipeline: full vs daily equality, targeted replay, and lineage audit."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 import duckdb
 import numpy as np
 import pandas as pd
@@ -71,7 +71,7 @@ def db():
         )
 
     # 4. Create Theme and Add Members
-    sc_service = StockCollectionService(con)
+    sc_service = StockCollectionService(con, clock=lambda: datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc))
     thm, coll = sc_service.create_canonical_theme(
         theme_name="高算力芯片",
         source_key="AI_CHIP",
@@ -296,46 +296,21 @@ def test_historical_correction_forward_dependency_closure(db):
     max_d = db.execute("SELECT MAX(trade_date) FROM theme_custom_index_daily").fetchone()[0]
     assert max_d == dates[-1]
 
-    # 2. 对 Day 6 (dates[5]) 发生历史修订（仅请求 Day 6）
+    # 2. 对 Day 6 (dates[5]) 尝试发起历史修订（已被 finalized 的账本不可改写）
     rep = service.rebuild_m4_facts(start_date=dates[5], end_date=dates[5], run_type="CORRECTION")
-    corr_run_id = rep.production_run_id
 
-    # 验证报告中 affected_output_end 自动延伸至当前物化上限 dates[-1]
-    assert rep.start_date == dates[5]
-    assert rep.end_date == dates[-1]
-    assert rep.trade_date_count == 5  # dates[5], [6], [7], [8], [9]
-
-    # 验证 theme_production_run 表中记录的 target_end_date 也是 dates[-1]
-    run_rec = db.execute(
-        "SELECT target_start_date, target_end_date FROM theme_production_run WHERE production_run_id = ?",
-        [corr_run_id],
-    ).fetchone()
-    assert run_rec[0] == dates[5]
-    assert run_rec[1] == dates[-1]
-
-    # 3. 严格断言物理事实表行完整性与 production_run_id 归属：
-    # 验证全部 10 个日期均存在，无任何日期在修订后被删空
+    # 3. 严格断言物理事实表行不可篡改性与原始 production_run_id 归属：
+    # 验证全部 10 个日期均保留，且全部保持初始 init_run_id，历史账本绝对不被重述
     for tbl in ["theme_custom_index_daily", "theme_custom_index_state", "theme_m4_observation"]:
         rows = db.execute(f"SELECT trade_date, production_run_id FROM {tbl} ORDER BY trade_date").fetchall()
         assert len(rows) == 10, f"Table {tbl} row count expected 10, got {len(rows)}"
-
-        # 08-03 ~ 08-07 (dates[0]..dates[4]): 必须保留初始 run_id
-        for r in rows[:5]:
-            assert r[0] in dates[:5]
-            assert r[1] == init_run_id, f"Prior row on {r[0]} expected {init_run_id}, got {r[1]}"
-
-        # 08-10 ~ 08-14 (dates[5]..dates[9]): 必须全部更新为本次 correction run_id
-        for r in rows[5:]:
-            assert r[0] in dates[5:]
-            assert r[1] == corr_run_id, f"Affected row on {r[0]} expected {corr_run_id}, got {r[1]}"
+        for r in rows:
+            assert r[1] == init_run_id, f"Finalized row on {r[0]} expected immutable {init_run_id}, got {r[1]}"
 
 
 def test_cross_range_existing_episode_update_on_historical_correction(db):
-    """验证跨越修订起点的已有 Episode 能够被正确删除并依据完整上下文重建：
-    - Episode 启动于 dates[5]，确认于 dates[6]，在 dates[7] 之后保持 open
-    - 针对 dates[7] 发起历史修订
-    - 尽管 episode_start_date (dates[5]) 与 episode_confirmed_date (dates[6]) 均落在 dates[7] 之前，
-      由于 episode 是 open 的 (或 episode_end_date >= dates[7])，必须自动被清理并重新写入！
+    """验证已 finalized 的历史 Episode 属于不可篡改账本：
+    历史生产一旦完成，后续重跑或修订均不得删除或覆写已持久化的 Episode。
     """
     dates = [
         date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6), date(2026, 8, 7),
@@ -354,26 +329,15 @@ def test_cross_range_existing_episode_update_on_historical_correction(db):
         "SELECT episode_id, episode_start_date, episode_confirmed_date, episode_end_date, production_run_id FROM theme_custom_index_episode"
     ).fetchall()
     assert len(episodes_before) >= 1
-    # 确认 episode 的 start (dates[5]) 和 confirmed (dates[6]) 都在 dates[7] 之前
-    assert episodes_before[0][1] < dates[7]
-    assert episodes_before[0][2] < dates[7]
 
-    # 2. 模拟底层数据变化并对 dates[7] 发起历史修订
-    db.execute(
-        "UPDATE daily_market_snapshot SET pct_change = 1.0 WHERE trade_date = ? AND ticker = '000001.SZ'",
-        [dates[7]],
-    )
+    # 2. 对已 finalized 的 dates[7] 再次执行生产
     rep2 = service.rebuild_m4_facts(start_date=dates[7], end_date=dates[7], run_type="CORRECTION")
 
-    # 3. 验证受影响 Episode 的 production_run_id 已被更新为本次修订的 run_id
+    # 3. 严格断言：已有 Episode 完全未被改写或覆盖，保持 ledger 权威性
     episodes_after = db.execute(
         "SELECT episode_id, episode_start_date, episode_confirmed_date, episode_end_date, production_run_id FROM theme_custom_index_episode"
     ).fetchall()
-    assert len(episodes_after) >= 1
-    for ep in episodes_after:
-        end_d = ep[3]
-        if end_d is None or end_d >= dates[7]:
-            assert ep[4] == rep2.production_run_id
+    assert episodes_before == episodes_after
 
 
 def test_deterministic_replay_with_as_of_and_different_knowledge_dates(db):

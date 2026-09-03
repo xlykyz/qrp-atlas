@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS stock_collection (
     source VARCHAR NOT NULL,
     source_record_id VARCHAR,
     revision_id VARCHAR NOT NULL,
-    ingested_at TIMESTAMP NOT NULL,
+    ingested_at TIMESTAMP WITH TIME ZONE NOT NULL,
     PRIMARY KEY (collection_id, revision_id)
 );
 
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS theme (
     source VARCHAR NOT NULL,
     source_record_id VARCHAR,
     revision_id VARCHAR NOT NULL,
-    ingested_at TIMESTAMP NOT NULL,
+    ingested_at TIMESTAMP WITH TIME ZONE NOT NULL,
     PRIMARY KEY (theme_id, revision_id)
 );
 
@@ -46,8 +46,26 @@ CREATE TABLE IF NOT EXISTS theme_membership_history (
     source VARCHAR NOT NULL,
     source_record_id VARCHAR,
     revision_id VARCHAR NOT NULL,
-    ingested_at TIMESTAMP NOT NULL,
+    ingested_at TIMESTAMP WITH TIME ZONE NOT NULL,
     PRIMARY KEY (membership_id, revision_id)
+);
+
+CREATE TABLE IF NOT EXISTS theme_effective_member_daily (
+    collection_id VARCHAR NOT NULL,
+    theme_id VARCHAR NOT NULL,
+    asset_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    is_theme_member BOOLEAN NOT NULL,
+    confirmed_listing_trading_day_count BIGINT,
+    is_suspended BOOLEAN NOT NULL,
+    is_m4_effective_member BOOLEAN NOT NULL,
+    exclusion_reason VARCHAR,
+    calculation_version VARCHAR NOT NULL,
+    input_snapshot_id VARCHAR,
+    production_run_id VARCHAR,
+    created_at TIMESTAMP NOT NULL,
+    finalized_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (collection_id, trade_date, asset_id)
 );
 
 CREATE TABLE IF NOT EXISTS theme_custom_index_daily (

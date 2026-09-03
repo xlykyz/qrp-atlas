@@ -84,14 +84,25 @@ def calculate_m4_raw_observations(
             f"comparison_boards cannot be empty for version {comparison_universe_version}",
         )
 
-    # 1. Limit Up counts per (collection_id, trade_date)
-    # Fail-closed: theme_limit_up_count = 0 means ALL effective members are proven non-limit-up.
-    # If any member's is_limit_up is unproven (missing snapshot row or NULL), theme_limit_up_count = None.
+    # Normalize dates to datetime.date to prevent Timestamp vs date merge mismatches
+    comparison_boards = comparison_boards.copy()
+    if TRADE_DATE in comparison_boards.columns:
+        comparison_boards[TRADE_DATE] = pd.to_datetime(comparison_boards[TRADE_DATE]).dt.date
+
     m_snap = market_snapshot.copy()
+    if TRADE_DATE in m_snap.columns:
+        m_snap[TRADE_DATE] = pd.to_datetime(m_snap[TRADE_DATE]).dt.date
     if IS_LIMIT_UP not in m_snap.columns:
         m_snap[IS_LIMIT_UP] = None
 
-    eff_active = effective_members[effective_members[IS_M4_EFFECTIVE_MEMBER].astype(bool)].copy()
+    eff_input = effective_members.copy()
+    if not eff_input.empty and TRADE_DATE in eff_input.columns:
+        eff_input[TRADE_DATE] = pd.to_datetime(eff_input[TRADE_DATE]).dt.date
+
+    # 1. Limit Up counts per (collection_id, trade_date)
+    # Fail-closed: theme_limit_up_count = 0 means ALL effective members are proven non-limit-up.
+    # If any member's is_limit_up is unproven (missing snapshot row or NULL), theme_limit_up_count = None.
+    eff_active = eff_input[eff_input[IS_M4_EFFECTIVE_MEMBER].astype(bool)].copy()
     eff_merged = eff_active.merge(
         m_snap[[ASSET_ID, TRADE_DATE, IS_LIMIT_UP]],
         on=[ASSET_ID, TRADE_DATE],
@@ -114,7 +125,10 @@ def calculate_m4_raw_observations(
         limit_up_counts = pd.DataFrame(columns=[COLLECTION_ID, TRADE_DATE, THEME_LIMIT_UP_COUNT])
 
     # 2. Base Observations from theme_index_daily
-    obs = theme_index_daily.merge(limit_up_counts, on=[COLLECTION_ID, TRADE_DATE], how="left")
+    idx_clean = theme_index_daily.copy()
+    if TRADE_DATE in idx_clean.columns:
+        idx_clean[TRADE_DATE] = pd.to_datetime(idx_clean[TRADE_DATE]).dt.date
+    obs = idx_clean.merge(limit_up_counts, on=[COLLECTION_ID, TRADE_DATE], how="left")
 
     if EFFECTIVE_MEMBER_COUNT not in obs.columns:
         eff_counts = (
@@ -127,7 +141,7 @@ def calculate_m4_raw_observations(
 
     if TOTAL_MEMBER_COUNT not in obs.columns:
         total_counts = (
-            effective_members.groupby([COLLECTION_ID, TRADE_DATE])
+            eff_input.groupby([COLLECTION_ID, TRADE_DATE])
             .size()
             .reset_index(name=TOTAL_MEMBER_COUNT)
         )

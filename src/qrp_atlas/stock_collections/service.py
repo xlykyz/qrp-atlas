@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 import uuid
 
@@ -22,14 +23,35 @@ from .models import (
     ThemeRecord,
 )
 from .repository import StockCollectionRepository
+from .resolver import StockCollectionResolver
+
+TimeProvider = Callable[[], datetime]
+
+
+def system_clock() -> datetime:
+    """Default production system clock: returns current UTC timestamp."""
+    return datetime.now(timezone.utc)
 
 
 class StockCollectionService:
     """Domain service for managing canonical collections, themes, and member revisions."""
 
-    def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
+    def __init__(
+        self,
+        con: duckdb.DuckDBPyConnection,
+        *,
+        clock: TimeProvider | None = None,
+    ) -> None:
         self.con = con
         self.repo = StockCollectionRepository(con)
+        self.resolver = StockCollectionResolver(con)
+        self._clock: TimeProvider = clock or system_clock
+
+    def _now(self) -> datetime:
+        dt = self._clock()
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     def create_canonical_theme(
         self,
@@ -63,7 +85,7 @@ class StockCollectionService:
                 "THEME_COLLISION", f"Theme {theme_id} already exists"
             )
 
-        now = datetime.now(timezone.utc)
+        now = self._now()
         coll_rec = StockCollectionRecord(
             collection_id=collection_id,
             collection_type=CollectionType.THEME,
@@ -143,7 +165,7 @@ class StockCollectionService:
             if effective_to is None:
                 raise StockCollectionError(
                     "MEMBERSHIP_OUTSIDE_COLLECTION_LIFECYCLE",
-                    f"Open-ended membership not allowed in closed collection (effective_to: {coll.effective_to})",
+                    f"membership must have effective_to <= canonical collection effective_to ({coll.effective_to})",
                 )
             if effective_to > coll.effective_to:
                 raise StockCollectionError(
@@ -199,7 +221,7 @@ class StockCollectionService:
                 )
 
         membership_id = f"MEM:{theme_id}:{asset_id}:{uuid.uuid4().hex[:8].upper()}"
-        now = datetime.now(timezone.utc)
+        now = self._now()
         record = ThemeMembershipRecord(
             membership_id=membership_id,
             theme_id=theme_id,
@@ -240,7 +262,7 @@ class StockCollectionService:
                 f"removal_date ({removal_date}) must be > effective_from ({latest.effective_from})",
             )
 
-        now = datetime.now(timezone.utc)
+        now = self._now()
         record = ThemeMembershipRecord(
             membership_id=latest.membership_id,
             theme_id=latest.theme_id,
@@ -314,7 +336,7 @@ class StockCollectionService:
                     f"Late revision overlaps with other lifecycle [{lc.effective_from}, {lc.effective_to})",
                 )
 
-        now = datetime.now(timezone.utc)
+        now = self._now()
         record = ThemeMembershipRecord(
             membership_id=latest.membership_id,
             theme_id=latest.theme_id,
@@ -390,8 +412,9 @@ class StockCollectionService:
             )
 
         records_to_append: list[ThemeMembershipRecord] = []
-        now = datetime.now(timezone.utc)
+        now = self._now()
         all_intervals = [
+
             (lc.asset_id, lc.effective_from, lc.effective_to or date(9999, 12, 31))
             for lc in self.repo.get_asset_memberships(collection_id, None)
         ]

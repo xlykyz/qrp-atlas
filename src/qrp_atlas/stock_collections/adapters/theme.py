@@ -101,8 +101,9 @@ class ThemeAdapter:
         collection_ids: Sequence[str],
         trade_dates: Sequence[date],
         knowledge_date: date,
+        enforce_admission_cutoff: bool = False,
     ) -> pd.DataFrame:
-        """Set-based vectorized batch resolution across multiple collections and dates."""
+        """Set-based vectorized batch resolution across multiple collections and dates with optional 09:00 admission cutoff."""
         if not collection_ids or not trade_dates:
             return pd.DataFrame(
                 columns=[
@@ -117,10 +118,19 @@ class ThemeAdapter:
                 ]
             )
 
-        coll_filter = "AND collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
+        coll_filter_c = "AND collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
+        coll_filter_m = "AND m.collection_id IN (" + ",".join(["?"] * len(collection_ids)) + ")"
+        admission_clause = (
+            "AND m.ingested_at < (d.trade_date + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'"
+            if enforce_admission_cutoff
+            else ""
+        )
 
         sql = f"""
-        WITH visible_collections AS (
+        WITH dates AS (
+            SELECT unnest(?::DATE[]) as trade_date
+        ),
+        visible_collections AS (
             SELECT
                 collection_id,
                 effective_from AS coll_effective_from,
@@ -128,43 +138,43 @@ class ThemeAdapter:
                 status AS coll_status,
                 row_number() OVER (
                     PARTITION BY collection_id
-                    ORDER BY available_trade_date DESC, ingested_at DESC
+                    ORDER BY ingested_at DESC, available_trade_date DESC
                 ) as rn
             FROM {STOCK_COLLECTION_TABLE}
             WHERE available_trade_date <= ?
-              {coll_filter}
+              {coll_filter_c}
         ),
         latest_collections AS (
             SELECT * FROM visible_collections WHERE rn = 1 AND coll_status = 'ACTIVE'
         ),
         visible_revisions AS (
             SELECT
-                membership_id,
-                theme_id,
-                collection_id,
-                asset_id,
-                effective_from,
-                effective_to,
-                available_trade_date,
-                revision_id,
+                d.trade_date,
+                m.membership_id,
+                m.theme_id,
+                m.collection_id,
+                m.asset_id,
+                m.effective_from,
+                m.effective_to,
+                m.available_trade_date,
+                m.revision_id,
                 row_number() OVER (
-                    PARTITION BY membership_id
-                    ORDER BY available_trade_date DESC, ingested_at DESC
+                    PARTITION BY m.membership_id, d.trade_date
+                    ORDER BY m.ingested_at DESC, m.available_trade_date DESC
                 ) as rn
-            FROM {THEME_MEMBERSHIP_HISTORY_TABLE}
-            WHERE available_trade_date <= ?
-              {coll_filter}
+            FROM dates d
+            JOIN {THEME_MEMBERSHIP_HISTORY_TABLE} m
+              ON 1=1 {coll_filter_m}
+             {admission_clause}
+             AND m.available_trade_date <= ?
         ),
         latest_revisions AS (
             SELECT * FROM visible_revisions WHERE rn = 1
-        ),
-        dates AS (
-            SELECT unnest(?::DATE[]) as trade_date
         )
         SELECT
             r.collection_id,
             r.asset_id,
-            d.trade_date,
+            r.trade_date,
             r.membership_id,
             r.revision_id,
             r.effective_from,
@@ -173,21 +183,21 @@ class ThemeAdapter:
         FROM latest_revisions r
         JOIN latest_collections c
           ON r.collection_id = c.collection_id
-        JOIN dates d
-          ON r.effective_from <= d.trade_date
-         AND (r.effective_to IS NULL OR d.trade_date < r.effective_to)
-         AND c.coll_effective_from <= d.trade_date
-         AND (c.coll_effective_to IS NULL OR d.trade_date < c.coll_effective_to)
-        ORDER BY r.collection_id, d.trade_date, r.asset_id
+        WHERE r.effective_from <= r.trade_date
+          AND (r.effective_to IS NULL OR r.trade_date < r.effective_to)
+          AND c.coll_effective_from <= r.trade_date
+          AND (c.coll_effective_to IS NULL OR r.trade_date < c.coll_effective_to)
+        ORDER BY r.collection_id, r.trade_date, r.asset_id
         """
         params: list[Any] = [
-            knowledge_date,
-            *collection_ids,
-            knowledge_date,
-            *collection_ids,
             list(trade_dates),
+            knowledge_date,
+            *collection_ids,
+            *collection_ids,
+            knowledge_date,
         ]
         return self.con.execute(sql, params).df()
+
 
     def reverse_lookup(
         self,

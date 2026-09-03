@@ -13,14 +13,17 @@ from qrp_atlas.contracts import (
 )
 from qrp_atlas.contracts.m4 import (
     EXCLUSION_REASON,
+    EXCLUSION_REASON_UNCONFIRMED_LISTING_DAYS,
     EXCLUSION_REASON_NEW_LISTING_LE_5,
     EXCLUSION_REASON_SUSPENDED,
     IS_M4_EFFECTIVE_MEMBER,
     IS_THEME_MEMBER,
 )
-from qrp_atlas.contracts.stock_collection import COLLECTION_ID
+from qrp_atlas.contracts.stock_collection import COLLECTION_ID, THEME_ID
 
-DIAGNOSTIC_UNCONFIRMED_LISTING_DAYS = "UNCONFIRMED_LISTING_DAYS"
+DIAGNOSTIC_UNCONFIRMED_LISTING_DAYS = EXCLUSION_REASON_UNCONFIRMED_LISTING_DAYS
+
+
 
 
 def calculate_m4_effective_members(
@@ -94,20 +97,22 @@ def calculate_m4_effective_members(
     df[IS_M4_EFFECTIVE_MEMBER] = is_eligible.astype(bool)
 
     reasons = pd.Series(pd.NA, index=df.index, dtype="string")
-    reasons.loc[is_missing_listing] = DIAGNOSTIC_UNCONFIRMED_LISTING_DAYS
+    reasons.loc[is_missing_listing] = EXCLUSION_REASON_UNCONFIRMED_LISTING_DAYS
     reasons.loc[(~is_missing_listing) & is_le_5] = EXCLUSION_REASON_NEW_LISTING_LE_5
     reasons.loc[(~is_missing_listing) & (~is_le_5) & is_suspended] = EXCLUSION_REASON_SUSPENDED
     df[EXCLUSION_REASON] = reasons
 
-    return df[
-        [
-            COLLECTION_ID,
-            ASSET_ID,
-            TRADE_DATE,
-            IS_THEME_MEMBER,
-            CONFIRMED_LISTING_TRADING_DAY_COUNT,
-            IS_SUSPENDED,
-            IS_M4_EFFECTIVE_MEMBER,
-            EXCLUSION_REASON,
-        ]
+    out_cols = [
+        COLLECTION_ID,
+        ASSET_ID,
+        TRADE_DATE,
+        IS_THEME_MEMBER,
+        CONFIRMED_LISTING_TRADING_DAY_COUNT,
+        IS_SUSPENDED,
+        IS_M4_EFFECTIVE_MEMBER,
+        EXCLUSION_REASON,
     ]
+    if THEME_ID in df.columns:
+        out_cols.insert(1, THEME_ID)
+
+    return df[out_cols]

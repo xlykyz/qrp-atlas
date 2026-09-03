@@ -9,6 +9,7 @@ import json
 import uuid
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 from qrp_atlas.contracts import (
@@ -29,6 +30,8 @@ from qrp_atlas.contracts import (
     TRADING_CALENDAR,
     TREND_STATE,
     PREVIOUS_TREND_STATE,
+    IS_ABOVE_OR_EQUAL_MA5,
+    STATE_CHANGED,
 )
 from qrp_atlas.contracts.m4 import (
     BASE_LEVEL,
@@ -44,6 +47,7 @@ from qrp_atlas.contracts.m4 import (
     IS_M4_EFFECTIVE_MEMBER,
     M4_CALCULATION_VERSION,
     QUALIFICATION_STATUS,
+    QUALIFICATION_STATUS_NOT_CONFIGURED,
     THEME_CUSTOM_INDEX_DAILY_TABLE,
     THEME_CUSTOM_INDEX_EPISODE_TABLE,
     THEME_CUSTOM_INDEX_EPISODE_VERSION,
@@ -56,8 +60,12 @@ from qrp_atlas.contracts.m4 import (
     THEME_M4_OBSERVATION_VERSION,
     THEME_RETURN_RANK,
     TOTAL_MEMBER_COUNT,
+    THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
+    THEME_EFFECTIVE_MEMBER_VERSION,
+    EXCLUSION_REASON,
 )
 from qrp_atlas.contracts.fields import (
+    FINALIZED_AT,
     KNOWLEDGE_DATE,
     THEME_PRODUCTION_RUN_TABLE,
 )
@@ -157,6 +165,7 @@ class ThemeM4CalculatedFacts:
     m4_observations: pd.DataFrame
     execution_seconds: float
     all_episodes: pd.DataFrame = field(default_factory=pd.DataFrame)
+    effective_members: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _to_date(val: Any) -> date:
@@ -174,6 +183,34 @@ class ThemePipelineService:
         self.con = con
         self.resolver = StockCollectionResolver(con)
 
+    def _is_open_trading_day(self, trade_date: date) -> bool:
+        """Check if trade_date is an open trading day strictly from trading_calendar in database."""
+        row = self.con.execute(
+            "SELECT is_open FROM trading_calendar WHERE trade_date = ?",
+            [trade_date],
+        ).fetchone()
+        return bool(row and row[0])
+
+    def _get_finalized_theme_ids(self, trade_date: date) -> set[str]:
+        """Get theme_ids that have already completed finalized production on trade_date.
+
+        A theme is considered finalized on trade_date if and only if both its custom index daily
+        record AND its M4 observation record have been successfully persisted.
+        Themes with 0 candidate/effective members will have effective_member_count = 0 in both tables,
+        strictly distinguishing them from unrun themes.
+        """
+        rows = self.con.execute(
+            f"""
+            SELECT idx.theme_id
+            FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} idx
+            JOIN {THEME_M4_OBSERVATION_TABLE} obs
+              ON idx.theme_id = obs.theme_id AND idx.trade_date = obs.trade_date
+            WHERE idx.trade_date = ?
+            """,
+            [trade_date],
+        ).fetchall()
+        return {r[0] for r in rows}
+
     def _fetch_trading_calendar_dates(self, start_date: date, end_date: date) -> list[date]:
         rows = self.con.execute(
             """
@@ -185,19 +222,64 @@ class ThemePipelineService:
         ).fetchall()
         return [r[0] for r in rows]
 
-    def _fetch_all_canonical_themes(self, knowledge_date: date) -> list[tuple[str, str]]:
+    def _fetch_all_canonical_themes(
+        self,
+        trade_date: date,
+        knowledge_date: date | None = None,
+    ) -> list[tuple[str, str]]:
+        """Fetch expected canonical themes for trade_date under PIT rules.
+
+        Invariant:
+        ExpectedThemes(D) contains only themes that are legally visible and effective
+        as of trade_date D (ingested before D 09:00:00 Asia/Shanghai, available <= D,
+        and effective on D).
+        If trade_date D has already completed a SUCCEEDED production run, its expected
+        themes are permanently frozen to the finalized themes of that run.
+        """
+        # 1. If trade_date D is already finalized in production history, freeze to finalized themes
+        is_already_finalized = self.con.execute(
+            f"""
+            SELECT COUNT(*) FROM {THEME_PRODUCTION_RUN_TABLE}
+            WHERE target_start_date = ? AND target_end_date = ? AND status = 'SUCCEEDED'
+            """,
+            [trade_date, trade_date],
+        ).fetchone()[0] > 0
+
+        if is_already_finalized:
+            finalized_rows = self.con.execute(
+                f"""
+                SELECT DISTINCT idx.theme_id, idx.collection_id
+                FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} idx
+                JOIN {THEME_M4_OBSERVATION_TABLE} obs
+                  ON idx.theme_id = obs.theme_id AND idx.trade_date = obs.trade_date
+                WHERE idx.trade_date = ?
+                ORDER BY idx.theme_id ASC
+                """,
+                [trade_date],
+            ).fetchall()
+            if finalized_rows:
+                return [(r[0], r[1]) for r in finalized_rows]
+
+        # 2. Otherwise, resolve legally visible and effective themes at D 09:00 cutoff
+        kd = knowledge_date or trade_date
         rows = self.con.execute(
             f"""
             WITH ranked AS (
-                SELECT theme_id, collection_id, status,
+                SELECT theme_id, collection_id, status, effective_from, effective_to,
                        row_number() OVER (PARTITION BY theme_id ORDER BY available_trade_date DESC, ingested_at DESC) as rn
                 FROM {THEME_TABLE}
-                WHERE available_trade_date <= ?
+                WHERE ingested_at < (CAST(? AS DATE) + INTERVAL 9 HOUR)::TIMESTAMP AT TIME ZONE 'Asia/Shanghai'
+                  AND available_trade_date <= ?
+                  AND available_trade_date <= ?
             )
-            SELECT theme_id, collection_id FROM ranked WHERE rn = 1 AND status = 'ACTIVE'
+            SELECT theme_id, collection_id FROM ranked
+            WHERE rn = 1
+              AND status = 'ACTIVE'
+              AND effective_from <= ?
+              AND (effective_to IS NULL OR effective_to > ?)
             ORDER BY theme_id ASC
             """,
-            [knowledge_date],
+            [trade_date, trade_date, kd, trade_date, trade_date],
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
@@ -266,23 +348,15 @@ class ThemePipelineService:
         t0 = datetime.now(timezone.utc)
         kd = knowledge_date or end_date
 
-        themes = self._fetch_all_canonical_themes(kd)
+        themes = self._fetch_all_canonical_themes(end_date, kd)
         if not themes:
             raise ThemePipelineError("NO_ACTIVE_THEMES", f"No active themes as of {kd}")
 
         theme_map = {coll_id: theme_id for theme_id, coll_id in themes}
         coll_ids = list(theme_map.keys())
 
-        # Determine calculation context start: must start at earliest theme inception to preserve compounding
-        if context_start_date is None:
-            min_date_row = self.con.execute(
-                f"SELECT MIN(effective_from) FROM {THEME_TABLE} WHERE available_trade_date <= ?",
-                [kd],
-            ).fetchone()
-            earliest_theme_date = min_date_row[0] if min_date_row and min_date_row[0] else start_date
-            calc_start = min(earliest_theme_date, start_date)
-        else:
-            calc_start = min(context_start_date, start_date)
+        # Determine calculation context start: continue forward from anchor unless context_start_date is explicitly given
+        calc_start = min(context_start_date, start_date) if context_start_date is not None else start_date
 
         calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, end_date)
         if not calc_trade_dates:
@@ -290,8 +364,10 @@ class ThemePipelineService:
                 "NO_TRADING_DATES", f"No open trading dates between {calc_start} and {end_date}"
             )
 
-        # 1. Fetch set-based memberships via batch Resolver across calculation range
-        raw_memberships = self.resolver.batch_resolve_members(coll_ids, calc_trade_dates, kd)
+        # 1. Fetch set-based memberships via batch Resolver (replay/PIT allows retroactive view as of kd)
+        raw_memberships = self.resolver.batch_resolve_members(
+            coll_ids, calc_trade_dates, kd, enforce_admission_cutoff=False
+        )
 
         # 2. Fetch facts across calculation context range
         listing_df = self._fetch_confirmed_listing_facts(calc_start, end_date)
@@ -302,19 +378,39 @@ class ThemePipelineService:
         if execution_control is not None and hasattr(execution_control, "checkpoint"):
             execution_control.checkpoint()
 
-        # Compute deterministic snapshot identity over facts and versions
+        # Compute deterministic snapshot identity over target range [start_date, end_date] facts and versions
+        target_dates_set = set(self._fetch_trading_calendar_dates(start_date, end_date))
+        if isinstance(raw_memberships, pd.DataFrame):
+            m_dates = pd.to_datetime(raw_memberships[TRADE_DATE]).dt.date
+            snap_memberships = raw_memberships[m_dates.isin(target_dates_set)] if not raw_memberships.empty else raw_memberships
+        else:
+            snap_memberships = [m for m in raw_memberships if getattr(m, TRADE_DATE) in target_dates_set] if raw_memberships else []
+
+        l_dates = pd.to_datetime(listing_df[TRADE_DATE]).dt.date if not listing_df.empty else pd.Series()
+        snap_listing = listing_df[l_dates.isin(target_dates_set)] if not listing_df.empty else listing_df
+
+        s_dates = pd.to_datetime(susp_df[TRADE_DATE]).dt.date if not susp_df.empty else pd.Series()
+        snap_susp = susp_df[s_dates.isin(target_dates_set)] if not susp_df.empty else susp_df
+
+        mkt_dates = pd.to_datetime(market_df[TRADE_DATE]).dt.date if not market_df.empty else pd.Series()
+        snap_market = market_df[mkt_dates.isin(target_dates_set)] if not market_df.empty else market_df
+
+        c_dates = pd.to_datetime(comp_boards_df[TRADE_DATE]).dt.date if not comp_boards_df.empty else pd.Series()
+        snap_comp = comp_boards_df[c_dates.isin(target_dates_set)] if not comp_boards_df.empty else comp_boards_df
+
         versions = {
             "calculation_version": THEME_M4_OBSERVATION_VERSION,
+            "effective_member_version": THEME_EFFECTIVE_MEMBER_VERSION,
             "rule_version": THEME_CUSTOM_INDEX_STATE_VERSION,
             "comparison_universe_version": COMPARISON_UNIVERSE_VERSION_V1,
         }
         snap_id = compute_deterministic_snapshot_id(
             themes=themes,
-            memberships=raw_memberships,
-            listing_df=listing_df,
-            susp_df=susp_df,
-            market_df=market_df,
-            comp_boards_df=comp_boards_df,
+            memberships=snap_memberships,
+            listing_df=snap_listing,
+            susp_df=snap_susp,
+            market_df=snap_market,
+            comp_boards_df=snap_comp,
             versions=versions,
         )
 
@@ -331,16 +427,53 @@ class ThemePipelineService:
                 execution_control.checkpoint()
 
             coll_eff = eff_members_df[eff_members_df[COLLECTION_ID] == coll_id]
-            idx_df = calculate_theme_equal_weight_index(coll_eff, market_df)
+            # Fetch anchor before calc_start from finalized ledger if available
+            anchor_row = self.con.execute(
+                f"""
+                SELECT index_level
+                FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
+                WHERE theme_id = ? AND trade_date < ?
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """,
+                [theme_id, calc_start],
+            ).fetchone()
+            prev_level = float(anchor_row[0]) if anchor_row and anchor_row[0] is not None else DEFAULT_BASE_LEVEL
+
+            idx_df = calculate_theme_equal_weight_index(
+                coll_eff, market_df, previous_cumulative_index_level=prev_level
+            )
             if idx_df.empty:
                 continue
 
             idx_df[THEME_ID] = theme_id
             index_daily_list.append(idx_df)
 
-            trend_res = calculate_theme_index_trend_and_episodes(idx_df, theme_id=theme_id)
+            prior_idx = self.con.execute(
+                f"""
+                SELECT trade_date, theme_daily_return, index_level, base_level,
+                       effective_member_count, total_member_count, theme_id
+                FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
+                WHERE theme_id = ? AND trade_date < ?
+                ORDER BY trade_date ASC
+                """,
+                [theme_id, calc_start],
+            ).df()
+            if not prior_idx.empty:
+                prior_idx[COLLECTION_ID] = coll_id
+                prior_idx[TRADE_DATE] = pd.to_datetime(prior_idx[TRADE_DATE]).dt.date
+                idx_df_copy = idx_df.copy()
+                idx_df_copy[TRADE_DATE] = pd.to_datetime(idx_df_copy[TRADE_DATE]).dt.date
+                combined_idx = pd.concat([prior_idx, idx_df_copy], ignore_index=True).drop_duplicates(subset=[TRADE_DATE], keep="last")
+            else:
+                combined_idx = idx_df
+
+            trend_res = calculate_theme_index_trend_and_episodes(combined_idx, theme_id=theme_id)
             states_df = trend_res.daily_states.copy()
             states_df[THEME_ID] = theme_id
+            target_dates_set = set(self._fetch_trading_calendar_dates(start_date, end_date))
+            s_dates = pd.to_datetime(states_df[TRADE_DATE]).dt.date
+            states_df = states_df[s_dates.isin(target_dates_set)].reset_index(drop=True)
             state_list.append(states_df)
 
             eps_df = trend_res.episodes.copy()
@@ -367,8 +500,11 @@ class ThemePipelineService:
         )
 
         if not m4_obs_df.empty and not all_states.empty:
+            m4_obs_df[TRADE_DATE] = pd.to_datetime(m4_obs_df[TRADE_DATE]).dt.date
+            all_states_copy = all_states.copy()
+            all_states_copy[TRADE_DATE] = pd.to_datetime(all_states_copy[TRADE_DATE]).dt.date
             m4_obs_df = m4_obs_df.merge(
-                all_states[[COLLECTION_ID, TRADE_DATE, TREND_STATE, CUSTOM_INDEX_TREND_RUN_DAYS, CUSTOM_INDEX_EPISODE_ID]],
+                all_states_copy[[COLLECTION_ID, TRADE_DATE, TREND_STATE, CUSTOM_INDEX_TREND_RUN_DAYS, CUSTOM_INDEX_EPISODE_ID]],
                 on=[COLLECTION_ID, TRADE_DATE],
                 how="left",
                 suffixes=("", "_st"),
@@ -436,6 +572,7 @@ class ThemePipelineService:
             m4_observations=sliced_m4_obs,
             execution_seconds=exec_sec,
             all_episodes=all_episodes,
+            effective_members=eff_members_df,
         )
 
     def replay_m4_facts(
@@ -463,101 +600,383 @@ class ThemePipelineService:
             execution_control=execution_control,
         )
 
-    def rebuild_m4_facts(
+    def _produce_single_day(
         self,
-        start_date: date,
-        end_date: date,
-        context_start_date: date | None = None,
+        trade_date: date,
         knowledge_date: date | None = None,
         production_run_id: str | None = None,
-        run_type: str = "REPLAY",
+        run_type: str = "DAILY",
         execution_control: Any | None = None,
+        write_run_record: bool = True,
     ) -> ThemeProductionReport:
-        """Range rebuild or daily production of Theme Custom Indices and M4 Observations.
+        """Produce canonical facts for a single legal trading date forward.
 
-        Materializing: Writes canonical facts across the full forward dependency closure horizon
-        [affected_output_start, affected_output_end].
+        Enforces:
+        1. Legal trading day check via trading_calendar in database (is_open = true).
+        2. Finalized history is immutable ledger: if already finalized, do not mutate.
+        3. Production sequence:
+           Theme Membership -> 09:00 Admission -> M4 Eligibility
+           -> theme_effective_member_daily (materialized with finalized_at)
+           -> Custom Index (only reading is_m4_effective_member = true from persisted table,
+              compounding forward from last finite finalized anchor)
+           -> State & Episode (continuing forward without restating closed episodes)
+           -> M4 Observation
+           -> theme_production_run
         """
         t0 = datetime.now(timezone.utc)
-        kd = knowledge_date or end_date
+        kd = knowledge_date or trade_date
         run_id = production_run_id or f"RUN:THEME_M4:{uuid.uuid4().hex[:12].upper()}"
 
-        themes = self._fetch_all_canonical_themes(kd)
+        # 1. Enforce legal trading day from trading_calendar
+        if not self._is_open_trading_day(trade_date):
+            raise ThemePipelineError(
+                "NOT_LEGAL_TRADING_DAY",
+                f"Date {trade_date} is not an open trading day in trading_calendar",
+            )
+
+        themes = self._fetch_all_canonical_themes(trade_date, kd)
         if not themes:
             raise ThemePipelineError("NO_ACTIVE_THEMES", f"No active themes as of {kd}")
 
-        # Determine current materialized horizon for affected themes to enforce forward dependency closure
-        theme_ids = [t[0] for t in themes]
-        placeholders = ",".join(["?"] * len(theme_ids))
-        max_row = self.con.execute(
-            f"SELECT MAX(trade_date) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id IN ({placeholders})",
-            theme_ids,
-        ).fetchone()
-        current_materialized = max_row[0] if max_row and max_row[0] else None
+        theme_map = {coll_id: theme_id for theme_id, coll_id in themes}
+        coll_ids = list(theme_map.keys())
 
-        affected_output_start = start_date
-        if current_materialized and current_materialized > end_date:
-            affected_output_end = current_materialized
-        else:
-            affected_output_end = end_date
+        # 2. Check if already finalized (Ledger Immutability per theme)
+        all_theme_ids = {t[0] for t in themes}
+        finalized_theme_ids = self._get_finalized_theme_ids(trade_date)
 
-        # Calculate facts covering the entire affected forward closure horizon
-        facts = self.calculate_m4_facts(
-            start_date=affected_output_start,
-            end_date=affected_output_end,
-            knowledge_date=kd,
-            context_start_date=context_start_date,
-            execution_control=execution_control,
+        if all_theme_ids.issubset(finalized_theme_ids):
+            # Ledger is immutable. Return existing report without mutation.
+            obs_info = self.con.execute(
+                f"""
+                SELECT production_run_id, input_snapshot_id
+                FROM {THEME_M4_OBSERVATION_TABLE}
+                WHERE trade_date = ?
+                LIMIT 1
+                """,
+                [trade_date],
+            ).fetchone()
+            run_id_final = obs_info[0] if obs_info else run_id
+            snap_id_final = obs_info[1] if obs_info and obs_info[1] else ""
+            idx_cnt_val = self.con.execute(
+                f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?",
+                [trade_date],
+            ).fetchone()[0]
+            obs_cnt_val = self.con.execute(
+                f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?",
+                [trade_date],
+            ).fetchone()[0]
+            st_cnt_val = self.con.execute(
+                f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?",
+                [trade_date],
+            ).fetchone()[0]
+            return ThemeProductionReport(
+                production_run_id=run_id_final,
+                input_snapshot_id=snap_id_final,
+                theme_count=len(themes),
+                trade_date_count=1,
+                start_date=trade_date,
+                end_date=trade_date,
+                total_index_rows=idx_cnt_val,
+                total_observation_rows=obs_cnt_val,
+                total_episodes=0,
+                execution_seconds=0.0,
+                total_state_rows=st_cnt_val,
+            )
+
+        pending_themes = [t for t in themes if t[0] not in finalized_theme_ids]
+        pending_theme_map = {coll_id: theme_id for theme_id, coll_id in pending_themes}
+        pending_coll_ids = list(pending_theme_map.keys())
+
+        now = datetime.now(timezone.utc)
+
+        # 3. Pre-calculate member eligibility, market facts and comparison universe
+        raw_memberships = self.resolver.batch_resolve_members(
+            pending_coll_ids, [trade_date], kd, enforce_admission_cutoff=True
+        )
+        listing_df = self._fetch_confirmed_listing_facts(trade_date, trade_date)
+        susp_df = self._fetch_suspension_facts(trade_date, trade_date)
+        eff_members_df = calculate_m4_effective_members(raw_memberships, listing_df, susp_df)
+        if THEME_ID not in eff_members_df.columns:
+            eff_members_df[THEME_ID] = eff_members_df[COLLECTION_ID].map(pending_theme_map)
+
+        market_df = self._fetch_market_snapshot(trade_date, trade_date)
+        comp_boards_df = self._fetch_comparison_boards(trade_date, trade_date)
+
+        versions = {
+            "calculation_version": THEME_M4_OBSERVATION_VERSION,
+            "effective_member_version": THEME_EFFECTIVE_MEMBER_VERSION,
+            "rule_version": THEME_CUSTOM_INDEX_STATE_VERSION,
+            "comparison_universe_version": COMPARISON_UNIVERSE_VERSION_V1,
+        }
+        snap_id = compute_deterministic_snapshot_id(
+            themes=pending_themes,
+            memberships=raw_memberships,
+            listing_df=listing_df,
+            susp_df=susp_df,
+            market_df=market_df,
+            comp_boards_df=comp_boards_df,
+            versions=versions,
         )
 
-        written_index_daily = facts.daily_indices
-        written_states = facts.daily_states
-        written_m4_obs = facts.m4_observations
-        snap_id = facts.input_snapshot_id
+        # 4. Pre-calculate custom index daily for all pending themes
+        # Include already finalized themes on trade_date to form complete comparison universe
+        finalized_indices_df = self.con.execute(
+            f"""
+            SELECT theme_id, collection_id, trade_date, theme_daily_return, index_level,
+                   base_level, effective_member_count, total_member_count
+            FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
+            WHERE trade_date = ?
+            """,
+            [trade_date],
+        ).df()
 
-        # 7. Single ACID Transaction Persistence with Scope Control
-        now = datetime.now(timezone.utc)
-        written_episodes = []
-        try:
-            self.con.execute("BEGIN TRANSACTION")
-
-            # Replace daily tables for affected range [affected_output_start, affected_output_end]
-            self.con.execute(
-                f"DELETE FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                [affected_output_start, affected_output_end],
-            )
-            self.con.execute(
-                f"DELETE FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                [affected_output_start, affected_output_end],
-            )
-            self.con.execute(
-                f"DELETE FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date BETWEEN ? AND ?",
-                [affected_output_start, affected_output_end],
-            )
-
-            # For episodes: delete open episodes or episodes touching/after affected_output_start
-            self.con.execute(
+        pending_index_list = []
+        for theme_id, coll_id in pending_themes:
+            # Query last finite finalized cumulative level anchor before trade_date
+            anchor_row = self.con.execute(
                 f"""
-                DELETE FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE}
-                WHERE theme_id IN ({placeholders})
-                  AND (
-                      episode_end_date IS NULL
-                      OR episode_end_date >= ?
-                      OR episode_start_date >= ?
-                  )
+                SELECT index_level FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
+                WHERE theme_id = ? AND trade_date < ? AND index_level IS NOT NULL
+                ORDER BY trade_date DESC LIMIT 1
                 """,
-                [*theme_ids, affected_output_start, affected_output_start],
-            )
+                [theme_id, trade_date],
+            ).fetchone()
+            prev_level = anchor_row[0] if (anchor_row and anchor_row[0] is not None) else DEFAULT_BASE_LEVEL
 
-            if not facts.all_episodes.empty:
-                for r in facts.all_episodes.itertuples(index=False):
-                    th_id = getattr(r, THEME_ID)
-                    if th_id not in theme_ids:
-                        continue
-                    st = _to_date(getattr(r, "episode_start_date"))
-                    ed_val = getattr(r, "episode_end_date")
-                    ed = _to_date(ed_val) if (ed_val is not None and pd.notna(ed_val)) else None
-                    if ed is None or ed >= affected_output_start or st >= affected_output_start:
+            theme_eff = eff_members_df[
+                (eff_members_df[COLLECTION_ID] == coll_id) & (eff_members_df[IS_M4_EFFECTIVE_MEMBER] == True)
+            ]
+            total_theme_members = len(eff_members_df[eff_members_df[COLLECTION_ID] == coll_id]) if not eff_members_df.empty else 0
+
+            if theme_eff.empty:
+                idx_df = pd.DataFrame([
+                    {
+                        COLLECTION_ID: coll_id,
+                        THEME_ID: theme_id,
+                        TRADE_DATE: trade_date,
+                        THEME_DAILY_RETURN: np.nan,
+                        INDEX_LEVEL: np.nan,
+                        BASE_LEVEL: DEFAULT_BASE_LEVEL,
+                        EFFECTIVE_MEMBER_COUNT: 0,
+                        TOTAL_MEMBER_COUNT: total_theme_members,
+                    }
+                ])
+            else:
+                idx_df = calculate_theme_equal_weight_index(
+                    theme_eff, market_df, previous_cumulative_index_level=prev_level
+                )
+                idx_df[THEME_ID] = theme_id
+                idx_df[TOTAL_MEMBER_COUNT] = total_theme_members
+
+            pending_index_list.append(idx_df)
+
+        pending_indices_df = pd.concat(pending_index_list, ignore_index=True) if pending_index_list else pd.DataFrame()
+        all_day_indices_df = (
+            pd.concat([finalized_indices_df, pending_indices_df], ignore_index=True)
+            if not finalized_indices_df.empty
+            else pending_indices_df
+        )
+
+        # 5. Pre-calculate M4 Observation on the complete comparison universe
+        m4_obs_full_df = calculate_m4_raw_observations(
+            all_day_indices_df,
+            eff_members_df,
+            market_df,
+            comp_boards_df,
+            comparison_universe_version=COMPARISON_UNIVERSE_VERSION_V1,
+        )
+
+        # 6. Materialize each Theme-D within an ATOMIC TRANSACTION per Theme-D
+        written_episodes = []
+        for theme_id, coll_id in pending_themes:
+            self.con.execute("BEGIN TRANSACTION")
+            try:
+                # Ensure clean slate for this pending unfinalized theme before materializing facts
+                self.con.execute(
+                    f"DELETE FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} WHERE collection_id = ? AND trade_date = ?",
+                    [coll_id, trade_date],
+                )
+                self.con.execute(
+                    f"DELETE FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
+                    [theme_id, trade_date],
+                )
+                self.con.execute(
+                    f"DELETE FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE theme_id = ? AND trade_date = ?",
+                    [theme_id, trade_date],
+                )
+                self.con.execute(
+                    f"DELETE FROM {THEME_M4_OBSERVATION_TABLE} WHERE theme_id = ? AND trade_date = ?",
+                    [theme_id, trade_date],
+                )
+
+                # 6.1 Step 1: Materialize theme_effective_member_daily
+                theme_eff_rows = eff_members_df[eff_members_df[COLLECTION_ID] == coll_id]
+                for r in theme_eff_rows.itertuples(index=False):
+                    self.con.execute(
+                        f"""
+                        INSERT INTO {THEME_EFFECTIVE_MEMBER_DAILY_TABLE} (
+                            collection_id, theme_id, asset_id, trade_date,
+                            is_theme_member, confirmed_listing_trading_day_count,
+                            is_suspended, is_m4_effective_member, exclusion_reason,
+                            calculation_version, input_snapshot_id, production_run_id,
+                            created_at, finalized_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            getattr(r, COLLECTION_ID),
+                            getattr(r, THEME_ID),
+                            getattr(r, ASSET_ID),
+                            trade_date,
+                            bool(getattr(r, "is_theme_member")),
+                            int(getattr(r, CONFIRMED_LISTING_TRADING_DAY_COUNT)) if pd.notna(getattr(r, CONFIRMED_LISTING_TRADING_DAY_COUNT)) else None,
+                            bool(getattr(r, IS_SUSPENDED)),
+                            bool(getattr(r, IS_M4_EFFECTIVE_MEMBER)),
+                            getattr(r, EXCLUSION_REASON) if pd.notna(getattr(r, EXCLUSION_REASON)) else None,
+                            THEME_EFFECTIVE_MEMBER_VERSION,
+                            snap_id,
+                            run_id,
+                            now,
+                            now,
+                        ],
+                    )
+
+                # 6.2 Step 2: Materialize theme_custom_index_daily
+                matching_idx = pending_indices_df[pending_indices_df[THEME_ID] == theme_id]
+                row_idx = matching_idx.iloc[0]
+                today_close = (
+                    float(row_idx[INDEX_LEVEL])
+                    if (pd.notna(row_idx[INDEX_LEVEL]) and np.isfinite(row_idx[INDEX_LEVEL]))
+                    else None
+                )
+
+                self.con.execute(
+                    f"""
+                    INSERT INTO {THEME_CUSTOM_INDEX_DAILY_TABLE} (
+                        theme_id, collection_id, trade_date, theme_daily_return,
+                        index_level, base_level, effective_member_count, total_member_count,
+                        calculation_version, production_run_id, input_snapshot_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        theme_id,
+                        coll_id,
+                        trade_date,
+                        row_idx[THEME_DAILY_RETURN] if pd.notna(row_idx[THEME_DAILY_RETURN]) else None,
+                        today_close,
+                        row_idx[BASE_LEVEL],
+                        int(row_idx[EFFECTIVE_MEMBER_COUNT]),
+                        int(row_idx[TOTAL_MEMBER_COUNT]),
+                        THEME_CUSTOM_INDEX_VERSION,
+                        run_id,
+                        snap_id,
+                        now,
+                    ],
+                )
+
+                # 6.3 Step 3: State & Episode forward continuation with CONTIGUOUS price suffix
+                prev_state_row = self.con.execute(
+                    f"""
+                    SELECT
+                        theme_id, collection_id, trade_date, close, ma5, ma10,
+                        trend_state, previous_trend_state, custom_index_trend_run_days,
+                        is_above_or_equal_ma5, state_changed
+                    FROM {THEME_CUSTOM_INDEX_STATE_TABLE}
+                    WHERE theme_id = ? AND trade_date < ?
+                    ORDER BY trade_date DESC LIMIT 1
+                    """,
+                    [theme_id, trade_date],
+                ).fetchone()
+
+                open_ep_row = self.con.execute(
+                    f"""
+                    SELECT
+                        episode_id, theme_id, collection_id, episode_no,
+                        episode_start_date, episode_confirmed_date, episode_end_date,
+                        ma5_reentry_count, episode_return
+                    FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE}
+                    WHERE theme_id = ? AND episode_end_date IS NULL
+                    LIMIT 1
+                    """,
+                    [theme_id],
+                ).fetchone()
+
+                # Contiguous price suffix: preserve NULL rows and break on first NULL/non-finite going backward
+                prior_close_rows = self.con.execute(
+                    f"""
+                    SELECT index_level FROM {THEME_CUSTOM_INDEX_DAILY_TABLE}
+                    WHERE theme_id = ? AND trade_date < ?
+                    ORDER BY trade_date DESC LIMIT 9
+                    """,
+                    [theme_id, trade_date],
+                ).fetchall()
+                contiguous_prior_closes = []
+                for r_lvl in prior_close_rows:
+                    val = r_lvl[0]
+                    if val is None or (isinstance(val, float) and (np.isnan(val) or not np.isfinite(val))):
+                        break
+                    contiguous_prior_closes.append(float(val))
+                prior_closes = list(reversed(contiguous_prior_closes))
+
+                if today_close is not None and np.isfinite(today_close):
+                    window = prior_closes + [today_close]
+                    ma5_val = float(np.mean(window[-5:])) if len(window) >= 5 else None
+                    ma10_val = float(np.mean(window[-10:])) if len(window) >= 10 else None
+                else:
+                    ma5_val = None
+                    ma10_val = None
+
+                # State Machine Derivation strictly aligned with System B rules
+                if today_close is None or ma5_val is None:
+                    curr_state = None
+                    is_above = None
+                    state_changed = False
+                    run_days = 0
+                else:
+                    is_above = bool(today_close >= ma5_val)
+                    prev_ma5_complete = bool(
+                        prev_state_row and prev_state_row[4] is not None and not np.isnan(prev_state_row[4])
+                    )
+                    prev_is_above = (
+                        bool(prev_state_row[9]) if (prev_state_row and prev_state_row[9] is not None) else False
+                    )
+
+                    if not is_above:
+                        curr_state = "BASE"
+                    elif prev_ma5_complete:
+                        curr_state = "ACTIVE" if prev_is_above else "CANDIDATE"
+                    else:
+                        curr_state = None
+
+                    prev_state_name = prev_state_row[6] if prev_state_row else None
+                    prev_run_days = int(prev_state_row[8]) if prev_state_row else 0
+
+                    if curr_state is None:
+                        state_changed = False
+                        run_days = 0
+                    elif prev_state_name is None or curr_state != prev_state_name:
+                        state_changed = True
+                        run_days = 1
+                    else:
+                        state_changed = False
+                        run_days = prev_run_days + 1
+
+                # 6.4 Step 4: Episode continuation / creation / termination
+                candidate_to_active = bool(
+                    prev_state_row and prev_state_row[6] == "CANDIDATE" and curr_state == "ACTIVE"
+                )
+                assigned_ep_id = None
+
+                if open_ep_row is None:
+                    if candidate_to_active:
+                        max_ep_no_row = self.con.execute(
+                            f"SELECT COALESCE(MAX(episode_no), 0) FROM {THEME_CUSTOM_INDEX_EPISODE_TABLE} WHERE theme_id = ?",
+                            [theme_id],
+                        ).fetchone()
+                        ep_no = (max_ep_no_row[0] if max_ep_no_row else 0) + 1
+                        assigned_ep_id = f"{theme_id}_EP_{ep_no:04d}"
+                        start_date_ep = prev_state_row[2]
+
                         self.con.execute(
                             f"""
                             INSERT INTO {THEME_CUSTOM_INDEX_EPISODE_TABLE} (
@@ -568,84 +987,86 @@ class ThemePipelineService:
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             [
-                                getattr(r, "episode_id"),
-                                th_id,
-                                getattr(r, COLLECTION_ID),
-                                getattr(r, "episode_no"),
-                                getattr(r, "episode_start_date"),
-                                getattr(r, "episode_confirmed_date"),
-                                getattr(r, "episode_end_date") if pd.notna(getattr(r, "episode_end_date")) else None,
-                                getattr(r, "ma5_reentry_count"),
-                                getattr(r, "episode_return") if pd.notna(getattr(r, "episode_return")) else None,
-                                THEME_CUSTOM_INDEX_EPISODE_VERSION,
-                                run_id,
-                                snap_id,
-                                now,
+                                assigned_ep_id, theme_id, coll_id, ep_no,
+                                start_date_ep, trade_date, None,
+                                0, 0.0, THEME_CUSTOM_INDEX_EPISODE_VERSION,
+                                run_id, snap_id, now,
                             ],
                         )
-                        written_episodes.append(r)
+                        # Back-assign episode_id to start_date observation if exists
+                        self.con.execute(
+                            f"""
+                            UPDATE {THEME_M4_OBSERVATION_TABLE}
+                            SET custom_index_episode_id = ?
+                            WHERE theme_id = ? AND trade_date = ?
+                            """,
+                            [assigned_ep_id, theme_id, start_date_ep],
+                        )
+                        written_episodes.append(assigned_ep_id)
+                else:
+                    assigned_ep_id = open_ep_row[0]
+                    reentries = int(open_ep_row[7])
+                    if candidate_to_active:
+                        reentries += 1
+                        self.con.execute(
+                            f"UPDATE {THEME_CUSTOM_INDEX_EPISODE_TABLE} SET ma5_reentry_count = ? WHERE episode_id = ?",
+                            [reentries, assigned_ep_id],
+                        )
 
-            # Insert Daily Indices for sliced output
-            if not written_index_daily.empty:
-                for r in written_index_daily.itertuples(index=False):
-                    self.con.execute(
-                        f"""
-                        INSERT INTO {THEME_CUSTOM_INDEX_DAILY_TABLE} (
-                            theme_id, collection_id, trade_date, theme_daily_return,
-                            index_level, base_level, effective_member_count, total_member_count,
-                            calculation_version, production_run_id, input_snapshot_id, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            getattr(r, THEME_ID),
-                            getattr(r, COLLECTION_ID),
-                            getattr(r, TRADE_DATE),
-                            getattr(r, THEME_DAILY_RETURN) if pd.notna(getattr(r, THEME_DAILY_RETURN)) else None,
-                            getattr(r, INDEX_LEVEL) if pd.notna(getattr(r, INDEX_LEVEL)) else None,
-                            getattr(r, BASE_LEVEL),
-                            getattr(r, EFFECTIVE_MEMBER_COUNT),
-                            getattr(r, TOTAL_MEMBER_COUNT),
-                            THEME_CUSTOM_INDEX_VERSION,
-                            run_id,
-                            snap_id,
-                            now,
-                        ],
+                    # Episode termination check
+                    prev_below_ma10 = bool(
+                        prev_state_row and prev_state_row[5] is not None
+                        and not np.isnan(prev_state_row[5])
+                        and prev_state_row[3] is not None
+                        and prev_state_row[3] < prev_state_row[5]
                     )
-
-            # Insert States for sliced output
-            if not written_states.empty:
-                for r in written_states.itertuples(index=False):
-                    self.con.execute(
-                        f"""
-                        INSERT INTO {THEME_CUSTOM_INDEX_STATE_TABLE} (
-                            theme_id, collection_id, trade_date, close, ma5, ma10,
-                            trend_state, previous_trend_state, custom_index_trend_run_days,
-                            is_above_or_equal_ma5, state_changed, rule_version,
-                            production_run_id, input_snapshot_id, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            getattr(r, THEME_ID),
-                            getattr(r, COLLECTION_ID),
-                            getattr(r, TRADE_DATE),
-                            getattr(r, CLOSE) if pd.notna(getattr(r, CLOSE)) else None,
-                            getattr(r, MA5) if pd.notna(getattr(r, MA5)) else None,
-                            getattr(r, MA10) if pd.notna(getattr(r, MA10)) else None,
-                            getattr(r, TREND_STATE) if pd.notna(getattr(r, TREND_STATE)) else None,
-                            getattr(r, PREVIOUS_TREND_STATE) if pd.notna(getattr(r, PREVIOUS_TREND_STATE)) else None,
-                            getattr(r, CUSTOM_INDEX_TREND_RUN_DAYS),
-                            getattr(r, "is_above_or_equal_ma5") if pd.notna(getattr(r, "is_above_or_equal_ma5")) else None,
-                            getattr(r, "state_changed") if pd.notna(getattr(r, "state_changed")) else None,
-                            THEME_CUSTOM_INDEX_STATE_VERSION,
-                            run_id,
-                            snap_id,
-                            now,
-                        ],
+                    is_end = bool(
+                        curr_state != "ACTIVE"
+                        and prev_below_ma10
+                        and ma10_val is not None
+                        and today_close is not None
+                        and today_close < ma10_val
                     )
+                    if is_end:
+                        start_dt = open_ep_row[4]
+                        sp_row = self.con.execute(
+                            f"SELECT index_level FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE theme_id = ? AND trade_date = ?",
+                            [theme_id, start_dt],
+                        ).fetchone()
+                        sp = float(sp_row[0]) if (sp_row and sp_row[0] is not None) else float(today_close)
+                        ep_ret = float((today_close / sp) - 1.0) if sp > 0 else 0.0
+                        self.con.execute(
+                            f"""
+                            UPDATE {THEME_CUSTOM_INDEX_EPISODE_TABLE}
+                            SET episode_end_date = ?, episode_return = ?
+                            WHERE episode_id = ?
+                            """,
+                            [trade_date, ep_ret, assigned_ep_id],
+                        )
 
-            # Insert M4 Observations for sliced output
-            if not written_m4_obs.empty:
-                for r in written_m4_obs.itertuples(index=False):
+                # Persist State for trade_date
+                self.con.execute(
+                    f"""
+                    INSERT INTO {THEME_CUSTOM_INDEX_STATE_TABLE} (
+                        theme_id, collection_id, trade_date, close, ma5, ma10,
+                        trend_state, previous_trend_state, custom_index_trend_run_days,
+                        is_above_or_equal_ma5, state_changed, rule_version,
+                        production_run_id, input_snapshot_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        theme_id, coll_id, trade_date,
+                        today_close, ma5_val, ma10_val,
+                        curr_state, prev_state_row[6] if prev_state_row else None, run_days,
+                        is_above, state_changed,
+                        THEME_CUSTOM_INDEX_STATE_VERSION, run_id, snap_id, now,
+                    ],
+                )
+
+                # 6.5 Step 5: Materialize theme_m4_observation
+                obs_row_match = m4_obs_full_df[m4_obs_full_df[COLLECTION_ID] == coll_id]
+                if not obs_row_match.empty:
+                    r_obs = obs_row_match.iloc[0]
                     self.con.execute(
                         f"""
                         INSERT INTO {THEME_M4_OBSERVATION_TABLE} (
@@ -657,20 +1078,20 @@ class ThemePipelineService:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
-                            getattr(r, THEME_ID),
-                            getattr(r, COLLECTION_ID),
-                            getattr(r, TRADE_DATE),
-                            getattr(r, THEME_DAILY_RETURN) if pd.notna(getattr(r, THEME_DAILY_RETURN)) else None,
-                            int(getattr(r, THEME_LIMIT_UP_COUNT)) if pd.notna(getattr(r, THEME_LIMIT_UP_COUNT)) else None,
-                            int(getattr(r, THEME_RETURN_RANK)) if pd.notna(getattr(r, THEME_RETURN_RANK)) else None,
-                            getattr(r, EFFECTIVE_MEMBER_COUNT),
-                            getattr(r, TOTAL_MEMBER_COUNT),
-                            getattr(r, COMPARISON_UNIVERSE_SIZE),
-                            getattr(r, COMPARISON_UNIVERSE_VERSION),
-                            getattr(r, CUSTOM_INDEX_TREND_STATE) if pd.notna(getattr(r, CUSTOM_INDEX_TREND_STATE)) else None,
-                            getattr(r, CUSTOM_INDEX_TREND_RUN_DAYS) if pd.notna(getattr(r, CUSTOM_INDEX_TREND_RUN_DAYS)) else None,
-                            getattr(r, CUSTOM_INDEX_EPISODE_ID) if pd.notna(getattr(r, CUSTOM_INDEX_EPISODE_ID)) else None,
-                            getattr(r, QUALIFICATION_STATUS),
+                            theme_id,
+                            coll_id,
+                            trade_date,
+                            getattr(r_obs, THEME_DAILY_RETURN, None) if pd.notna(getattr(r_obs, THEME_DAILY_RETURN, None)) else None,
+                            int(getattr(r_obs, THEME_LIMIT_UP_COUNT, None)) if pd.notna(getattr(r_obs, THEME_LIMIT_UP_COUNT, None)) else None,
+                            int(getattr(r_obs, THEME_RETURN_RANK, None)) if pd.notna(getattr(r_obs, THEME_RETURN_RANK, None)) else None,
+                            int(getattr(r_obs, EFFECTIVE_MEMBER_COUNT, 0)),
+                            int(getattr(r_obs, TOTAL_MEMBER_COUNT, 0)),
+                            int(getattr(r_obs, COMPARISON_UNIVERSE_SIZE, 0)),
+                            getattr(r_obs, COMPARISON_UNIVERSE_VERSION, COMPARISON_UNIVERSE_VERSION_V1),
+                            curr_state,
+                            int(run_days) if run_days is not None else None,
+                            assigned_ep_id,
+                            getattr(r_obs, QUALIFICATION_STATUS, QUALIFICATION_STATUS_NOT_CONFIGURED),
                             THEME_M4_OBSERVATION_VERSION,
                             run_id,
                             snap_id,
@@ -678,7 +1099,32 @@ class ThemePipelineService:
                         ],
                     )
 
-            # Persist production run record
+                self.con.execute("COMMIT")
+            except Exception as exc:
+                try:
+                    self.con.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise ThemePipelineError(
+                    "THEME_PRODUCTION_TRANSACTION_FAILED",
+                    f"Transaction failed for theme {theme_id} on {trade_date}: {exc}",
+                ) from exc
+
+        # 7. Persist production run record once all pending themes committed
+        total_idx_rows = self.con.execute(
+            f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_DAILY_TABLE} WHERE trade_date = ?",
+            [trade_date],
+        ).fetchone()[0]
+        total_obs_rows = self.con.execute(
+            f"SELECT COUNT(*) FROM {THEME_M4_OBSERVATION_TABLE} WHERE trade_date = ?",
+            [trade_date],
+        ).fetchone()[0]
+        total_st_rows = self.con.execute(
+            f"SELECT COUNT(*) FROM {THEME_CUSTOM_INDEX_STATE_TABLE} WHERE trade_date = ?",
+            [trade_date],
+        ).fetchone()[0]
+
+        if write_run_record:
             self.con.execute(
                 f"""
                 INSERT INTO {THEME_PRODUCTION_RUN_TABLE} (
@@ -692,49 +1138,126 @@ class ThemePipelineService:
                     run_id,
                     run_type,
                     "SUCCEEDED",
-                    affected_output_start,
-                    affected_output_end,
+                    trade_date,
+                    trade_date,
                     kd,
                     THEME_M4_OBSERVATION_VERSION,
                     THEME_CUSTOM_INDEX_STATE_VERSION,
                     COMPARISON_UNIVERSE_VERSION_V1,
                     snap_id,
                     len(themes),
-                    len(written_index_daily),
-                    len(written_m4_obs),
+                    total_idx_rows,
+                    total_obs_rows,
                     None,
                     None,
                     t0,
                     now,
                 ],
             )
-
-            self.con.execute("COMMIT")
-        except Exception as exc:
-            try:
-                self.con.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise ThemePipelineError("PRODUCTION_TRANSACTION_FAILED", str(exc)) from exc
-
         exec_sec = (datetime.now(timezone.utc) - t0).total_seconds()
-        trade_dates_written = (
-            written_m4_obs[TRADE_DATE].unique()
-            if not written_m4_obs.empty
-            else (written_index_daily[TRADE_DATE].unique() if not written_index_daily.empty else [])
-        )
         return ThemeProductionReport(
             production_run_id=run_id,
             input_snapshot_id=snap_id,
             theme_count=len(themes),
-            trade_date_count=len(trade_dates_written),
-            start_date=affected_output_start,
-            end_date=affected_output_end,
-            total_index_rows=len(written_index_daily),
-            total_observation_rows=len(written_m4_obs),
+            trade_date_count=1,
+            start_date=trade_date,
+            end_date=trade_date,
+            total_index_rows=total_idx_rows,
+            total_observation_rows=total_obs_rows,
             total_episodes=len(written_episodes),
             execution_seconds=exec_sec,
-            total_state_rows=len(written_states),
+            total_state_rows=total_st_rows,
+        )
+
+    def rebuild_m4_facts(
+        self,
+        start_date: date,
+        end_date: date,
+        context_start_date: date | None = None,
+        knowledge_date: date | None = None,
+        production_run_id: str | None = None,
+        run_type: str = "REPLAY",
+        execution_control: Any | None = None,
+    ) -> ThemeProductionReport:
+        """Sequential production of Theme Custom Indices and M4 Observations across a date range.
+
+        Advances one open trading day at a time, strictly following the ledger invariant.
+        Past finalized trading days are NEVER overwritten or restated.
+        """
+        t0 = datetime.now(timezone.utc)
+        kd = knowledge_date or end_date
+        batch_run_id = production_run_id or f"RUN:THEME_M4:{uuid.uuid4().hex[:12].upper()}"
+        open_dates = self._fetch_trading_calendar_dates(start_date, end_date)
+        if not open_dates:
+            raise ThemePipelineError(
+                "NO_TRADING_DATES",
+                f"No open trading dates between {start_date} and {end_date}",
+            )
+
+        reports = []
+        for d in open_dates:
+            if execution_control is not None and hasattr(execution_control, "checkpoint"):
+                execution_control.checkpoint()
+            rep = self._produce_single_day(
+                trade_date=d,
+                knowledge_date=kd,
+                production_run_id=batch_run_id,
+                run_type=run_type,
+                execution_control=execution_control,
+                write_run_record=False,
+            )
+            reports.append(rep)
+
+        last_rep = reports[-1]
+        any_produced = any(r.execution_seconds > 0.0 for r in reports)
+        exists = self.con.execute(
+            f"SELECT COUNT(*) FROM {THEME_PRODUCTION_RUN_TABLE} WHERE production_run_id = ?",
+            [batch_run_id],
+        ).fetchone()[0] > 0
+        if any_produced and not exists:
+            self.con.execute(
+                f"""
+                INSERT INTO {THEME_PRODUCTION_RUN_TABLE} (
+                    production_run_id, run_type, status, target_start_date, target_end_date,
+                    knowledge_date, calculation_version, rule_version, comparison_universe_version,
+                    input_snapshot_id, theme_count, total_index_rows, total_observation_rows,
+                    error_code, error_detail, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    batch_run_id,
+                    run_type,
+                    "SUCCEEDED",
+                    start_date,
+                    end_date,
+                    kd,
+                    THEME_M4_OBSERVATION_VERSION,
+                    THEME_CUSTOM_INDEX_STATE_VERSION,
+                    COMPARISON_UNIVERSE_VERSION_V1,
+                    last_rep.input_snapshot_id,
+                    last_rep.theme_count,
+                    sum(r.total_index_rows for r in reports),
+                    sum(r.total_observation_rows for r in reports),
+                    None,
+                    None,
+                    t0,
+                    datetime.now(timezone.utc),
+                ],
+            )
+
+        exec_sec = (datetime.now(timezone.utc) - t0).total_seconds()
+        return ThemeProductionReport(
+            production_run_id=batch_run_id,
+            input_snapshot_id=last_rep.input_snapshot_id,
+            theme_count=last_rep.theme_count,
+            trade_date_count=len(open_dates),
+            start_date=start_date,
+            end_date=end_date,
+            total_index_rows=sum(r.total_index_rows for r in reports),
+            total_observation_rows=sum(r.total_observation_rows for r in reports),
+            total_episodes=sum(r.total_episodes for r in reports),
+            execution_seconds=exec_sec,
+            total_state_rows=sum(r.total_state_rows for r in reports),
         )
 
     def run_m4_daily(
@@ -744,11 +1267,10 @@ class ThemePipelineService:
         production_run_id: str | None = None,
         execution_control: Any | None = None,
     ) -> ThemeProductionReport:
-        """Daily production (Option A: target-date physical replacement with historical calculation context)."""
-        return self.rebuild_m4_facts(
-            start_date=trade_date,
-            end_date=trade_date,
-            knowledge_date=knowledge_date or trade_date,
+        """Daily production for a single legal trading date."""
+        return self._produce_single_day(
+            trade_date=trade_date,
+            knowledge_date=knowledge_date,
             production_run_id=production_run_id,
             run_type="DAILY",
             execution_control=execution_control,

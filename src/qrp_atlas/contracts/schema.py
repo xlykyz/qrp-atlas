@@ -77,7 +77,7 @@ from .fields import (
     DV_RATIO, DV_TTM,
     FLOAT_SHARE, FREE_SHARE,
     TOTAL_MV, CIRC_MV, FLOAT_MV, LIMIT_STATUS,
-    SUSPEND_TIMING, SUSPEND_TYPE,
+    SUSPEND_TIMING, SUSPEND_TYPE, IS_SUSPENDED,
     TRADE_MARKET, REASON, PERIOD,
     INTERACTION_PID, COMPANY_CODE, COMPANY_SHORTNAME,
     QUESTION_CONTENT, REPLY_CONTENT, QUESTION_TIME, REPLY_TIME,
@@ -149,6 +149,7 @@ from .fields import (
     LAST_PARENT_NET,
     SUMMARY,
     CHANGE_REASON,
+    FINALIZED_AT,
 )
 from .system_b import (
     ACTUAL_PAIR_CONTIGUOUS,
@@ -229,13 +230,18 @@ from .m4 import (
     CUSTOM_INDEX_TREND_STATE,
     CUSTOM_INDEX_TREND_RUN_DAYS,
     CUSTOM_INDEX_EPISODE_ID,
+    THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
     THEME_CUSTOM_INDEX_DAILY_TABLE,
     THEME_CUSTOM_INDEX_STATE_TABLE,
     THEME_CUSTOM_INDEX_EPISODE_TABLE,
     THEME_M4_OBSERVATION_TABLE,
     THEME_PRODUCTION_RUN_TABLE,
     KNOWLEDGE_DATE,
+    IS_THEME_MEMBER,
+    IS_M4_EFFECTIVE_MEMBER,
+    EXCLUSION_REASON,
 )
+
 
 
 @dataclass(frozen=True)
@@ -965,7 +971,7 @@ _PIT_META_COLUMNS = (
     ColumnSpec(SOURCE, "VARCHAR", nullable=False),
     ColumnSpec(SOURCE_RECORD_ID, "VARCHAR", nullable=False),
     ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
-    ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+    ColumnSpec(INGESTED_AT, "TIMESTAMP WITH TIME ZONE", nullable=False),
 )
 
 INCOME_STATEMENT = TableSchema(
@@ -1167,7 +1173,7 @@ STOCK_COLLECTION = TableSchema(
         ColumnSpec(SOURCE, "VARCHAR", nullable=False),
         ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
         ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
-        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP WITH TIME ZONE", nullable=False),
     ),
     primary_key=(COLLECTION_ID, REVISION_ID),
 )
@@ -1185,7 +1191,7 @@ THEME = TableSchema(
         ColumnSpec(SOURCE, "VARCHAR", nullable=False),
         ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
         ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
-        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP WITH TIME ZONE", nullable=False),
     ),
     primary_key=(THEME_ID, REVISION_ID),
 )
@@ -1203,9 +1209,30 @@ THEME_MEMBERSHIP_HISTORY = TableSchema(
         ColumnSpec(SOURCE, "VARCHAR", nullable=False),
         ColumnSpec(SOURCE_RECORD_ID, "VARCHAR"),
         ColumnSpec(REVISION_ID, "VARCHAR", nullable=False),
-        ColumnSpec(INGESTED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(INGESTED_AT, "TIMESTAMP WITH TIME ZONE", nullable=False),
     ),
     primary_key=(MEMBERSHIP_ID, REVISION_ID),
+)
+
+THEME_EFFECTIVE_MEMBER_DAILY = TableSchema(
+    name=THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
+    columns=(
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(ASSET_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(IS_THEME_MEMBER, "BOOLEAN", nullable=False),
+        ColumnSpec(CONFIRMED_LISTING_TRADING_DAY_COUNT, "BIGINT"),
+        ColumnSpec(IS_SUSPENDED, "BOOLEAN", nullable=False),
+        ColumnSpec(IS_M4_EFFECTIVE_MEMBER, "BOOLEAN", nullable=False),
+        ColumnSpec(EXCLUSION_REASON, "VARCHAR"),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+        ColumnSpec(FINALIZED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(COLLECTION_ID, TRADE_DATE, ASSET_ID),
 )
 
 THEME_CUSTOM_INDEX_DAILY = TableSchema(
@@ -1358,6 +1385,7 @@ ALL_TABLES = (
     STOCK_COLLECTION,
     THEME,
     THEME_MEMBERSHIP_HISTORY,
+    THEME_EFFECTIVE_MEMBER_DAILY,
     THEME_CUSTOM_INDEX_DAILY,
     THEME_CUSTOM_INDEX_STATE,
     THEME_CUSTOM_INDEX_EPISODE,
@@ -1420,7 +1448,7 @@ def init_irm_database(con) -> None:
 
 
 def init_stock_collections_database(con) -> None:
-    """初始化 StockCollection 领域数据库，创建 stock_collection、theme 及 theme_membership_history 契约表。
+    """初始化 StockCollection 领域数据库，创建 stock_collection、theme、theme_membership_history 及 theme_effective_member_daily 契约表。
 
     Args:
         con: DuckDB 连接对象
@@ -1428,3 +1456,12 @@ def init_stock_collections_database(con) -> None:
     con.execute(STOCK_COLLECTION.duckdb_create_sql())
     con.execute(THEME.duckdb_create_sql())
     con.execute(THEME_MEMBERSHIP_HISTORY.duckdb_create_sql())
+    con.execute(THEME_EFFECTIVE_MEMBER_DAILY.duckdb_create_sql())
+
+    # Safe idempotent migration of ingested_at to TIMESTAMP WITH TIME ZONE if existing tables were created with naive TIMESTAMP
+    for tbl in (THEME_MEMBERSHIP_HISTORY_TABLE, THEME_TABLE, STOCK_COLLECTION_TABLE):
+        try:
+            con.execute(f"ALTER TABLE {tbl} ALTER COLUMN {INGESTED_AT} TYPE TIMESTAMPTZ")
+        except Exception:
+            pass
+

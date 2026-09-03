@@ -62,7 +62,7 @@ def _setup_db(settings: AppSettings, target_date: date, *, missing_snapshot: boo
             )
 
         # 4. Stock collection and theme
-        sc = StockCollectionService(con)
+        sc = StockCollectionService(con, clock=lambda: datetime(2026, 8, 3, 0, 0, tzinfo=UTC))
         thm, coll = sc.create_canonical_theme(
             theme_name="芯片",
             source_key="CHIP",

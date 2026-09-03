@@ -93,6 +93,7 @@ class StockCollectionResolver:
         trade_dates: Sequence[date],
         knowledge_date: date,
         allowed_scopes: tuple[str, ...] = ("CANONICAL",),
+        enforce_admission_cutoff: bool = False,
     ) -> pd.DataFrame:
         """Batch set-based vectorized resolution across multiple collections and dates."""
         if not collection_ids or not trade_dates:
@@ -135,7 +136,10 @@ class StockCollectionResolver:
                 )
 
         return self.theme_adapter.batch_resolve_members(
-            collection_ids, trade_dates, knowledge_date
+            collection_ids,
+            trade_dates,
+            knowledge_date,
+            enforce_admission_cutoff=enforce_admission_cutoff,
         )
 
     def resolve_asset_collections(

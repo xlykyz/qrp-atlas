@@ -20,6 +20,7 @@ BASE_LEVEL: Final[str] = "base_level"
 IS_THEME_MEMBER: Final[str] = "is_theme_member"
 IS_M4_EFFECTIVE_MEMBER: Final[str] = "is_m4_effective_member"
 EXCLUSION_REASON: Final[str] = "exclusion_reason"
+FINALIZED_AT: Final[str] = "finalized_at"
 
 CUSTOM_INDEX_TREND_STATE: Final[str] = "custom_index_trend_state"
 CUSTOM_INDEX_TREND_RUN_DAYS: Final[str] = "custom_index_trend_run_days"
@@ -31,18 +32,22 @@ QUALIFICATION_STATUS_NOT_CONFIGURED: Final[str] = "NOT_CONFIGURED"
 COMPARISON_UNIVERSE_VERSION_V1: Final[str] = "m4_board_universe_v1"
 DEFAULT_BASE_LEVEL: Final[float] = 1000.0
 
+EXCLUSION_REASON_UNCONFIRMED_LISTING_DAYS: Final[str] = "UNCONFIRMED_LISTING_DAYS"
 EXCLUSION_REASON_NEW_LISTING_LE_5: Final[str] = "NEW_LISTING_LE_5"
 EXCLUSION_REASON_SUSPENDED: Final[str] = "SUSPENDED"
 
 # ── Table Names & Versions ──
+THEME_EFFECTIVE_MEMBER_DAILY_TABLE: Final[str] = "theme_effective_member_daily"
 THEME_CUSTOM_INDEX_DAILY_TABLE: Final[str] = "theme_custom_index_daily"
 THEME_CUSTOM_INDEX_STATE_TABLE: Final[str] = "theme_custom_index_state"
 THEME_CUSTOM_INDEX_EPISODE_TABLE: Final[str] = "theme_custom_index_episode"
 THEME_M4_OBSERVATION_TABLE: Final[str] = "theme_m4_observation"
 THEME_PRODUCTION_RUN_TABLE: Final[str] = "theme_production_run"
 
+THEME_EFFECTIVE_MEMBER_VERSION: Final[str] = "theme_m4_effective_member@1.0.0"
 THEME_CUSTOM_INDEX_VERSION: Final[str] = "theme_custom_index@1.0.0"
 THEME_CUSTOM_INDEX_STATE_VERSION: Final[str] = "theme_custom_index_state@1.0.0"
 THEME_CUSTOM_INDEX_EPISODE_VERSION: Final[str] = "theme_custom_index_episode@1.0.0"
 THEME_M4_OBSERVATION_VERSION: Final[str] = "theme_m4_observation@1.0.0"
 M4_CALCULATION_VERSION: Final[str] = THEME_M4_OBSERVATION_VERSION
+

@@ -39,6 +39,8 @@ from qrp_atlas.contracts.m4 import (
     THEME_M4_OBSERVATION_TABLE,
     THEME_RETURN_RANK,
     TOTAL_MEMBER_COUNT,
+    THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
+    THEME_EFFECTIVE_MEMBER_VERSION,
 )
 from qrp_atlas.contracts.fields import THEME_PRODUCTION_RUN_TABLE
 from qrp_atlas.contracts.stock_collection import (
@@ -147,6 +149,25 @@ class ThemeQueryService:
         """
         return self.con.execute(sql, params).df()
 
+    def get_theme_effective_members(
+        self,
+        collection_id: str,
+        trade_date: date,
+    ) -> pd.DataFrame:
+        """Fetch effective member daily facts for a theme collection on a trade_date."""
+        sql = f"""
+        SELECT
+            collection_id, theme_id, asset_id, trade_date,
+            is_theme_member, confirmed_listing_trading_day_count,
+            is_suspended, is_m4_effective_member, exclusion_reason,
+            calculation_version, input_snapshot_id, production_run_id,
+            created_at, finalized_at
+        FROM {THEME_EFFECTIVE_MEMBER_DAILY_TABLE}
+        WHERE collection_id = ? AND trade_date = ?
+        ORDER BY asset_id ASC
+        """
+        return self.con.execute(sql, [collection_id, trade_date]).df()
+
     def audit_m4_observation(
         self,
         theme_id: str,
@@ -192,78 +213,99 @@ class ThemeQueryService:
 
         kd = knowledge_date if knowledge_date is not None else (persisted_kd or trade_date)
 
-        # 2. Batch resolve members via StockCollectionResolver
-        ctx = StockCollectionQueryContext(as_of_date=trade_date, knowledge_date=kd)
-        resolved_members = self.resolver.resolve_members(collection_id, ctx)
-        asset_ids = [m.asset_id for m in resolved_members]
-
-        # 3. Batch query listing facts, suspension facts, and returns
+        # 2. Check persisted theme_effective_member_daily fact table first
+        persisted_eff_df = self.get_theme_effective_members(collection_id, trade_date)
         excluded = []
         effective_assets = []
         limit_up_assets = []
 
-        if asset_ids:
-            # Query confirmed listing facts using System B semantics
-            listing_df = query_confirmed_listing_facts(
-                self.con,
-                end_date=trade_date,
-                start_date=trade_date,
-                asset_ids=asset_ids,
-            )
-            list_map = {}
-            if not listing_df.empty:
-                for _, row in listing_df.iterrows():
-                    list_map[row[ASSET_ID]] = (
-                        int(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
-                        if pd.notna(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
-                        else None,
-                        row.get("market_fact_status"),
-                    )
+        if not persisted_eff_df.empty:
+            effective_assets = persisted_eff_df[persisted_eff_df["is_m4_effective_member"] == True]["asset_id"].tolist()
+            excluded = [
+                {
+                    "asset_id": r.asset_id,
+                    "reason": r.exclusion_reason,
+                    "listing_trading_days": r.confirmed_listing_trading_day_count,
+                }
+                for r in persisted_eff_df[persisted_eff_df["is_m4_effective_member"] == False].itertuples()
+            ]
+            if effective_assets:
+                snap_sql = f"""
+                SELECT ticker, is_limit_up
+                FROM daily_market_snapshot
+                WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(effective_assets))})
+                """
+                snap_rows = self.con.execute(snap_sql, [trade_date, *effective_assets]).fetchall()
+                limit_up_assets = [r[0] for r in snap_rows if r[1]]
+        else:
+            ctx = StockCollectionQueryContext(as_of_date=trade_date, knowledge_date=kd)
+            resolved_members = self.resolver.resolve_members(collection_id, ctx)
+            asset_ids = [m.asset_id for m in resolved_members]
 
-            # Suspension batch
-            susp_sql = f"""
-            SELECT ticker FROM suspend_d
-            WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(asset_ids))})
-            """
-            susp_set = {r[0] for r in self.con.execute(susp_sql, [trade_date, *asset_ids]).fetchall()}
+            if asset_ids:
+                # Query confirmed listing facts using System B semantics
+                listing_df = query_confirmed_listing_facts(
+                    self.con,
+                    end_date=trade_date,
+                    start_date=trade_date,
+                    asset_ids=asset_ids,
+                )
+                list_map = {}
+                if not listing_df.empty:
+                    for _, row in listing_df.iterrows():
+                        list_map[row[ASSET_ID]] = (
+                            int(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
+                            if pd.notna(row[CONFIRMED_LISTING_TRADING_DAY_COUNT])
+                            else None,
+                            row.get("market_fact_status"),
+                        )
 
-            # Market snapshot batch: strictly use official is_limit_up
-            snap_sql = f"""
-            SELECT ticker, pct_change, is_limit_up
-            FROM daily_market_snapshot
-            WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(asset_ids))})
-            """
-            snap_rows = {r[0]: (r[1], bool(r[2])) for r in self.con.execute(snap_sql, [trade_date, *asset_ids]).fetchall()}
+                # Suspension batch
+                susp_sql = f"""
+                SELECT ticker FROM suspend_d
+                WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(asset_ids))})
+                """
+                susp_set = {r[0] for r in self.con.execute(susp_sql, [trade_date, *asset_ids]).fetchall()}
 
-            for m in resolved_members:
-                list_info = list_map.get(m.asset_id)
-                list_days = list_info[0] if list_info else None
-                m_status = list_info[1] if list_info else None
-                is_susp = (m.asset_id in susp_set) or (m_status == "EXPLICIT_NON_TRADING")
+                # Market snapshot batch: strictly use official is_limit_up
+                snap_sql = f"""
+                SELECT ticker, pct_change, is_limit_up
+                FROM daily_market_snapshot
+                WHERE trade_date = ? AND ticker IN ({','.join(['?']*len(asset_ids))})
+                """
+                snap_rows = {r[0]: (r[1], bool(r[2])) for r in self.con.execute(snap_sql, [trade_date, *asset_ids]).fetchall()}
 
-                if list_days is None or m_status == "UNRESOLVED_MISSING":
-                    excluded.append({
-                        "asset_id": m.asset_id,
-                        "reason": "UNCONFIRMED_LISTING_DAYS",
-                        "listing_trading_days": None,
-                    })
-                elif list_days <= 5:
-                    excluded.append({
-                        "asset_id": m.asset_id,
-                        "reason": "NEW_LISTING_LE_5",
-                        "listing_trading_days": list_days,
-                    })
-                elif is_susp:
-                    excluded.append({
-                        "asset_id": m.asset_id,
-                        "reason": "SUSPENDED",
-                        "listing_trading_days": list_days,
-                    })
-                else:
-                    effective_assets.append(m.asset_id)
-                    snap_data = snap_rows.get(m.asset_id)
-                    if snap_data and snap_data[1]:
-                        limit_up_assets.append(m.asset_id)
+                for m in resolved_members:
+                    list_info = list_map.get(m.asset_id)
+                    list_days = list_info[0] if list_info else None
+                    m_status = list_info[1] if list_info else None
+                    is_susp = (m.asset_id in susp_set) or (m_status == "EXPLICIT_NON_TRADING")
+
+                    if list_days is None or m_status == "UNRESOLVED_MISSING":
+                        excluded.append({
+                            "asset_id": m.asset_id,
+                            "reason": "UNCONFIRMED_LISTING_DAYS",
+                            "listing_trading_days": None,
+                        })
+                    elif list_days <= 5:
+                        excluded.append({
+                            "asset_id": m.asset_id,
+                            "reason": "NEW_LISTING_LE_5",
+                            "listing_trading_days": list_days,
+                        })
+                    elif is_susp:
+                        excluded.append({
+                            "asset_id": m.asset_id,
+                            "reason": "SUSPENDED",
+                            "listing_trading_days": list_days,
+                        })
+                    else:
+                        effective_assets.append(m.asset_id)
+                        snap_data = snap_rows.get(m.asset_id)
+                        if snap_data and snap_data[1]:
+                            limit_up_assets.append(m.asset_id)
+
+        total_member_count = len(persisted_eff_df) if not persisted_eff_df.empty else (len(resolved_members) if 'resolved_members' in locals() else 0)
 
         # 4. Comparison universe batch
         try:
@@ -302,21 +344,9 @@ class ThemeQueryService:
                     drift_status = "AUDIT_RECONSTRUCTION_FAILED"
                 else:
                     r_start, r_end, r_kd, r_calc_v, r_rule_v, r_comp_v, r_snap_id = run_row
+                    audit_kd = kd or r_kd
 
-                    min_date_row = self.con.execute(
-                        f"SELECT MIN(effective_from) FROM {THEME_TABLE} WHERE available_trade_date <= ?",
-                        [r_kd],
-                    ).fetchone()
-                    earliest_theme = min_date_row[0] if min_date_row and min_date_row[0] else r_start
-                    c_start = min(earliest_theme, r_start)
-
-                    recon_trade_dates = [
-                        r[0]
-                        for r in self.con.execute(
-                            "SELECT trade_date FROM trading_calendar WHERE trade_date BETWEEN ? AND ? AND is_open = true ORDER BY trade_date ASC",
-                            [c_start, r_end],
-                        ).fetchall()
-                    ]
+                    recon_trade_dates = [trade_date]
 
                     recon_themes = [
                         (r[0], r[1])
@@ -331,33 +361,36 @@ class ThemeQueryService:
                             SELECT theme_id, collection_id FROM ranked WHERE rn = 1 AND status = 'ACTIVE'
                             ORDER BY theme_id ASC
                             """,
-                            [r_kd],
+                            [audit_kd],
                         ).fetchall()
                     ]
                     recon_colls = [t[1] for t in recon_themes]
-                    recon_mem = self.resolver.batch_resolve_members(recon_colls, recon_trade_dates, r_kd)
-                    recon_list = query_confirmed_listing_facts(self.con, end_date=r_end, start_date=c_start)
+                    recon_mem = self.resolver.batch_resolve_members(
+                        recon_colls, recon_trade_dates, audit_kd, enforce_admission_cutoff=True
+                    )
+                    recon_list = query_confirmed_listing_facts(self.con, end_date=trade_date, start_date=trade_date)
                     recon_susp = self.con.execute(
-                        "SELECT ticker AS asset_id, trade_date, true AS is_suspended FROM suspend_d WHERE trade_date BETWEEN ? AND ?",
-                        [c_start, r_end],
+                        "SELECT ticker AS asset_id, trade_date, true AS is_suspended FROM suspend_d WHERE trade_date = ?",
+                        [trade_date],
                     ).df()
                     recon_mkt = self.con.execute(
-                        "SELECT ticker AS asset_id, trade_date, pct_change, close, is_limit_up FROM daily_market_snapshot WHERE trade_date BETWEEN ? AND ?",
-                        [c_start, r_end],
+                        "SELECT ticker AS asset_id, trade_date, pct_change, close, is_limit_up FROM daily_market_snapshot WHERE trade_date = ?",
+                        [trade_date],
                     ).df()
                     recon_comp = self.con.execute(
                         """
                         SELECT index_code AS board_id, trade_date, pct_change / 100.0 AS board_return
                         FROM ths_daily
-                        WHERE trade_date BETWEEN ? AND ?
+                        WHERE trade_date = ?
                           AND (index_code LIKE '881%' OR index_code LIKE '885%' OR index_code LIKE '886%')
                         ORDER BY trade_date, index_code
                         """,
-                        [c_start, r_end],
+                        [trade_date],
                     ).df()
 
                     recon_versions = {
                         "calculation_version": r_calc_v,
+                        "effective_member_version": THEME_EFFECTIVE_MEMBER_VERSION,
                         "rule_version": r_rule_v,
                         "comparison_universe_version": r_comp_v,
                     }
@@ -372,7 +405,8 @@ class ThemeQueryService:
                         versions=recon_versions,
                     )
 
-                    if reconstructed_digest != r_snap_id:
+                    target_snap_id = snap_id or r_snap_id
+                    if reconstructed_digest != target_snap_id:
                         is_reproducible = False
                         drift_status = "CURRENT_SOURCE_DIFFERS_FROM_PRODUCTION_SNAPSHOT"
                     else:
@@ -393,7 +427,7 @@ class ThemeQueryService:
             theme_limit_up_count=obs_row[4],
             theme_return_rank=obs_row[5],
             effective_members=len(effective_assets),
-            total_members=len(resolved_members),
+            total_members=total_member_count,
             comparison_universe_size=obs_row[8],
             comparison_universe_version=obs_row[9],
             custom_index_trend_state=obs_row[10],
