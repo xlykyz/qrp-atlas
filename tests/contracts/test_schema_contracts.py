@@ -131,6 +131,13 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("stock_info", (TICKER,)),
         ("market_phase", (TRADE_DATE,)),
         ("system_b_episode_segment", ("segment_id",)),
+        ("stock_collection", ("collection_id", "revision_id")),
+        ("theme", ("theme_id", "revision_id")),
+        ("theme_membership_history", ("membership_id", "revision_id")),
+        ("theme_custom_index_daily", ("theme_id", "trade_date")),
+        ("theme_custom_index_state", ("theme_id", "trade_date")),
+        ("theme_custom_index_episode", ("episode_id",)),
+        ("theme_m4_observation", ("theme_id", "trade_date")),
     ],
 )
 def test_known_primary_keys(table_name: str, expected_pk: tuple):
@@ -138,6 +145,21 @@ def test_known_primary_keys(table_name: str, expected_pk: tuple):
 
     table = get_table(table_name)
     assert table.primary_key == expected_pk
+
+
+def test_init_stock_collections_database_creates_tables(tmp_path):
+    """init_stock_collections_database() 在独立库创建 stock_collection/theme/theme_membership_history 契约表。"""
+    from qrp_atlas.contracts import init_stock_collections_database
+
+    db_path = tmp_path / "stock_collections.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        init_stock_collections_database(con)
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        expected = {"stock_collection", "theme", "theme_membership_history"}
+        assert tables == expected
+    finally:
+        con.close()
 
 
 def test_all_tableschema_instances_are_registered_in_all_tables():
@@ -166,4 +188,56 @@ def test_system_b_episode_segment_schema_registration():
     table = get_table("system_b_episode_segment")
     assert table is SYSTEM_B_EPISODE_SEGMENT
     assert table.primary_key == ("segment_id",)
+
+
+def test_ddl_and_contracts_schema_consistency(tmp_path):
+    """验证 deploy/duckdb/003_stock_collections_and_m4.sql 与 contracts/schema.py 100% 字段一致。"""
+    from pathlib import Path
+    from qrp_atlas.contracts.schema import TABLE_BY_NAME
+
+    ddl_path = Path("deploy/duckdb/003_stock_collections_and_m4.sql")
+    assert ddl_path.exists()
+    sql_text = ddl_path.read_text(encoding="utf-8")
+
+    db_path = tmp_path / "ddl_test.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(sql_text)
+        ddl_tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        expected_ddl_tables = {
+            "stock_collection",
+            "theme",
+            "theme_membership_history",
+            "theme_custom_index_daily",
+            "theme_custom_index_state",
+            "theme_custom_index_episode",
+            "theme_m4_observation",
+            "theme_production_run",
+        }
+        assert ddl_tables == expected_ddl_tables
+
+        for table_name in expected_ddl_tables:
+            table_schema = TABLE_BY_NAME[table_name]
+            info = con.execute(f"PRAGMA table_info({table_name})").fetchall()
+            actual_col_names = [r[1] for r in info]
+            expected_col_names = list(table_schema.column_names())
+            assert actual_col_names == expected_col_names, (
+                f"Table {table_name} columns mismatch: actual {actual_col_names} vs expected {expected_col_names}"
+            )
+            for r, col in zip(info, table_schema.columns):
+                _, name, col_type, notnull, _, pk = r
+                assert name == col.name
+                assert col_type.upper() == col.dtype.upper(), (
+                    f"Table {table_name}.{name} type mismatch: DDL {col_type} vs schema {col.dtype}"
+                )
+                expected_notnull = not col.nullable
+                assert bool(notnull) == expected_notnull, (
+                    f"Table {table_name}.{name} nullability mismatch: DDL notnull={notnull} vs expected {expected_notnull}"
+                )
+            actual_pk = tuple(r[1] for r in info if r[5])
+            assert set(actual_pk) == set(table_schema.primary_key), (
+                f"Table {table_name} PK mismatch: DDL {actual_pk} vs schema {table_schema.primary_key}"
+            )
+    finally:
+        con.close()
 
