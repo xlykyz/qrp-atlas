@@ -251,6 +251,14 @@ from .m4 import (
     IS_M4_EFFECTIVE_MEMBER,
     EXCLUSION_REASON,
 )
+from .m5 import (
+    THEME_M5_OBSERVATION_TABLE,
+    THEME_MEMBER_COUNT,
+    THEME_HOT_STOCK_COUNT,
+    THEME_HOT_STOCK_RATIO,
+    THEME_HOT_LIST_APPEARANCE_COUNT,
+    THEME_HOT_SOURCE_COUNT,
+)
 
 
 
@@ -1374,6 +1382,25 @@ THEME_M4_OBSERVATION = TableSchema(
     primary_key=(THEME_ID, TRADE_DATE),
 )
 
+THEME_M5_OBSERVATION = TableSchema(
+    name=THEME_M5_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(THEME_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_STOCK_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_STOCK_RATIO, "DOUBLE"),
+        ColumnSpec(THEME_HOT_LIST_APPEARANCE_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_SOURCE_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR"),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, TRADE_DATE),
+)
+
 THEME_PRODUCTION_RUN = TableSchema(
     name=THEME_PRODUCTION_RUN_TABLE,
     columns=(
@@ -1445,6 +1472,7 @@ ALL_TABLES = (
     THEME_CUSTOM_INDEX_STATE,
     THEME_CUSTOM_INDEX_EPISODE,
     THEME_M4_OBSERVATION,
+    THEME_M5_OBSERVATION,
     THEME_PRODUCTION_RUN,
 )
 

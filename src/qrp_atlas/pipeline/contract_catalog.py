@@ -26,4 +26,5 @@ CONTRACT_MODULES: tuple[str, ...] = (
     "qrp_atlas.pipeline.research_industry_contracts",
     "qrp_atlas.pipeline.dc_hot_contracts",
     "qrp_atlas.pipeline.ths_hot_contracts",
+    "qrp_atlas.pipeline.theme_m5_contracts",
 )

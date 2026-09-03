@@ -66,6 +66,11 @@ from qrp_atlas.indicators.system_b import (
     detect_system_b_basic_state_from_prices,
 )
 from qrp_atlas.indicators.service import calculate_daily_market_snapshot
+from qrp_atlas.indicators.m5 import (
+    M5ObservationError,
+    calculate_m5_observations,
+    calculate_m5_raw_observations,
+)
 
 # 横截面指标、因子与研究基础
 from qrp_atlas.indicators.cross_section import (
@@ -184,6 +189,9 @@ __all__ = [
     "SystemBStateMachineError",
     "calculate_system_b_2_0_states",
     "calculate_daily_market_snapshot",
+    "M5ObservationError",
+    "calculate_m5_observations",
+    "calculate_m5_raw_observations",
     # 横截面指标与因子
     "CrossSectionFrameError",
     "FACTOR_DEFINITIONS",

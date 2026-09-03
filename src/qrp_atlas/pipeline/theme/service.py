@@ -1270,3 +1270,33 @@ class ThemePipelineService:
             run_type="DAILY",
             execution_control=execution_control,
         )
+
+    def calculate_m5_facts(
+        self,
+        trade_date: date,
+        *,
+        execution_control: Any | None = None,
+    ):
+        """Compatibility entry point for the independent M5 calculation service."""
+        from .m5_service import ThemeM5PipelineService
+
+        return ThemeM5PipelineService(self.con).calculate_m5_facts(
+            trade_date,
+            execution_control=execution_control,
+        )
+
+    def run_m5_daily(
+        self,
+        trade_date: date,
+        *,
+        production_run_id: str | None = None,
+        execution_control: Any | None = None,
+    ):
+        """Compatibility entry point for the independent M5 daily pipeline."""
+        from .m5_service import ThemeM5PipelineService
+
+        return ThemeM5PipelineService(self.con).run_m5_daily(
+            trade_date,
+            production_run_id=production_run_id,
+            execution_control=execution_control,
+        )
