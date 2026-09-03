@@ -114,6 +114,15 @@ Theme Membership
 - 新股从第 6 个实际交易日起自动具备计算资格；
 - 停牌股复牌后自动恢复计算资格。
 
+Task04-A 的 M4 成员纳入时点、有效成员资格、逐日事实化、规则版本锚点与 finalized 历史冻结语义，以以下正式规则文档为准：
+
+```text
+M4 Effective Member Rule v1.0.0.md
+Rule ID: theme_m4_effective_member@1.0.0
+```
+
+该规则属于 Task04-A 正式生产语义基线；实现与验收不得以当前代码行为、运行时刻或聊天约定替代该规则。
+
 ### 3.3 M4 能力链
 
 ```text
