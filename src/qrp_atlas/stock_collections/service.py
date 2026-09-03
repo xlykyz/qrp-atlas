@@ -60,6 +60,7 @@ class StockCollectionService:
         source_key: str,
         namespace: str = "QRP",
         effective_from: date,
+        effective_to: date | None = None,
         available_trade_date: date,
         source: str = "MANUAL",
         source_record_id: str | None = None,
@@ -69,6 +70,11 @@ class StockCollectionService:
             raise StockCollectionError("INVALID_THEME_NAME", "theme_name cannot be empty")
         if not source_key or not source_key.strip():
             raise StockCollectionError("INVALID_SOURCE_KEY", "source_key cannot be empty")
+        if effective_to is not None and effective_to <= effective_from:
+            raise StockCollectionError(
+                "INVALID_EFFECTIVE_INTERVAL",
+                f"effective_to ({effective_to}) must be > effective_from ({effective_from})",
+            )
 
         collection_id = make_collection_id(CollectionType.THEME, namespace, source_key)
         theme_id = f"THM:{namespace.strip().upper()}:{source_key.strip().upper()}"
@@ -96,7 +102,7 @@ class StockCollectionService:
             membership_model=MembershipModel.INTERVAL,
             status=CollectionStatus.ACTIVE,
             effective_from=effective_from,
-            effective_to=None,
+            effective_to=effective_to,
             available_trade_date=available_trade_date,
             source=source,
             source_record_id=source_record_id,
@@ -110,7 +116,7 @@ class StockCollectionService:
             canonical_name=theme_name.strip(),
             status=CollectionStatus.ACTIVE,
             effective_from=effective_from,
-            effective_to=None,
+            effective_to=effective_to,
             available_trade_date=available_trade_date,
             source=source,
             source_record_id=source_record_id,

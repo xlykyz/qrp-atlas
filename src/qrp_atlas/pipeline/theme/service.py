@@ -311,6 +311,29 @@ class ThemePipelineService:
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def _fetch_replay_canonical_themes_for_range(
+        self, start_date: date, end_date: date, knowledge_date: date
+    ) -> list[tuple[str, str]]:
+        """Fetch active canonical themes whose lifecycle intersects [start_date, end_date] as of knowledge_date."""
+        rows = self.con.execute(
+            f"""
+            WITH ranked AS (
+                SELECT theme_id, collection_id, status, effective_from, effective_to,
+                       row_number() OVER (PARTITION BY theme_id ORDER BY available_trade_date DESC, ingested_at DESC) as rn
+                FROM {THEME_TABLE}
+                WHERE available_trade_date <= ?
+            )
+            SELECT theme_id, collection_id FROM ranked
+            WHERE rn = 1
+              AND status = 'ACTIVE'
+              AND effective_from <= ?
+              AND (effective_to IS NULL OR effective_to > ?)
+            ORDER BY theme_id ASC
+            """,
+            [knowledge_date, end_date, start_date],
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
     def _fetch_confirmed_listing_facts(self, start_date: date, end_date: date) -> pd.DataFrame:
         """Fetch exact confirmed listing actual trading day counts strictly reusing System B semantics."""
         return query_confirmed_listing_facts(
@@ -376,15 +399,15 @@ class ThemePipelineService:
         t0 = datetime.now(timezone.utc)
         kd = knowledge_date or end_date
 
-        themes = self._fetch_replay_canonical_themes(end_date, kd)
+        # Determine calculation context start: continue forward from anchor unless context_start_date is explicitly given
+        calc_start = min(context_start_date, start_date) if context_start_date is not None else start_date
+
+        themes = self._fetch_replay_canonical_themes_for_range(calc_start, end_date, kd)
         if not themes:
-            raise ThemePipelineError("NO_ACTIVE_THEMES", f"No active themes as of {kd}")
+            raise ThemePipelineError("NO_ACTIVE_THEMES", f"No active themes in range [{calc_start}, {end_date}] as of {kd}")
 
         theme_map = {coll_id: theme_id for theme_id, coll_id in themes}
         coll_ids = list(theme_map.keys())
-
-        # Determine calculation context start: continue forward from anchor unless context_start_date is explicitly given
-        calc_start = min(context_start_date, start_date) if context_start_date is not None else start_date
 
         calc_trade_dates = self._fetch_trading_calendar_dates(calc_start, end_date)
         if not calc_trade_dates:

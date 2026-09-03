@@ -1846,4 +1846,140 @@ def test_closeout_item3_audit_snapshot_reconstruction_aligns_with_expected_theme
     assert audit_report.discrepancy_reason is None
 
 
+# ==============================================================================
+# Micro-Fix Case A: Theme 在 Replay 区间中途失效
+# ==============================================================================
+def test_replay_lifecycle_case_a_theme_expires_mid_replay(f_db):
+    """
+    Case A｜Theme 在 Replay 区间中途失效:
+    Theme X effective interval = [D1, D3) (effective_from=D1, effective_to=D3)
+    Replay D1..D5, knowledge_date >= Theme revision available date
 
+    断言：
+    D1: 有 Theme X replay facts
+    D2: 有 Theme X replay facts
+    D3: 无 Theme X replay facts
+    D4: 无
+    D5: 无
+    明确证明：不得因为 end_date=D5 时 Theme X 已失效，就把 D1/D2 一并漏掉。
+    """
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+
+    d1 = date(2026, 8, 3)
+    d2 = date(2026, 8, 4)
+    d3 = date(2026, 8, 5)
+    d4 = date(2026, 8, 6)
+    d5 = date(2026, 8, 7)
+
+    # 1. 创建 Theme X，生效区间为 [D1, D3)
+    thm_x, coll_x = sc.create_canonical_theme(
+        theme_name="中途失效题材X",
+        source_key="EXPIRING_THEME_X",
+        effective_from=d1,
+        effective_to=d3,
+        available_trade_date=d1,
+    )
+    # 为 Theme X 添加成员，有效区间覆盖 [D1, D3)
+    sc.add_member(
+        theme_id=thm_x.theme_id,
+        collection_id=coll_x.collection_id,
+        asset_id="000001.SZ",
+        effective_from=d1,
+        effective_to=d3,
+        available_trade_date=d1,
+    )
+
+    # 2. Replay D1..D5，knowledge_date = D5
+    replay_res = service.replay_m4_facts(start_date=d1, end_date=d5, knowledge_date=d5)
+
+    idx_df = replay_res.daily_indices
+    obs_df = replay_res.m4_observations
+
+    # 提取 Theme X 在各日期的 facts
+    idx_x = idx_df[idx_df["theme_id"] == thm_x.theme_id].copy() if not idx_df.empty else pd.DataFrame()
+    obs_x = obs_df[obs_df["theme_id"] == thm_x.theme_id].copy() if not obs_df.empty else pd.DataFrame()
+
+    idx_dates = set(pd.to_datetime(idx_x["trade_date"]).dt.date) if not idx_x.empty else set()
+    obs_dates = set(pd.to_datetime(obs_x["trade_date"]).dt.date) if not obs_x.empty else set()
+
+    # 断言：D1, D2 必须有 Theme X 的 replay facts（证明不得因为 end_date=D5 时 Theme X 已失效就漏掉 D1/D2）
+    assert d1 in idx_dates, "D1 必须有 Theme X index facts"
+    assert d2 in idx_dates, "D2 必须有 Theme X index facts"
+    assert d1 in obs_dates, "D1 必须有 Theme X observation facts"
+    assert d2 in obs_dates, "D2 必须有 Theme X observation facts"
+
+    # 断言：D3, D4, D5 严禁包含 Theme X 的 replay facts（因为 Theme X 在 D3 已失效）
+    assert d3 not in idx_dates, "D3 严禁有 Theme X index facts"
+    assert d4 not in idx_dates, "D4 严禁有 Theme X index facts"
+    assert d5 not in idx_dates, "D5 严禁有 Theme X index facts"
+    assert d3 not in obs_dates, "D3 严禁有 Theme X observation facts"
+    assert d4 not in obs_dates, "D4 严禁有 Theme X observation facts"
+    assert d5 not in obs_dates, "D5 严禁有 Theme X observation facts"
+
+
+# ==============================================================================
+# Micro-Fix Case B: Theme 在 Replay 区间中途才生效
+# ==============================================================================
+def test_replay_lifecycle_case_b_theme_starts_mid_replay(f_db):
+    """
+    Case B｜Theme 在 Replay 区间中途才生效:
+    Theme Y effective_from = D3 (effective_to = None)
+    Replay D1..D5, knowledge_date >= Theme revision available date
+
+    断言：
+    D1/D2: 无 Theme Y replay facts
+    D3/D4/D5: 有 Theme Y replay facts
+    证明 range universe 只是候选集合，具体每日有效性仍由 trade_date lifecycle 决定。
+    """
+    service = ThemePipelineService(f_db)
+    sc = StockCollectionService(f_db, clock=lambda: datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc))
+
+    d1 = date(2026, 8, 3)
+    d2 = date(2026, 8, 4)
+    d3 = date(2026, 8, 5)
+    d4 = date(2026, 8, 6)
+    d5 = date(2026, 8, 7)
+
+    # 1. 创建 Theme Y，自 D3 起生效
+    thm_y, coll_y = sc.create_canonical_theme(
+        theme_name="中途生效题材Y",
+        source_key="STARTING_THEME_Y",
+        effective_from=d3,
+        effective_to=None,
+        available_trade_date=d1,
+    )
+    sc.add_member(
+        theme_id=thm_y.theme_id,
+        collection_id=coll_y.collection_id,
+        asset_id="600519.SH",
+        effective_from=d3,
+        effective_to=None,
+        available_trade_date=d1,
+    )
+
+    # 2. Replay D1..D5
+    replay_res = service.replay_m4_facts(start_date=d1, end_date=d5, knowledge_date=d5)
+
+    idx_df = replay_res.daily_indices
+    obs_df = replay_res.m4_observations
+
+    idx_y = idx_df[idx_df["theme_id"] == thm_y.theme_id].copy() if not idx_df.empty else pd.DataFrame()
+    obs_y = obs_df[obs_df["theme_id"] == thm_y.theme_id].copy() if not obs_df.empty else pd.DataFrame()
+
+    idx_dates = set(pd.to_datetime(idx_y["trade_date"]).dt.date) if not idx_y.empty else set()
+    obs_dates = set(pd.to_datetime(obs_y["trade_date"]).dt.date) if not obs_y.empty else set()
+
+    # 断言：D1, D2 严禁有 Theme Y 的 facts（因为 Theme Y 自 D3 才生效）
+    assert d1 not in idx_dates, "D1 严禁有 Theme Y index facts"
+    assert d2 not in idx_dates, "D2 严禁有 Theme Y index facts"
+    assert d1 not in obs_dates, "D1 严禁有 Theme Y observation facts"
+    assert d2 not in obs_dates, "D2 严禁有 Theme Y observation facts"
+
+    # 断言：D3, D4, D5 必须包含 Theme Y 的 facts
+    assert d3 in idx_dates, "D3 必须有 Theme Y index facts"
+    assert d4 in idx_dates, "D4 必须有 Theme Y index facts"
+    assert d5 in idx_dates, "D5 必须有 Theme Y index facts"
+    assert d3 in obs_dates, "D3 必须有 Theme Y observation facts"
+    assert d4 in obs_dates, "D4 必须有 Theme Y observation facts"
+    assert d5 in obs_dates, "D5 必须有 Theme Y observation facts"

@@ -32,7 +32,7 @@ Task 04-A 是 QRP v1.1 题材与市场结构事实链的核心生产子包，涵
 
 ### B. M4 有效成分股规则与物理事实表
 - **第 5 张 Canonical 事实表**：`theme_effective_member_daily`
-  - 键：`PRIMARY KEY (collection_id, asset_id, trade_date)`；
+  - 键：`PRIMARY KEY (collection_id, trade_date, asset_id)`；
   - 核心列：`theme_id`, `is_m4_effective_member`, `exclusion_reason`, `confirmed_listing_trading_day_count`, `is_theme_member`, `production_run_id`, `input_snapshot_id`；
 - **判别优先级**：
   1. `confirmed_listing_trading_day_count` 事实缺失或为 `UNRESOLVED_MISSING` -> 判定为 `UNCONFIRMED_LISTING_DAYS` 并排除；
