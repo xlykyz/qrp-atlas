@@ -241,6 +241,15 @@ from .m4 import (
     IS_M4_EFFECTIVE_MEMBER,
     EXCLUSION_REASON,
 )
+from .m6 import (
+    CONSECUTIVE_LIMIT_UP_COUNT,
+    LIMIT_DOWN_COUNT,
+    LIMIT_UP_COUNT,
+    MARKET_M6_OBSERVATION_TABLE,
+    MARKET_SCOPE,
+    MAX_CONSECUTIVE_LIMIT_UP_HEIGHT,
+    PRE_LIMIT_UP_PREMIUM,
+)
 
 
 
@@ -1345,6 +1354,24 @@ THEME_PRODUCTION_RUN = TableSchema(
     primary_key=(PRODUCTION_RUN_ID,),
 )
 
+MARKET_M6_OBSERVATION = TableSchema(
+    name=MARKET_M6_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(MARKET_SCOPE, "VARCHAR", nullable=False),
+        ColumnSpec(LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(LIMIT_DOWN_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(CONSECUTIVE_LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(MAX_CONSECUTIVE_LIMIT_UP_HEIGHT, "BIGINT", nullable=False),
+        ColumnSpec(PRE_LIMIT_UP_PREMIUM, "DOUBLE"),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR"),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(TRADE_DATE, MARKET_SCOPE),
+)
+
 ALL_TABLES = (
     DAILY_MARKET_SNAPSHOT,
     MARKET_PHASE,
@@ -1391,6 +1418,7 @@ ALL_TABLES = (
     THEME_CUSTOM_INDEX_EPISODE,
     THEME_M4_OBSERVATION,
     THEME_PRODUCTION_RUN,
+    MARKET_M6_OBSERVATION,
 )
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}

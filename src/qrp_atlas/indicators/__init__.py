@@ -66,6 +66,10 @@ from qrp_atlas.indicators.system_b import (
     detect_system_b_basic_state_from_prices,
 )
 from qrp_atlas.indicators.service import calculate_daily_market_snapshot
+from qrp_atlas.indicators.m6 import (
+    M6ObservationError,
+    calculate_market_m6_observations,
+)
 
 # 横截面指标、因子与研究基础
 from qrp_atlas.indicators.cross_section import (
@@ -251,4 +255,6 @@ __all__ = [
     "compute_profit_change_midpoint",
     "compute_profit_change_range",
     "map_forecast_type_direction",
+    "calculate_market_m6_observations",
+    "M6ObservationError",
 ]
