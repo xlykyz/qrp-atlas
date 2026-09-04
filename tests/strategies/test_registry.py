@@ -54,6 +54,7 @@ def test_definition_is_serializable_and_builtin_is_registered() -> None:
         "rolling_zscore_mean_reversion",
         "rsi_mean_reversion",
         "stochastic_mean_reversion",
+        "system_b_authorization",
         "system_b_basic",
         "time_series_momentum",
         "volatility_adjusted_momentum",

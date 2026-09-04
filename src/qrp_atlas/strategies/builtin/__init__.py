@@ -26,7 +26,9 @@ from .cross_section import (
     compute_composite_score,
 )
 from .system_b_basic import SystemBBasicStrategy
+from .system_b_authorization import SystemBAuthorizationStrategy
 from .event_drift import EventDriftBasicStrategy
+
 
 __all__ = [
     "AdxDirectionalTrendStrategy",
@@ -45,6 +47,7 @@ __all__ = [
     "RollingZscoreMeanReversionStrategy",
     "RsiMeanReversionStrategy",
     "StochasticMeanReversionStrategy",
+    "SystemBAuthorizationStrategy",
     "SystemBBasicStrategy",
     "TimeSeriesMomentumStrategy",
     "VolatilityAdjustedMomentumStrategy",
