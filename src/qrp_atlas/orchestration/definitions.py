@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -72,7 +72,7 @@ def parse_definition(payload: Mapping[str, Any]) -> JobDefinition:
     if working_directory_value is not None and not isinstance(working_directory_value, str):
         raise DefinitionValidationError("working_directory must be a string or null")
     working_directory = Path(working_directory_value) if working_directory_value else None
-    if working_directory is not None and not working_directory.is_absolute():
+    if working_directory is not None and not (working_directory.is_absolute() or PurePosixPath(working_directory_value).is_absolute()):
         raise DefinitionValidationError("working_directory must be an absolute path")
     dependencies = _string_tuple(payload.get("dependencies", []), "dependencies")
     timeout_seconds = payload.get("timeout_seconds")

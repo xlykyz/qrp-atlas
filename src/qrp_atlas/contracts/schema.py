@@ -150,6 +150,16 @@ from .fields import (
     SUMMARY,
     CHANGE_REASON,
     FINALIZED_AT,
+    CURRENT_PRICE,
+    LIST_NAME,
+    RANK_POSITION,
+    SOURCE_RANK_TIME,
+    SNAPSHOT_SEQ,
+    SNAPSHOT_STARTED_AT,
+    SNAPSHOT_COMPLETED_AT,
+    HOT,
+    CONCEPT,
+    RANK_REASON,
 )
 from .system_b import (
     ACTUAL_PAIR_CONTIGUOUS,
@@ -240,6 +250,23 @@ from .m4 import (
     IS_THEME_MEMBER,
     IS_M4_EFFECTIVE_MEMBER,
     EXCLUSION_REASON,
+)
+from .m5 import (
+    THEME_M5_OBSERVATION_TABLE,
+    THEME_MEMBER_COUNT,
+    THEME_HOT_STOCK_COUNT,
+    THEME_HOT_STOCK_RATIO,
+    THEME_HOT_LIST_APPEARANCE_COUNT,
+    THEME_HOT_SOURCE_COUNT,
+)
+from .m6 import (
+    CONSECUTIVE_LIMIT_UP_COUNT,
+    LIMIT_DOWN_COUNT,
+    LIMIT_UP_COUNT,
+    MARKET_M6_OBSERVATION_TABLE,
+    MARKET_SCOPE,
+    MAX_CONSECUTIVE_LIMIT_UP_HEIGHT,
+    PRE_LIMIT_UP_PREMIUM,
 )
 
 
@@ -779,6 +806,49 @@ STK_HIGH_SHOCK = TableSchema(
         ColumnSpec(CREATED_AT, "TIMESTAMP"),
     ),
     primary_key=(TRADE_DATE, TICKER, REASON, PERIOD),
+)
+
+DC_HOT = TableSchema(
+    name="dc_hot",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(LIST_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(RANK_POSITION, "INTEGER", nullable=False),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(CURRENT_PRICE, "DOUBLE"),
+        ColumnSpec(SOURCE_RANK_TIME, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_SEQ, "INTEGER", nullable=False),
+        ColumnSpec(SNAPSHOT_STARTED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_COMPLETED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION),
+)
+
+THS_HOT = TableSchema(
+    name="ths_hot",
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(LIST_NAME, "VARCHAR", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(NAME, "VARCHAR"),
+        ColumnSpec(RANK_POSITION, "INTEGER", nullable=False),
+        ColumnSpec(PCT_CHANGE, "DOUBLE"),
+        ColumnSpec(CURRENT_PRICE, "DOUBLE"),
+        ColumnSpec(HOT, "DOUBLE"),
+        ColumnSpec(CONCEPT, "VARCHAR"),
+        ColumnSpec(RANK_REASON, "VARCHAR"),
+        ColumnSpec(SOURCE_RANK_TIME, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_SEQ, "INTEGER", nullable=False),
+        ColumnSpec(SNAPSHOT_STARTED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(SNAPSHOT_COMPLETED_AT, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP"),
+    ),
+    primary_key=(TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION),
 )
 
 SYSTEM_B_STATE_OBSERVATION = TableSchema(
@@ -1321,6 +1391,25 @@ THEME_M4_OBSERVATION = TableSchema(
     primary_key=(THEME_ID, TRADE_DATE),
 )
 
+THEME_M5_OBSERVATION = TableSchema(
+    name=THEME_M5_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(THEME_ID, "VARCHAR", nullable=False),
+        ColumnSpec(COLLECTION_ID, "VARCHAR", nullable=False),
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(THEME_MEMBER_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_STOCK_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_STOCK_RATIO, "DOUBLE"),
+        ColumnSpec(THEME_HOT_LIST_APPEARANCE_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(THEME_HOT_SOURCE_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR"),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(THEME_ID, TRADE_DATE),
+)
+
 THEME_PRODUCTION_RUN = TableSchema(
     name=THEME_PRODUCTION_RUN_TABLE,
     columns=(
@@ -1343,6 +1432,24 @@ THEME_PRODUCTION_RUN = TableSchema(
         ColumnSpec(COMPLETED_AT, "TIMESTAMP"),
     ),
     primary_key=(PRODUCTION_RUN_ID,),
+)
+
+MARKET_M6_OBSERVATION = TableSchema(
+    name=MARKET_M6_OBSERVATION_TABLE,
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(MARKET_SCOPE, "VARCHAR", nullable=False),
+        ColumnSpec(LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(LIMIT_DOWN_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(CONSECUTIVE_LIMIT_UP_COUNT, "BIGINT", nullable=False),
+        ColumnSpec(MAX_CONSECUTIVE_LIMIT_UP_HEIGHT, "BIGINT", nullable=False),
+        ColumnSpec(PRE_LIMIT_UP_PREMIUM, "DOUBLE"),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR"),
+        ColumnSpec(INPUT_SNAPSHOT_ID, "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(TRADE_DATE, MARKET_SCOPE),
 )
 
 ALL_TABLES = (
@@ -1375,6 +1482,8 @@ ALL_TABLES = (
     LIMIT_STEP,
     THS_DAILY,
     STK_HIGH_SHOCK,
+    DC_HOT,
+    THS_HOT,
     INCOME_STATEMENT,
     BALANCE_SHEET,
     CASHFLOW_STATEMENT,
@@ -1390,7 +1499,9 @@ ALL_TABLES = (
     THEME_CUSTOM_INDEX_STATE,
     THEME_CUSTOM_INDEX_EPISODE,
     THEME_M4_OBSERVATION,
+    THEME_M5_OBSERVATION,
     THEME_PRODUCTION_RUN,
+    MARKET_M6_OBSERVATION,
 )
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}

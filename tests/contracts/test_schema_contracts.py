@@ -20,6 +20,8 @@ from qrp_atlas.contracts import (
     DAILY_MARKET_SNAPSHOT,
     TICKER,
     TRADE_DATE,
+    RANK_POSITION,
+    SNAPSHOT_SEQ,
     init_database,
     init_irm_database,
 )
@@ -138,6 +140,9 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("theme_custom_index_state", ("theme_id", "trade_date")),
         ("theme_custom_index_episode", ("episode_id",)),
         ("theme_m4_observation", ("theme_id", "trade_date")),
+        ("dc_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
+        ("ths_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
+        ("market_m6_observation", (TRADE_DATE, "market_scope")),
     ],
 )
 def test_known_primary_keys(table_name: str, expected_pk: tuple):
@@ -148,7 +153,7 @@ def test_known_primary_keys(table_name: str, expected_pk: tuple):
 
 
 def test_init_stock_collections_database_creates_tables(tmp_path):
-    """init_stock_collections_database() 在独立库创建 stock_collection/theme/theme_membership_history 契约表。"""
+    """init_stock_collections_database() 在独立库创建 stock_collection/theme/theme_membership_history/theme_effective_member_daily 契约表。"""
     from qrp_atlas.contracts import init_stock_collections_database
 
     db_path = tmp_path / "stock_collections.duckdb"
@@ -156,7 +161,12 @@ def test_init_stock_collections_database_creates_tables(tmp_path):
     try:
         init_stock_collections_database(con)
         tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-        expected = {"stock_collection", "theme", "theme_membership_history"}
+        expected = {
+            "stock_collection",
+            "theme",
+            "theme_membership_history",
+            "theme_effective_member_daily",
+        }
         assert tables == expected
     finally:
         con.close()
@@ -208,11 +218,13 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
             "stock_collection",
             "theme",
             "theme_membership_history",
+            "theme_effective_member_daily",
             "theme_custom_index_daily",
             "theme_custom_index_state",
             "theme_custom_index_episode",
             "theme_m4_observation",
             "theme_production_run",
+            "theme_effective_member_daily",
         }
         assert ddl_tables == expected_ddl_tables
 
@@ -241,3 +253,36 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
     finally:
         con.close()
 
+
+def test_m6_ddl_and_contracts_schema_consistency(tmp_path):
+    """验证 deploy/duckdb/007_market_m6_observation.sql 与 contracts/schema.py 100% 字段一致。"""
+    from pathlib import Path
+    from qrp_atlas.contracts.schema import TABLE_BY_NAME
+
+    ddl_path = Path("deploy/duckdb/007_market_m6_observation.sql")
+    assert ddl_path.exists()
+    sql_text = ddl_path.read_text(encoding="utf-8")
+
+    db_path = tmp_path / "m6_ddl_test.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(sql_text)
+        ddl_tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        assert ddl_tables == {"market_m6_observation"}
+
+        table_schema = TABLE_BY_NAME["market_m6_observation"]
+        info = con.execute("PRAGMA table_info(market_m6_observation)").fetchall()
+        actual_col_names = [r[1] for r in info]
+        expected_col_names = list(table_schema.column_names())
+        assert actual_col_names == expected_col_names
+
+        for r, col in zip(info, table_schema.columns):
+            _, name, col_type, notnull, _, pk = r
+            assert name == col.name
+            assert col_type.upper() == col.dtype.upper()
+            assert bool(notnull) == (not col.nullable)
+
+        actual_pk = tuple(r[1] for r in info if r[5])
+        assert set(actual_pk) == set(table_schema.primary_key)
+    finally:
+        con.close()

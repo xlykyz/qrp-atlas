@@ -42,6 +42,14 @@ from qrp_atlas.contracts.m4 import (
     THEME_EFFECTIVE_MEMBER_DAILY_TABLE,
     THEME_EFFECTIVE_MEMBER_VERSION,
 )
+from qrp_atlas.contracts.m5 import (
+    THEME_HOT_LIST_APPEARANCE_COUNT,
+    THEME_HOT_SOURCE_COUNT,
+    THEME_HOT_STOCK_COUNT,
+    THEME_HOT_STOCK_RATIO,
+    THEME_MEMBER_COUNT,
+    THEME_M5_OBSERVATION_TABLE,
+)
 from qrp_atlas.contracts.fields import THEME_PRODUCTION_RUN_TABLE
 from qrp_atlas.contracts.stock_collection import (
     COLLECTION_ID,
@@ -53,6 +61,7 @@ from qrp_atlas.contracts.stock_collection import (
 )
 from qrp_atlas.pipeline.market_facts import query_confirmed_listing_facts
 from qrp_atlas.pipeline.theme.service import compute_deterministic_snapshot_id
+from qrp_atlas.pipeline.theme.m5_service import ThemeM5PipelineError, ThemeM5PipelineService
 from qrp_atlas.stock_collections.models import StockCollectionQueryContext
 from qrp_atlas.stock_collections.resolver import StockCollectionResolver
 
@@ -83,6 +92,23 @@ class M4ObservationAuditReport:
     discrepancy_reason: str | None = None
     production_knowledge_date: date | None = None
     audit_knowledge_date: date | None = None
+
+
+@dataclass(frozen=True)
+class M5ObservationAuditReport:
+    theme_id: str
+    collection_id: str
+    trade_date: date
+    theme_member_count: int
+    theme_hot_stock_count: int
+    theme_hot_stock_ratio: float | None
+    theme_hot_list_appearance_count: int
+    theme_hot_source_count: int
+    production_run_id: str | None
+    input_snapshot_id: str | None
+    reconstructed_input_snapshot_id: str | None
+    is_reproducible: bool
+    discrepancy_reason: str | None = None
 
 
 class ThemeQueryService:
@@ -148,6 +174,126 @@ class ThemeQueryService:
         ORDER BY theme_return_rank ASC NULLS LAST, theme_id ASC
         """
         return self.con.execute(sql, params).df()
+
+    def get_m5_observations(
+        self,
+        trade_date: date,
+        theme_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Fetch persisted M5 facts for all Themes or one Theme on a date."""
+        params: list[Any] = [trade_date]
+        theme_filter = ""
+        if theme_id is not None:
+            theme_filter = "AND theme_id = ?"
+            params.append(theme_id)
+        sql = f"""
+            SELECT
+                theme_id, collection_id, trade_date,
+                {THEME_MEMBER_COUNT}, {THEME_HOT_STOCK_COUNT}, {THEME_HOT_STOCK_RATIO},
+                {THEME_HOT_LIST_APPEARANCE_COUNT}, {THEME_HOT_SOURCE_COUNT},
+                calculation_version, production_run_id, input_snapshot_id, created_at
+            FROM {THEME_M5_OBSERVATION_TABLE}
+            WHERE trade_date = ? {theme_filter}
+            ORDER BY theme_id ASC
+        """
+        return self.con.execute(sql, params).df()
+
+    def audit_m5_observation(
+        self,
+        theme_id: str,
+        trade_date: date,
+    ) -> M5ObservationAuditReport:
+        """Recompute the complete M5 input set and compare it with one row.
+
+        Auditing is read-only.  If a current source is unavailable, the stored
+        row is returned as non-reproducible with the stable source error rather
+        than being overwritten or treated as a zero-valued source.
+        """
+        row = self.con.execute(
+            f"""
+            SELECT theme_id, collection_id, trade_date,
+                   {THEME_MEMBER_COUNT}, {THEME_HOT_STOCK_COUNT}, {THEME_HOT_STOCK_RATIO},
+                   {THEME_HOT_LIST_APPEARANCE_COUNT}, {THEME_HOT_SOURCE_COUNT},
+                   production_run_id, input_snapshot_id
+            FROM {THEME_M5_OBSERVATION_TABLE}
+            WHERE theme_id = ? AND trade_date = ?
+            """,
+            [theme_id, trade_date],
+        ).fetchone()
+        if not row:
+            raise ValueError(f"No M5 observation found for theme {theme_id} on {trade_date}")
+
+        try:
+            facts = ThemeM5PipelineService(self.con).calculate_m5_facts(trade_date)
+            current = facts.observations[facts.observations[THEME_ID] == theme_id]
+            if current.empty:
+                return M5ObservationAuditReport(
+                    theme_id=row[0],
+                    collection_id=row[1],
+                    trade_date=row[2],
+                    theme_member_count=int(row[3]),
+                    theme_hot_stock_count=int(row[4]),
+                    theme_hot_stock_ratio=float(row[5]) if row[5] is not None else None,
+                    theme_hot_list_appearance_count=int(row[6]),
+                    theme_hot_source_count=int(row[7]),
+                    production_run_id=row[8],
+                    input_snapshot_id=row[9],
+                    reconstructed_input_snapshot_id=facts.input_snapshot_id,
+                    is_reproducible=False,
+                    discrepancy_reason="THEME_NOT_IN_CURRENT_PIT_UNIVERSE",
+                )
+            calculated = current.iloc[0]
+            fields = (
+                THEME_MEMBER_COUNT,
+                THEME_HOT_STOCK_COUNT,
+                THEME_HOT_STOCK_RATIO,
+                THEME_HOT_LIST_APPEARANCE_COUNT,
+                THEME_HOT_SOURCE_COUNT,
+            )
+            stored_values = (row[3], row[4], row[5], row[6], row[7])
+            calculated_values = tuple(calculated[field] for field in fields)
+            values_match = all(
+                (stored is None or pd.isna(stored)) and (current_value is None or pd.isna(current_value))
+                or stored == current_value
+                for stored, current_value in zip(stored_values, calculated_values)
+            )
+            snapshot_match = row[9] == facts.input_snapshot_id
+            reason = None
+            if not values_match:
+                reason = "CURRENT_INPUTS_RECALCULATE_DIFFER"
+            elif not snapshot_match:
+                reason = "CURRENT_SOURCE_DIFFERS_FROM_PRODUCTION_SNAPSHOT"
+            return M5ObservationAuditReport(
+                theme_id=row[0],
+                collection_id=row[1],
+                trade_date=row[2],
+                theme_member_count=int(row[3]),
+                theme_hot_stock_count=int(row[4]),
+                theme_hot_stock_ratio=float(row[5]) if row[5] is not None else None,
+                theme_hot_list_appearance_count=int(row[6]),
+                theme_hot_source_count=int(row[7]),
+                production_run_id=row[8],
+                input_snapshot_id=row[9],
+                reconstructed_input_snapshot_id=facts.input_snapshot_id,
+                is_reproducible=values_match and snapshot_match,
+                discrepancy_reason=reason,
+            )
+        except ThemeM5PipelineError as exc:
+            return M5ObservationAuditReport(
+                theme_id=row[0],
+                collection_id=row[1],
+                trade_date=row[2],
+                theme_member_count=int(row[3]),
+                theme_hot_stock_count=int(row[4]),
+                theme_hot_stock_ratio=float(row[5]) if row[5] is not None else None,
+                theme_hot_list_appearance_count=int(row[6]),
+                theme_hot_source_count=int(row[7]),
+                production_run_id=row[8],
+                input_snapshot_id=row[9],
+                reconstructed_input_snapshot_id=None,
+                is_reproducible=False,
+                discrepancy_reason=exc.code,
+            )
 
     def get_theme_effective_members(
         self,
