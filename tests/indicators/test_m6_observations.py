@@ -241,3 +241,35 @@ def test_missing_required_columns_raises_error() -> None:
             yesterday_closes={},
         )
     assert exc_info.value.code == "MISSING_COLUMNS"
+
+
+def test_pre_limit_up_premium_numerical_scale_and_formula() -> None:
+    """验证昨日涨停溢价率封板公式与数值尺度：
+    premium_i(D) = close_i(D) / close_i(D-1) - 1
+    正式数值尺度为小数（如 0.0125 = 1.25%），验证 D-1 close = 10, D close = 10.5 -> premium = 0.05（非 5.0）。
+    """
+    target_date = date(2026, 8, 10)
+    today_df = _make_today_market(
+        [
+            {
+                TICKER: "000001.SZ",
+                MARKET_SCOPE: MARKET_SCOPE_MAIN_BOARD,
+                IS_LIMIT_UP: False,
+                IS_LIMIT_DOWN: False,
+                CLOSE: 10.5,
+                "is_trading": True,
+            },
+        ]
+    )
+    result = calculate_market_m6_observations(
+        trade_date=target_date,
+        today_market=today_df,
+        consecutive_streaks={},
+        yesterday_limit_up_tickers={"000001.SZ"},
+        yesterday_closes={"000001.SZ": 10.0},
+    )
+    mb = result.set_index(MARKET_SCOPE).loc[MARKET_SCOPE_MAIN_BOARD]
+    assert mb[PRE_LIMIT_UP_PREMIUM] is not None
+    assert pytest.approx(mb[PRE_LIMIT_UP_PREMIUM], abs=1e-6) == 0.05
+    assert mb[PRE_LIMIT_UP_PREMIUM] != 5.0
+

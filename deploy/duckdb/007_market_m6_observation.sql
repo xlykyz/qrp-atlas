@@ -1,4 +1,4 @@
--- 005_market_m6_observation.sql
+-- 007_market_m6_observation.sql
 -- Task04-C: Daily Market Sentiment (M6) complete facts observation schema.
 
 CREATE TABLE IF NOT EXISTS market_m6_observation (

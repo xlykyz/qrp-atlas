@@ -313,3 +313,103 @@ def test_m6_query_and_audit_report() -> None:
         assert any(d["market_scope"] == MARKET_SCOPE_MAIN_BOARD for d in tampered_report.discrepancies)
     finally:
         con.close()
+
+
+def test_consecutive_limit_up_preserves_streak_across_suspension() -> None:
+    """定向测试自然连板停牌语义：
+    按个股实际交易日计算，停牌日不参与，停牌日不打断连续性。
+    D1 涨停 -> D2 停牌 -> D3 涨停 => D3 连板高度 = 2。
+    不得将 trading_calendar 交易日上的停牌记录当作 streak break。
+    对比：D1 涨停 -> D2 交易未涨停 -> D3 涨停 => D3 连板高度 = 1。
+    """
+    con = duckdb.connect()
+    try:
+        _init_test_db(con)
+
+        # 1. trading_calendar: 3 consecutive open trading days
+        con.execute(
+            """
+            INSERT INTO trading_calendar (trade_date, is_open) VALUES
+                ('2026-08-05', TRUE),
+                ('2026-08-06', TRUE),
+                ('2026-08-07', TRUE)
+            """
+        )
+
+        # 2. stock_info
+        con.execute(
+            """
+            INSERT INTO stock_info (ticker, market, exchange) VALUES
+                ('000001.SZ', '主板', 'SZSE'),
+                ('000002.SZ', '主板', 'SZSE'),
+                ('000003.SZ', '主板', 'SZSE')
+            """
+        )
+
+        # 3. suspend_d:
+        # 000001.SZ suspended on 2026-08-06 (has snapshot row with volume=0)
+        # 000003.SZ suspended on 2026-08-06 (completely absent from snapshot)
+        con.execute(
+            """
+            INSERT INTO suspend_d (trade_date, ticker, suspend_type) VALUES
+                ('2026-08-06', '000001.SZ', '重大事项停牌'),
+                ('2026-08-06', '000003.SZ', '停牌一天')
+            """
+        )
+
+        # 4. daily_market_snapshot:
+        # D1 (2026-08-05): all 3 limit up
+        con.execute(
+            """
+            INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) VALUES
+                ('2026-08-05', '000001.SZ', 10.0, TRUE, FALSE, 1000),
+                ('2026-08-05', '000002.SZ', 10.0, TRUE, FALSE, 1000),
+                ('2026-08-05', '000003.SZ', 10.0, TRUE, FALSE, 1000)
+            """
+        )
+        # D2 (2026-08-06):
+        # 000001.SZ suspended (volume 0)
+        # 000002.SZ traded, NOT limit up (volume 1000, is_limit_up False)
+        # 000003.SZ no snapshot row (suspension without daily quote)
+        con.execute(
+            """
+            INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) VALUES
+                ('2026-08-06', '000001.SZ', 10.0, FALSE, FALSE, 0),
+                ('2026-08-06', '000002.SZ', 10.2, FALSE, FALSE, 1000)
+            """
+        )
+        # D3 (2026-08-07): all 3 limit up
+        con.execute(
+            """
+            INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) VALUES
+                ('2026-08-07', '000001.SZ', 11.0, TRUE, FALSE, 1000),
+                ('2026-08-07', '000002.SZ', 11.2, TRUE, FALSE, 1000),
+                ('2026-08-07', '000003.SZ', 11.0, TRUE, FALSE, 1000)
+            """
+        )
+
+        service = MarketM6PipelineService(con)
+        target_date = date(2026, 8, 7)
+        df = service.run_m6_daily(target_date, production_run_id="run-streak-suspension")
+
+        res_dict = df.set_index(MARKET_SCOPE).to_dict(orient="index")
+        mb = res_dict[MARKET_SCOPE_MAIN_BOARD]
+
+        # All 3 stocks hit limit up on D3
+        assert mb[LIMIT_UP_COUNT] == 3
+
+        # 000001.SZ: 涨停 -> 停牌 -> 涨停 => streak = 2
+        # 000003.SZ: 涨停 -> 停牌无行情行 -> 涨停 => streak = 2
+        # 000002.SZ: 涨停 -> 交易未涨停 -> 涨停 => streak = 1 (被打断，不计入 consecutive >= 2)
+        # 因此 consecutive_limit_up_count 必须恰好为 2 (000001 和 000003)
+        assert mb[CONSECUTIVE_LIMIT_UP_COUNT] == 2
+        assert mb[MAX_CONSECUTIVE_LIMIT_UP_HEIGHT] == 2
+
+        # 验证对账服务一致
+        query_service = MarketM6QueryService(con)
+        audit_report = query_service.audit_m6_observation(target_date)
+        assert audit_report.is_reproducible
+        assert len(audit_report.discrepancies) == 0
+    finally:
+        con.close()
+

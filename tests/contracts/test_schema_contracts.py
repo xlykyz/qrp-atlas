@@ -250,11 +250,11 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
 
 
 def test_m6_ddl_and_contracts_schema_consistency(tmp_path):
-    """验证 deploy/duckdb/005_market_m6_observation.sql 与 contracts/schema.py 100% 字段一致。"""
+    """验证 deploy/duckdb/007_market_m6_observation.sql 与 contracts/schema.py 100% 字段一致。"""
     from pathlib import Path
     from qrp_atlas.contracts.schema import TABLE_BY_NAME
 
-    ddl_path = Path("deploy/duckdb/005_market_m6_observation.sql")
+    ddl_path = Path("deploy/duckdb/007_market_m6_observation.sql")
     assert ddl_path.exists()
     sql_text = ddl_path.read_text(encoding="utf-8")
 

@@ -160,8 +160,8 @@ class MarketM6PipelineService:
                 {
                     TICKER: ticker_str,
                     MARKET_SCOPE: scope,
-                    IS_LIMIT_UP: bool(is_up) if is_up is not None else False,
-                    IS_LIMIT_DOWN: bool(is_down) if is_down is not None else False,
+                    IS_LIMIT_UP: bool(is_up) if (is_up is not None and is_trading) else False,
+                    IS_LIMIT_DOWN: bool(is_down) if (is_down is not None and is_trading) else False,
                     CLOSE: float(close_val) if close_val is not None else None,
                     "is_trading": is_trading,
                 }

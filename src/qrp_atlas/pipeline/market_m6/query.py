@@ -156,8 +156,8 @@ class MarketM6QueryService:
                     {
                         "ticker": t_str,
                         "market_scope": scope,
-                        "is_limit_up": bool(is_up) if is_up is not None else False,
-                        "is_limit_down": bool(is_down) if is_down is not None else False,
+                        "is_limit_up": bool(is_up) if (is_up is not None and is_trading) else False,
+                        "is_limit_down": bool(is_down) if (is_down is not None and is_trading) else False,
                         "close": float(close_val) if close_val is not None else None,
                         "is_trading": is_trading,
                     }
