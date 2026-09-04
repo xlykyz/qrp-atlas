@@ -292,6 +292,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         "dc_hot_ingest",
         "ths_hot_ingest",
         "theme_m5_production",
+        "market_m6_production",
     }
     assert all(contract.resource_locks == ("quant_db_writer",) for contract in MARKET_DATA_CONTRACTS)
     assert MARKET_DAILY_UPDATE.dependencies == ()
