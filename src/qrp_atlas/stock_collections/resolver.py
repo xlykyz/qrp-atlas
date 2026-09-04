@@ -9,7 +9,11 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-from qrp_atlas.contracts.stock_collection import CollectionScope, CollectionType
+from qrp_atlas.contracts.stock_collection import (
+    STOCK_COLLECTION_TABLE,
+    THEME_TABLE,
+    CollectionType,
+)
 
 from .adapters.theme import ThemeAdapter
 from .models import (
@@ -29,6 +33,82 @@ class StockCollectionResolver:
         self.con = con
         self.repo = StockCollectionRepository(con)
         self.theme_adapter = ThemeAdapter(con)
+
+    def resolve_active_themes(
+        self,
+        trade_date: date,
+        *,
+        knowledge_date: date | None = None,
+        allowed_scopes: tuple[str, ...] = ("CANONICAL",),
+        enforce_admission_cutoff: bool = True,
+    ) -> pd.DataFrame:
+        """Resolve the active Theme universe with one set-based PIT query.
+
+        Production callers use ``enforce_admission_cutoff=True`` so both the
+        Theme and its StockCollection are limited to revisions admitted before
+        the D-day 09:00 Asia/Shanghai cutoff.  Research callers may opt into a
+        knowledge-date view by disabling that admission cutoff.
+        """
+        columns = ["theme_id", "collection_id"]
+        if not allowed_scopes:
+            return pd.DataFrame(columns=columns)
+
+        scope_placeholders = ", ".join("?" for _ in allowed_scopes)
+        if enforce_admission_cutoff:
+            visibility = """
+                available_trade_date <= ?
+                AND ingested_at < (CAST(? AS DATE) + INTERVAL 9 HOUR)::TIMESTAMP
+                    AT TIME ZONE 'Asia/Shanghai'
+            """
+            theme_params: list[Any] = [trade_date, trade_date]
+            collection_params: list[Any] = [trade_date, trade_date]
+            interval_params: list[Any] = [trade_date, trade_date]
+        else:
+            knowledge = knowledge_date or trade_date
+            visibility = "available_trade_date <= ?"
+            theme_params = [knowledge]
+            collection_params = [knowledge]
+            interval_params = [trade_date, trade_date]
+
+        sql = f"""
+            WITH visible_themes AS (
+                SELECT
+                    theme_id, collection_id, status, effective_from, effective_to,
+                    row_number() OVER (
+                        PARTITION BY theme_id
+                        ORDER BY available_trade_date DESC, ingested_at DESC, revision_id DESC
+                    ) AS rn
+                FROM {THEME_TABLE}
+                WHERE {visibility}
+            ),
+            visible_collections AS (
+                SELECT
+                    collection_id, collection_type, collection_scope, status,
+                    effective_from, effective_to,
+                    row_number() OVER (
+                        PARTITION BY collection_id
+                        ORDER BY available_trade_date DESC, ingested_at DESC, revision_id DESC
+                    ) AS rn
+                FROM {STOCK_COLLECTION_TABLE}
+                WHERE {visibility}
+            )
+            SELECT t.theme_id, t.collection_id
+            FROM visible_themes t
+            JOIN visible_collections c ON c.collection_id = t.collection_id
+            WHERE t.rn = 1
+              AND c.rn = 1
+              AND t.status = 'ACTIVE'
+              AND c.status = 'ACTIVE'
+              AND c.collection_type = ?
+              AND c.collection_scope IN ({scope_placeholders})
+              AND t.effective_from <= ?
+              AND (t.effective_to IS NULL OR t.effective_to > ?)
+              AND c.effective_from <= ?
+              AND (c.effective_to IS NULL OR c.effective_to > ?)
+            ORDER BY t.theme_id ASC
+        """
+        params = [*theme_params, *collection_params, CollectionType.THEME, *allowed_scopes, *interval_params, *interval_params]
+        return self.con.execute(sql, params).df()
 
     def resolve_collection(
         self,

@@ -20,6 +20,8 @@ from qrp_atlas.contracts import (
     DAILY_MARKET_SNAPSHOT,
     TICKER,
     TRADE_DATE,
+    RANK_POSITION,
+    SNAPSHOT_SEQ,
     init_database,
     init_irm_database,
 )
@@ -138,6 +140,8 @@ def test_daily_market_snapshot_has_ohlcv_columns():
         ("theme_custom_index_state", ("theme_id", "trade_date")),
         ("theme_custom_index_episode", ("episode_id",)),
         ("theme_m4_observation", ("theme_id", "trade_date")),
+        ("dc_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
+        ("ths_hot", (TRADE_DATE, SNAPSHOT_SEQ, RANK_POSITION)),
         ("market_m6_observation", (TRADE_DATE, "market_scope")),
     ],
 )
@@ -220,6 +224,7 @@ def test_ddl_and_contracts_schema_consistency(tmp_path):
             "theme_custom_index_episode",
             "theme_m4_observation",
             "theme_production_run",
+            "theme_effective_member_daily",
         }
         assert ddl_tables == expected_ddl_tables
 

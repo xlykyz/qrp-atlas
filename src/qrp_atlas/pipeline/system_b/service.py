@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import resource
 import shutil
 import time
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 import uuid
 from collections import Counter
 from collections.abc import Sequence
@@ -207,6 +210,8 @@ def _validate_staging(
 
 
 def _peak_memory_mb() -> float:
+    if resource is None:
+        return 0.0
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 

@@ -273,7 +273,7 @@ def test_two_instances_produce_distinct_run_history(tmp_path: Path) -> None:
 
 def test_existing_registry_has_no_regression() -> None:
     contracts = validate_contracts(default_registry().all())
-    assert len(contracts) == 29
+    assert len(contracts) == 32
 
 
 def test_example_definitions_are_all_disabled() -> None:
