@@ -18,7 +18,8 @@ from qrp_atlas.indicators import (
 )
 from qrp_atlas.indicators.registry import get_indicator
 
-from .models import ParameterSpec, StrategyDefinition, StrategyInput
+from .models import ParameterSpec, StrategyDefinition, StrategyInput, StrategyInputScope
+
 
 
 class StrategyValidationError(ValueError):
@@ -40,6 +41,8 @@ def validate_definition(definition: StrategyDefinition) -> None:
 
     if not definition.code or not definition.version:
         raise StrategyValidationError("strategy code and version must be non-empty")
+    if not isinstance(definition.input_scope, StrategyInputScope):
+        raise StrategyValidationError(f"invalid input_scope: {definition.input_scope!r}")
     if len(set(definition.required_fields)) != len(definition.required_fields):
         raise StrategyValidationError("required_fields must not contain duplicates")
     if len(set(definition.required_indicators)) != len(definition.required_indicators):
@@ -170,7 +173,13 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
     if missing:
         raise StrategyValidationError(f"prepared_data missing required columns: {missing}")
 
-    identity_missing = [column for column in (TICKER, TRADE_DATE) if column not in df.columns]
+    scope = getattr(definition, "input_scope", StrategyInputScope.ASSET)
+    if scope is StrategyInputScope.MARKET:
+        identity_fields = (TRADE_DATE,)
+    else:
+        identity_fields = (TICKER, TRADE_DATE)
+
+    identity_missing = [column for column in identity_fields if column not in df.columns]
     if identity_missing:
         raise StrategyValidationError(
             f"prepared_data must include identity fields: {identity_missing}"
@@ -179,20 +188,29 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
     if df.empty:
         return df.copy()
 
-    duplicate_count = int(df.duplicated(subset=[TICKER, TRADE_DATE], keep=False).sum())
-    if duplicate_count:
-        raise StrategyValidationError(
-            f"prepared_data has {duplicate_count} duplicate (ticker, trade_date) rows"
-        )
-
     result = df.copy()
-    parsed_dates = pd.to_datetime(result[TRADE_DATE], errors="coerce")
+    parsed_dates = pd.to_datetime(result[TRADE_DATE], errors="coerce", format="mixed")
     if parsed_dates.isna().any():
         raise StrategyValidationError("prepared_data contains invalid trade_date values")
     result[TRADE_DATE] = parsed_dates.dt.strftime("%Y-%m-%d")
-    if result[TICKER].isna().any() or (result[TICKER].astype(str).str.strip() == "").any():
-        raise StrategyValidationError("prepared_data contains missing ticker values")
-    result[TICKER] = result[TICKER].astype(str)
+
+
+    if scope is StrategyInputScope.MARKET:
+        duplicate_count = int(result.duplicated(subset=[TRADE_DATE], keep=False).sum())
+        if duplicate_count:
+            raise StrategyValidationError(
+                f"prepared_data has {duplicate_count} duplicate trade_date rows"
+            )
+    else:
+        if result[TICKER].isna().any() or (result[TICKER].astype(str).str.strip() == "").any():
+            raise StrategyValidationError("prepared_data contains missing ticker values")
+        result[TICKER] = result[TICKER].astype(str)
+        duplicate_count = int(result.duplicated(subset=[TICKER, TRADE_DATE], keep=False).sum())
+        if duplicate_count:
+            raise StrategyValidationError(
+                f"prepared_data has {duplicate_count} duplicate (ticker, trade_date) rows"
+            )
+
 
     strict_columns = tuple(dict.fromkeys((*definition.required_fields, *definition.required_indicators)))
     for column in strict_columns:
@@ -211,4 +229,7 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
     if any(not isinstance(value, bool) for value in strategy_input.initial_positions.values()):
         raise StrategyValidationError("initial_positions values must be bool")
 
+    if scope is StrategyInputScope.MARKET:
+        return result.sort_values([TRADE_DATE], kind="mergesort").reset_index(drop=True)
     return result.sort_values([TICKER, TRADE_DATE], kind="mergesort").reset_index(drop=True)
+

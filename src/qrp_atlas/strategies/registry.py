@@ -86,10 +86,13 @@ def _build_default_registry() -> StrategyRegistry:
         MultifactorLongOnlyStrategy,
     )
     from .builtin.system_b_basic import SystemBBasicStrategy
+    from .builtin.system_b_authorization import SystemBAuthorizationStrategy
     from .builtin.event_drift import EventDriftBasicStrategy
 
     registry = StrategyRegistry()
     registry.register(SystemBBasicStrategy())
+    registry.register(SystemBAuthorizationStrategy())
+
     registry.register(TimeSeriesMomentumStrategy())
     registry.register(DualSmaTrendStrategy())
     registry.register(DonchianBreakoutStrategy())

@@ -63,6 +63,8 @@ M3_IDENTIFIABLE = "M3_identifiable"
 V_TRIGGERED = "V_triggered"
 NOTES = "notes"
 
+
+
 TRADE_ID = "trade_id"
 ENTRY_DATE = "entry_date"
 ENTRY_PRICE = "entry_price"
@@ -86,6 +88,8 @@ NUMERIC_FIELDS = (
 )
 
 BOOLEAN_FIELDS = (IS_ST, IS_LIMIT_UP, IS_LIMIT_DOWN, M1_CORE, M2_FRONT, M3_IDENTIFIABLE, V_TRIGGERED)
+
+
 
 EXCHANGE = "exchange"
 MARKET = "market"

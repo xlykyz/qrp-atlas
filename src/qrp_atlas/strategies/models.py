@@ -26,6 +26,14 @@ class StrategyAction(str, Enum):
     NO_ACTION = "NO_ACTION"
 
 
+class StrategyInputScope(str, Enum):
+    """Scope of strategy inputs and decisions."""
+
+    ASSET = "ASSET"
+    MARKET = "MARKET"
+
+
+
 @dataclass(frozen=True)
 class ParameterSpec:
     """A serializable parameter contract with optional bounds."""
@@ -59,6 +67,7 @@ class StrategyDefinition:
     strategy_type: StrategyType
     required_fields: tuple[str, ...]
     required_indicators: tuple[str, ...]
+    input_scope: StrategyInputScope = StrategyInputScope.ASSET
     parameter_schema: Mapping[str, ParameterSpec] = field(default_factory=dict)
     indicator_requests: tuple[IndicatorRequest, ...] = ()
 
@@ -69,6 +78,7 @@ class StrategyDefinition:
             "version": self.version,
             "description": self.description,
             "strategy_type": self.strategy_type.value,
+            "input_scope": self.input_scope.value,
             "required_fields": list(self.required_fields),
             "required_indicators": list(self.required_indicators),
             "indicator_requests": [request.to_dict() for request in self.indicator_requests],
@@ -77,6 +87,7 @@ class StrategyDefinition:
                 for code, spec in sorted(self.parameter_schema.items())
             },
         }
+
 
 
 @dataclass(frozen=True)
@@ -120,18 +131,45 @@ class StrategyDecision:
 
 
 @dataclass(frozen=True)
+class StrategyAuthorization:
+    """Strategy-level authorization for actions such as new positions."""
+
+    trade_date: str
+    strategy_code: str
+    strategy_version: str
+    authorization_type: str
+    is_authorized: bool
+    reason_codes: tuple[str, ...]
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trade_date": self.trade_date,
+            "strategy_code": self.strategy_code,
+            "strategy_version": self.strategy_version,
+            "authorization_type": self.authorization_type,
+            "is_authorized": self.is_authorized,
+            "reason_codes": list(self.reason_codes),
+            "evidence": dict(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
 class StrategyRunResult:
     """The complete deterministic output of a strategy invocation."""
 
     definition: StrategyDefinition
     parameters: Mapping[str, Any]
-    decisions: tuple[StrategyDecision, ...]
+    decisions: tuple[StrategyDecision, ...] = ()
     diagnostics: tuple[str, ...] = ()
+    authorizations: tuple[StrategyAuthorization, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "definition": self.definition.to_dict(),
             "parameters": dict(self.parameters),
             "decisions": [decision.to_dict() for decision in self.decisions],
+            "authorizations": [authorization.to_dict() for authorization in self.authorizations],
             "diagnostics": list(self.diagnostics),
         }
+

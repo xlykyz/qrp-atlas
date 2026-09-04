@@ -3,9 +3,11 @@
 from .models import (
     ParameterSpec,
     StrategyAction,
+    StrategyAuthorization,
     StrategyDecision,
     StrategyDefinition,
     StrategyInput,
+    StrategyInputScope,
     StrategyRunResult,
     StrategyType,
 )
@@ -32,21 +34,26 @@ from .selection import (
     selection_to_target_weights,
 )
 from .builtin.cross_section import compute_composite_score
+from .builtin.system_b_authorization import SystemBAuthorizationStrategy
+
 
 __all__ = [
     "DEFAULT_REGISTRY",
     "DuplicateStrategyError",
     "ParameterSpec",
     "StrategyAction",
+    "StrategyAuthorization",
     "StrategyDecision",
     "StrategyDefinition",
     "StrategyInput",
+    "StrategyInputScope",
     "StrategyNotFoundError",
     "StrategyProtocol",
     "StrategyRegistry",
     "StrategyRunResult",
     "StrategyType",
     "StrategyValidationError",
+    "SystemBAuthorizationStrategy",
     "get_strategy",
     "list_strategies",
     "run_strategy",
