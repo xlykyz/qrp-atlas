@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from qrp_atlas.contracts import PHASE, TRADE_DATE, V_TRIGGERED_LOWER
+from qrp_atlas.contracts import PHASE, TRADE_DATE, V_TRIGGERED
 
 from ..models import (
     StrategyAuthorization,
@@ -34,9 +34,10 @@ class SystemBAuthorizationStrategy:
         description="System B market-level new position authorization strategy.",
         strategy_type=StrategyType.BUILTIN,
         input_scope=StrategyInputScope.MARKET,
-        required_fields=(TRADE_DATE, PHASE, V_TRIGGERED_LOWER),
+        required_fields=(TRADE_DATE, PHASE, V_TRIGGERED),
         required_indicators=(),
     )
+
 
     def __init__(self) -> None:
         validate_definition(self.definition)
@@ -57,7 +58,7 @@ class SystemBAuthorizationStrategy:
         for row in prepared.itertuples(index=False):
             trade_date = str(getattr(row, TRADE_DATE))
             phase = getattr(row, PHASE)
-            v_val = getattr(row, V_TRIGGERED_LOWER)
+            v_val = getattr(row, V_TRIGGERED)
 
             if not isinstance(phase, str) or phase not in VALID_PHASES:
                 raise StrategyValidationError(
@@ -66,7 +67,7 @@ class SystemBAuthorizationStrategy:
 
             if not isinstance(v_val, (bool, np.bool_)):
                 raise StrategyValidationError(
-                    f"v_triggered must be a boolean, got {type(v_val).__name__} ({v_val!r})"
+                    f"V_triggered must be a boolean, got {type(v_val).__name__} ({v_val!r})"
                 )
             v_triggered = bool(v_val)
 
@@ -90,11 +91,12 @@ class SystemBAuthorizationStrategy:
 
             evidence = {
                 "market_phase": phase,
-                "v_triggered": v_triggered,
+                V_TRIGGERED: v_triggered,
                 "semantic_owner": "SYSTEM_B",
                 "delivery_mode": "BUILTIN",
                 "capability_type": "STRATEGY",
             }
+
 
             authorizations.append(
                 StrategyAuthorization(

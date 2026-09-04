@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from qrp_atlas.contracts import PHASE, TICKER, TRADE_DATE, V_TRIGGERED_LOWER
+from qrp_atlas.contracts import PHASE, TICKER, TRADE_DATE, V_TRIGGERED
 from qrp_atlas.strategies import (
     StrategyAuthorization,
     StrategyInput,
@@ -20,11 +20,11 @@ from qrp_atlas.strategies.builtin.system_b_authorization import SystemBAuthoriza
 def _market_frame() -> pd.DataFrame:
     return pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-04", PHASE: "B", V_TRIGGERED_LOWER: True},
-            {TRADE_DATE: "2024-01-02", PHASE: "B", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-03", PHASE: "C", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-05", PHASE: "UNRESOLVED", V_TRIGGERED_LOWER: False},
+            {TRADE_DATE: "2024-01-04", PHASE: "B", V_TRIGGERED: True},
+            {TRADE_DATE: "2024-01-02", PHASE: "B", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-03", PHASE: "C", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-05", PHASE: "UNRESOLVED", V_TRIGGERED: False},
         ]
     )
 
@@ -36,7 +36,7 @@ def test_registry_discovers_system_b_authorization() -> None:
     assert definition.code == "system_b_authorization"
     assert definition.version == "1.0.0"
     assert definition.input_scope is StrategyInputScope.MARKET
-    assert definition.required_fields == (TRADE_DATE, PHASE, V_TRIGGERED_LOWER)
+    assert definition.required_fields == (TRADE_DATE, PHASE, V_TRIGGERED)
     assert definition.required_indicators == ()
 
     payload = definition.to_dict()
@@ -90,25 +90,53 @@ def test_asset_scope_still_requires_ticker() -> None:
         )
 
 
-
 def test_market_scope_rejects_duplicate_trade_dates() -> None:
     duplicate_df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED_LOWER: False},
+            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED: False},
         ]
     )
     with pytest.raises(StrategyValidationError, match="duplicate trade_date rows"):
         run_strategy("system_b_authorization", StrategyInput(duplicate_df))
 
 
+def test_market_scope_canonicalizes_before_duplicate_check() -> None:
+    # 2024-01-01 and 2024/01/01 represent the same date and must be rejected as duplicate
+    df = pd.DataFrame(
+        [
+            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED: False},
+            {TRADE_DATE: "2024/01/01", PHASE: "B", V_TRIGGERED: False},
+        ]
+    )
+    with pytest.raises(StrategyValidationError, match="duplicate trade_date rows"):
+        run_strategy("system_b_authorization", StrategyInput(df))
+
+
+def test_asset_scope_canonicalizes_before_duplicate_check() -> None:
+    from qrp_atlas.indicators.system_b.detector import (
+        SYSTEM_B_EXIT_TRIGGERED,
+        SYSTEM_B_TREND_VALID,
+    )
+
+    # Same ticker with dates '2024-01-01' and '2024/01/01' must be rejected as duplicate
+    df = pd.DataFrame(
+        [
+            {TICKER: "000001.SZ", TRADE_DATE: "2024-01-01", SYSTEM_B_TREND_VALID: False, SYSTEM_B_EXIT_TRIGGERED: False},
+            {TICKER: "000001.SZ", TRADE_DATE: "2024/01/01", SYSTEM_B_TREND_VALID: True, SYSTEM_B_EXIT_TRIGGERED: False},
+        ]
+    )
+    with pytest.raises(StrategyValidationError, match="duplicate \\(ticker, trade_date\\) rows"):
+        run_strategy("system_b_basic", StrategyInput(df))
+
+
 def test_authorization_all_phases_and_reasons() -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-02", PHASE: "B", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-03", PHASE: "C", V_TRIGGERED_LOWER: False},
-            {TRADE_DATE: "2024-01-04", PHASE: "UNRESOLVED", V_TRIGGERED_LOWER: False},
+            {TRADE_DATE: "2024-01-01", PHASE: "A", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-02", PHASE: "B", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-03", PHASE: "C", V_TRIGGERED: False},
+            {TRADE_DATE: "2024-01-04", PHASE: "UNRESOLVED", V_TRIGGERED: False},
         ]
     )
     result = run_strategy("system_b_authorization", StrategyInput(df))
@@ -136,8 +164,8 @@ def test_authorization_all_phases_and_reasons() -> None:
 def test_v_rule_revokes_phase_b_authorization() -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED_LOWER: True},
-            {TRADE_DATE: "2024-01-02", PHASE: "A", V_TRIGGERED_LOWER: True},
+            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED: True},
+            {TRADE_DATE: "2024-01-02", PHASE: "A", V_TRIGGERED: True},
         ]
     )
     result = run_strategy("system_b_authorization", StrategyInput(df))
@@ -149,7 +177,7 @@ def test_v_rule_revokes_phase_b_authorization() -> None:
     assert b_auth.reason_codes == ("V_RULE_REVOKED",)
     assert b_auth.evidence == {
         "market_phase": "B",
-        "v_triggered": True,
+        V_TRIGGERED: True,
         "semantic_owner": "SYSTEM_B",
         "delivery_mode": "BUILTIN",
         "capability_type": "STRATEGY",
@@ -180,7 +208,7 @@ def test_empty_input_returns_empty_authorizations() -> None:
 def test_rejects_invalid_phase(invalid_phase: object) -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: invalid_phase, V_TRIGGERED_LOWER: False},
+            {TRADE_DATE: "2024-01-01", PHASE: invalid_phase, V_TRIGGERED: False},
         ]
     )
     with pytest.raises(StrategyValidationError, match="invalid market phase"):
@@ -194,17 +222,17 @@ def test_rejects_invalid_phase(invalid_phase: object) -> None:
 def test_rejects_non_boolean_v_triggered(invalid_v: object) -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED_LOWER: invalid_v},
+            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED: invalid_v},
         ]
     )
-    with pytest.raises(StrategyValidationError, match="v_triggered must be a boolean"):
+    with pytest.raises(StrategyValidationError, match="must be a boolean"):
         run_strategy("system_b_authorization", StrategyInput(df))
 
 
 def test_rejects_missing_v_triggered_values() -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED_LOWER: np.nan},
+            {TRADE_DATE: "2024-01-01", PHASE: "B", V_TRIGGERED: np.nan},
         ]
     )
     with pytest.raises(StrategyValidationError, match="missing values"):
@@ -214,7 +242,7 @@ def test_rejects_missing_v_triggered_values() -> None:
 def test_rejects_invalid_trade_date() -> None:
     df = pd.DataFrame(
         [
-            {TRADE_DATE: "not-a-date", PHASE: "B", V_TRIGGERED_LOWER: False},
+            {TRADE_DATE: "not-a-date", PHASE: "B", V_TRIGGERED: False},
         ]
     )
     with pytest.raises(StrategyValidationError, match="invalid trade_date values"):
@@ -240,7 +268,7 @@ def test_strategy_authorization_dataclass_serialization() -> None:
         authorization_type="NEW_POSITION",
         is_authorized=True,
         reason_codes=("PHASE_B_AUTHORIZED",),
-        evidence={"market_phase": "B", "v_triggered": False},
+        evidence={"market_phase": "B", V_TRIGGERED: False},
     )
     payload = auth.to_dict()
     assert payload == {
@@ -250,5 +278,5 @@ def test_strategy_authorization_dataclass_serialization() -> None:
         "authorization_type": "NEW_POSITION",
         "is_authorized": True,
         "reason_codes": ["PHASE_B_AUTHORIZED"],
-        "evidence": {"market_phase": "B", "v_triggered": False},
+        "evidence": {"market_phase": "B", V_TRIGGERED: False},
     }

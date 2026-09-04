@@ -188,28 +188,29 @@ def validate_strategy_input(definition: StrategyDefinition, strategy_input: Stra
     if df.empty:
         return df.copy()
 
+    result = df.copy()
+    parsed_dates = pd.to_datetime(result[TRADE_DATE], errors="coerce", format="mixed")
+    if parsed_dates.isna().any():
+        raise StrategyValidationError("prepared_data contains invalid trade_date values")
+    result[TRADE_DATE] = parsed_dates.dt.strftime("%Y-%m-%d")
+
+
     if scope is StrategyInputScope.MARKET:
-        duplicate_count = int(df.duplicated(subset=[TRADE_DATE], keep=False).sum())
+        duplicate_count = int(result.duplicated(subset=[TRADE_DATE], keep=False).sum())
         if duplicate_count:
             raise StrategyValidationError(
                 f"prepared_data has {duplicate_count} duplicate trade_date rows"
             )
     else:
-        duplicate_count = int(df.duplicated(subset=[TICKER, TRADE_DATE], keep=False).sum())
+        if result[TICKER].isna().any() or (result[TICKER].astype(str).str.strip() == "").any():
+            raise StrategyValidationError("prepared_data contains missing ticker values")
+        result[TICKER] = result[TICKER].astype(str)
+        duplicate_count = int(result.duplicated(subset=[TICKER, TRADE_DATE], keep=False).sum())
         if duplicate_count:
             raise StrategyValidationError(
                 f"prepared_data has {duplicate_count} duplicate (ticker, trade_date) rows"
             )
 
-    result = df.copy()
-    parsed_dates = pd.to_datetime(result[TRADE_DATE], errors="coerce")
-    if parsed_dates.isna().any():
-        raise StrategyValidationError("prepared_data contains invalid trade_date values")
-    result[TRADE_DATE] = parsed_dates.dt.strftime("%Y-%m-%d")
-    if scope is not StrategyInputScope.MARKET:
-        if result[TICKER].isna().any() or (result[TICKER].astype(str).str.strip() == "").any():
-            raise StrategyValidationError("prepared_data contains missing ticker values")
-        result[TICKER] = result[TICKER].astype(str)
 
     strict_columns = tuple(dict.fromkeys((*definition.required_fields, *definition.required_indicators)))
     for column in strict_columns:
