@@ -1,8 +1,19 @@
 # System B 工程映射
 
+> **2026-09-04 中期评估调整**：System B 继续作为 QRP 的 bundled built-in strategy 开发，但其业务语义归属 System B / MyTradingSystem，不等同于 QRP Core 自身语义。内置与未来外部插入策略原则上复用同一套 QRP contracts、registry、pipeline、database、runtime 与 result 基础设施，不因身份不同复制基础设施。
+>
+> 原 Task 10-A、10-B、11 对应的 execution、qrp-trading、真实券商交易与小资金实盘已退出 v1.1 当前范围。相关映射保留并使用删除线标记，作为未来 Execution Extension 的历史设计参考。
+
 ## 1. 映射原则
 
 本文件只做“业务规则 → 工程落位”映射，不重新解释或修改交易规则。
+
+System B 当前产品身份：
+
+```text
+semantic_owner = SYSTEM_B
+delivery_mode = BUILTIN
+```
 
 | 业务对象 | 工程层 | 主要输出 |
 | --- | --- | --- |
@@ -20,9 +31,11 @@
 | 单票和账户仓位约束 | strategies / portfolio | 完整目标组合 |
 | T+1、停牌、涨跌停、整数手、成本 | backtest engine | 模拟订单与成交 |
 | 每日生产阶段 | backtest product / production | `production_run` 与产物 |
-| 订单计划和 OMS | execution | order plan / intent / live state |
-| MiniQMT 与券商事件 | qrp-trading | 外部网关和券商事实 |
-| 三方对账 | execution | reconciliation difference |
+| ~~订单计划和 OMS~~ | ~~execution~~ | ~~order plan / intent / live state~~ |
+| ~~MiniQMT 与券商事件~~ | ~~qrp-trading~~ | ~~外部网关和券商事实~~ |
+| ~~三方对账~~ | ~~execution~~ | ~~reconciliation difference~~ |
+
+删除线部分不再属于 v1.1 当前范围。
 
 ## 2. 基础状态与行情轮次
 
@@ -120,6 +133,8 @@ reason_code = SCORE_MODEL_NOT_APPROVED
 
 不得把空评分当作 0 分后继续下单。
 
+上述判断、评分、身份与组合规则属于 System B 语义，可作为 QRP built-in strategy / strategy components 实现；它们不因此升级为 QRP Core 的通用业务规则。
+
 ## 6. 组合目标
 
 策略必须输出完整目标组合快照，而不是只输出“买入某票”的增量信号。
@@ -181,7 +196,12 @@ parameter_set_id
 calculation_versions
 stage_statuses
 target_snapshot_id
-order_plan_id
 ```
+
+原 execution 路径字段：
+
+- ~~`order_plan_id`~~
+
+不再作为 v1.1 当前每日运行的必需产物。
 
 任一输入不完整、规则版本不明确或评分未批准时，必须显式阻断新增仓，并保留原因。
