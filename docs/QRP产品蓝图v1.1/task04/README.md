@@ -176,7 +176,7 @@ ingested_at
 
 ## 5. 04-C｜M6 市场情绪完整事实能力
 
-M6 大部分底层数据已经存在，目标是把全市场及不同交易板块的短线结构形成稳定 observations。
+M6 v0.1 业务设计已封板，主要是对现有市场事实进行标准化日级聚合，不需要新增数据底座或身份体系。
 
 基础范围：
 
@@ -188,25 +188,48 @@ STAR_MARKET
 BSE
 ```
 
-核心事实：
+正式五项事实：
 
 ```text
 limit_up_count
 limit_down_count
 consecutive_limit_up_count
 max_consecutive_limit_up_height
-limit_up_premium
+pre_limit_up_premium
 ```
 
-其中前四项可以基于现有市场、涨跌停和连板事实推进。
+其中：
 
-`limit_up_premium` 的最终观察口径尚未封板，可候选为次日集合竞价、开盘、收盘或最高价等口径；该单项未配置不得阻塞其余 M6 observations。
+- `limit_up_count`：观察范围内 D 日收盘最终涨停股票数量；
+- `limit_down_count`：观察范围内 D 日收盘最终跌停股票数量；
+- `consecutive_limit_up_count`：当前自然连板高度 `>= 2` 的股票数量；
+- `max_consecutive_limit_up_height`：当前自然连板最高高度；
+- `pre_limit_up_premium`：前一实际交易日最终涨停股票中，D 日实际交易样本的等权平均收盘收益率。
 
-M6 当前同样不定义：
+`pre_limit_up_premium` 正式使用：
+
+```text
+close(D) / close(D-1) - 1
+```
+
+并遵守：D 日停牌样本不进入分母；负收益正常计入；无有效样本返回 `NULL`；`ALL_MARKET` 对全部有效股票样本直接等权平均，不对子市场均值二次平均。
+
+自然连板按个股实际交易日连续性计算，停牌不参与也不打断。
+
+市场范围必须复用既有 canonical 市场分类，不为 M6 另建市场身份或以股票代码前缀替代正式分类。
+
+完整设计见：
+
+```text
+Task04-C M6 市场情绪完整事实能力设计书 v0.1.md
+```
+
+M6 当前仍不定义：
 
 - 综合 M6 总分；
 - 强弱阈值；
 - 不同市场板块权重；
+- 历史标准化；
 - M6 对主线或仓位的直接影响。
 
 ## 6. 三个子包之间的关系
@@ -229,7 +252,7 @@ M6 当前同样不定义：
 
 - M4 的关键基础设施是 StockCollection + PIT Theme Membership；
 - M5 的关键基础设施是 Popularity Data Pipeline；
-- M6 主要是现有市场事实的标准化派生与少量口径裁决。
+- M6 主要是现有市场事实的标准化派生与日级聚合。
 
 ## 7. Task 04 最终边界
 
