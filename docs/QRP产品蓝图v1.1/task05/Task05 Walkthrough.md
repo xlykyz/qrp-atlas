@@ -1,6 +1,6 @@
 # Task05 Walkthrough - System B 新增仓授权策略实现
 
-在 `feature/v1.1-task05-authorization` 分支上完成了 Task05 System B market-level 新增仓授权策略实现。
+在 `feature/v1.1-task05-authorization` 分支上完成了 Task05 System B market-level 新增仓授权策略实现及 Review 修正。
 
 ## 变更概述
 
@@ -10,31 +10,33 @@
    - 新增 `@dataclass(frozen=True) StrategyAuthorization` 类型化授权结果，包含 `trade_date`, `strategy_code`, `strategy_version`, `authorization_type`, `is_authorized`, `reason_codes`, `evidence` 及 `to_dict()` 序列化；
    - `StrategyRunResult` 增加 `authorizations: tuple[StrategyAuthorization, ...] = ()`，保持既有 `decisions` 和其它字段不变。
 
-2. **Scope-Aware 校验机制** (`strategies/validation.py`)
+2. **Scope-Aware 校验机制与规范化顺序修正** (`strategies/validation.py`)
    - `validate_definition` 校验 `input_scope` 必须为有效 `StrategyInputScope`；
-   - `validate_strategy_input` 根据 `input_scope` 进行针对性处理：
-     - `MARKET` 模式下 identity 仅要求 `trade_date`，不要求 `ticker`；
-     - `MARKET` 模式下检查并拒绝同一 `trade_date` 重复输入；
-     - `MARKET` 模式按 `[trade_date]` mergesort 稳定排序；
-     - `ASSET` 模式维持原本全部 `(ticker, trade_date)` 校验与排序行为。
+   - `validate_strategy_input` 严格执行**先规范化 identity，再进行 duplicate check** 的确定性流转：
+     - `MARKET`: `trade_date canonicalize (format="mixed") → duplicate(trade_date) → sort`；
+       - identity 仅要求 `trade_date`，不要求 `ticker`；
+       - 等价日期格式（如 `2024-01-01` 与 `2024/01/01`）先规范化为标准 ISO 日期，并在同日重复检查中被严格拒绝；
+       - mergesort 按 `[trade_date]` 稳定排序；
+     - `ASSET`: `trade_date canonicalize + ticker canonicalize → duplicate(ticker, trade_date) → sort`；
+       - 严格维持原有全部 `(ticker, trade_date)` 校验、等价日期去重与 `[ticker, trade_date]` 排序行为。
 
-3. **Contracts 字段扩充** (`contracts/fields.py`, `contracts/__init__.py`)
-   - 新增 `V_TRIGGERED_LOWER = "v_triggered"` 常量，使得 `known_contract_fields()` 自动纳入 `"v_triggered"`，并加入 `BOOLEAN_FIELDS`。
+3. **Contracts 字段复用（零重复定义）** (`contracts/fields.py`, `contracts/__init__.py`)
+   - 统一复用既有 contracts SSOT `V_TRIGGERED`（wire value `"V_triggered"`），不新增 `V_TRIGGERED_LOWER` 重复契约常量，严格保持现有字段 SSOT 纯洁性。
 
 4. **System B Authorization Strategy** (`strategies/builtin/system_b_authorization.py`)
    - 实现 `SystemBAuthorizationStrategy`：
      - `code = "system_b_authorization"`, `version = "1.0.0"`, `input_scope = MARKET`；
-     - 输入字段严格要求 `(trade_date, phase, v_triggered)`；
+     - 输入字段严格要求 `(trade_date, phase, V_triggered)`（通过 `V_TRIGGERED` 契约常量）；
      - 校验 `phase` 必须在 `{"A", "B", "C", "UNRESOLVED"}`；
-     - 校验 `v_triggered` 必须为严格布尔类型（拒绝 int 0/1、字符串、None 等）；
-     - 优先级逻辑：V 规则触发（`v_triggered=True`）高于阶段 B 授权；
+     - 校验 `V_triggered` 必须为严格布尔类型（拒绝 int 0/1、字符串、None 等）；
+     - 优先级逻辑：V 规则触发（`V_triggered=True`）高于阶段 B 授权；
      - 阶段规则及 reason codes：
-       - `v_triggered = True` -> `is_authorized = False`, `reason = V_RULE_REVOKED`
-       - `phase = "B"` (`v_triggered = False`) -> `is_authorized = True`, `reason = PHASE_B_AUTHORIZED`
-       - `phase = "A"` (`v_triggered = False`) -> `is_authorized = False`, `reason = PHASE_A_NOT_AUTHORIZED`
-       - `phase = "C"` (`v_triggered = False`) -> `is_authorized = False`, `reason = PHASE_C_NOT_AUTHORIZED`
-       - `phase = "UNRESOLVED"` (`v_triggered = False`) -> `is_authorized = False`, `reason = PHASE_UNRESOLVED`
-     - Evidence 包含：`market_phase`, `v_triggered`, `semantic_owner="SYSTEM_B"`, `delivery_mode="BUILTIN"`, `capability_type="STRATEGY"`；
+       - `V_triggered = True` -> `is_authorized = False`, `reason = V_RULE_REVOKED`
+       - `phase = "B"` (`V_triggered = False`) -> `is_authorized = True`, `reason = PHASE_B_AUTHORIZED`
+       - `phase = "A"` (`V_triggered = False`) -> `is_authorized = False`, `reason = PHASE_A_NOT_AUTHORIZED`
+       - `phase = "C"` (`V_triggered = False`) -> `is_authorized = False`, `reason = PHASE_C_NOT_AUTHORIZED`
+       - `phase = "UNRESOLVED"` (`V_triggered = False`) -> `is_authorized = False`, `reason = PHASE_UNRESOLVED`
+     - Evidence 包含：`market_phase`, `V_TRIGGERED`, `semantic_owner="SYSTEM_B"`, `delivery_mode="BUILTIN"`, `capability_type="STRATEGY"`；
      - 绝对不生成任何 `StrategyDecision` (`decisions=()`)。
 
 5. **Registry & 导出** (`strategies/registry.py`, `strategies/__init__.py`, `strategies/builtin/__init__.py`)
@@ -42,7 +44,7 @@
    - 导出 `StrategyInputScope`, `StrategyAuthorization`, `SystemBAuthorizationStrategy`。
 
 6. **测试用例** (`tests/strategies/test_system_b_authorization.py`, `tests/strategies/test_registry.py`)
-   - 新增 26 个单元测试，覆盖 MARKET scope 校验、各阶段授权判断、V 规则撤权优先级、非法输入 fail-closed、无 decisions 约束、确定性重放及 Registry 发现等；
+   - 新增 28 个单元测试，覆盖 MARKET scope 校验、各阶段授权判断、V 规则撤权优先级、规范化前后重复拦截（`2024-01-01` 与 `2024/01/01`）、非法输入 fail-closed、无 decisions 约束、确定性重放及 Registry 发现等；
    - 更新 Registry 固定策略清单断言。
 
 ## 验证结果
@@ -51,21 +53,21 @@
   ```pwsh
   pytest tests/strategies/test_system_b_authorization.py tests/strategies/test_registry.py tests/strategies/test_system_b_basic.py -v
   ```
-  结果：36 passed in 0.19s
+  结果：38 passed in 0.18s
 
 - **Strategy Module Tests**:
   ```pwsh
   pytest tests/strategies/ -v
   ```
-  结果：161 passed in 5.26s
+  结果：163 passed in 5.87s
 
 - **Full Project Tests**:
   ```pwsh
   pytest
   ```
-  结果：1373 passed, 3 skipped in 240.08s (0:04:00)，全仓测试 0 回归。
+  结果：1375 passed, 3 skipped in 256.59s (0:04:16)，全仓测试 0 回归。
 
-## Commit 信息
+## Commit 记录
 
-- **Commit SHA**: `ada9c0c691a149fc850edd1fc7924c0bec7f9540`
-- **Commit Message**: `feat(strategies): implement Task05 System B new position authorization strategy`
+- **Base Feature Commit**: `ada9c0c691a149fc850edd1fc7924c0bec7f9540` (`feat(strategies): implement Task05 System B new position authorization strategy`)
+- **Review Fix Commit**: `6af921e33d027e8a9f6e6d1933bf9cbf39df5b12` (`fix(strategies): canonicalize identity before duplicate check and reuse V_TRIGGERED`)
