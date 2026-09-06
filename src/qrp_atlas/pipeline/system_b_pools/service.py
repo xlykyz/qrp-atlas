@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import json
+import math
 from pathlib import Path
 import shutil
 from time import perf_counter
@@ -19,6 +20,10 @@ from qrp_atlas.contracts import (
     EPISODE_END_DATE,
     EPISODE_ID,
     EPISODE_RETURN,
+    HEIGHT_START_BASE_CLOSE,
+    HEIGHT_START_DATE,
+    HEIGHT_SINCE_START_RETURN,
+    METRICS_JSON,
     RULE_VERSION,
     SYSTEM_B_EPISODE_TABLE,
     SYSTEM_B_EPISODE_OBSERVATION_TABLE,
@@ -33,6 +38,10 @@ from qrp_atlas.contracts import (
 )
 from qrp_atlas.indicators.system_b import calculate_stock_pool
 from qrp_atlas.indicators.system_b.pools import EXITED, HEIGHT, CAPACITY, RECOGNITION, IN_POOL
+from qrp_atlas.pipeline.system_b.market_series import (
+    CanonicalMarketSeriesError,
+    load_canonical_market_series,
+)
 
 
 class SystemBPoolProductionError(RuntimeError):
@@ -95,17 +104,27 @@ def ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 def _load_market_panel(con: duckdb.DuckDBPyConnection, end_date: date) -> pd.DataFrame:
     """Read the canonical facts and form one in-memory pool feature panel."""
+    try:
+        canonical = load_canonical_market_series(con, end_date)
+    except CanonicalMarketSeriesError as exc:
+        raise SystemBPoolProductionError(exc.code, exc.detail) from exc
+    if canonical.empty:
+        raise SystemBPoolProductionError("EMPTY_POOL_MARKET_PANEL")
+
+    # Keep the existing pool evaluator input shape, but make its OHLC values
+    # come from the same target-normalised adjusted series as System B state.
+    canonical = canonical.rename(columns={"ticker": "asset_id"})
+    con.register("_system_b_canonical_market_series", canonical)
     tables = {row[0] for row in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
-    market = DAILY_MARKET_SNAPSHOT.name
     basic = DAILY_BASIC.name
     zt = ZT_POOL.name
     basic_join = (
-        f"LEFT JOIN {basic} b ON b.trade_date=m.trade_date AND b.ticker=m.ticker"
+        f"LEFT JOIN {basic} b ON b.trade_date=m.trade_date AND b.ticker=m.asset_id"
         if basic in tables else ""
     )
     basic_amount = "COALESCE(m.float_cap, b.circ_mv * 10000)" if basic in tables else "m.float_cap"
     limit_join = (
-        f"LEFT JOIN {zt} z ON z.trade_date=m.trade_date AND z.ticker=m.ticker"
+        f"LEFT JOIN {zt} z ON z.trade_date=m.trade_date AND z.ticker=m.asset_id"
         if zt in tables else ""
     )
     if zt in tables:
@@ -128,13 +147,15 @@ def _load_market_panel(con: duckdb.DuckDBPyConnection, end_date: date) -> pd.Dat
             s.is_trading_day,
             s.market_fact_status,
         FROM {SYSTEM_B_STATE_OBSERVATION_TABLE} s
-        JOIN {market} m ON m.trade_date=s.trade_date AND m.ticker=s.asset_id
+        JOIN _system_b_canonical_market_series m
+          ON m.trade_date=s.trade_date AND m.asset_id=s.asset_id
         {basic_join}
         {limit_join}
         WHERE s.trade_date <= ?
         ORDER BY s.asset_id, s.trade_date
     """
     data = con.execute(sql, [end_date]).fetchdf()
+    con.unregister("_system_b_canonical_market_series")
     required = ["open", "high", "low", "close", "amount", "float_cap", "is_limit_up"]
     if data.empty:
         raise SystemBPoolProductionError("EMPTY_POOL_MARKET_PANEL")
@@ -160,7 +181,12 @@ def _load_episode_panel(con: duckdb.DuckDBPyConnection, end_date: date) -> pd.Da
     """, [end_date]).fetchdf()
 
 
-def _normalise_membership(result: pd.DataFrame, run_id: str) -> pd.DataFrame:
+def _normalise_membership(
+    result: pd.DataFrame,
+    run_id: str,
+    *,
+    market_panel: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     columns = list(SYSTEM_B_POOL_MEMBERSHIP.column_names())
     if result.empty:
         return pd.DataFrame(columns=columns)
@@ -174,6 +200,50 @@ def _normalise_membership(result: pd.DataFrame, run_id: str) -> pd.DataFrame:
     for column in columns:
         if column not in data.columns:
             data[column] = None
+    if market_panel is not None and not data.empty:
+        # Height facts are part of the existing membership evidence payload.
+        # Persisting them there keeps the pool schema backward-compatible while
+        # making the base/return auditable for Task06-A.
+        market_by_asset = {
+            asset_id: group.sort_values(TRADE_DATE, kind="mergesort")
+            for asset_id, group in market_panel.groupby(ASSET_ID, sort=False)
+        }
+        for index, row in data.loc[data["pool_type"] == HEIGHT].iterrows():
+            try:
+                metrics = json.loads(row[METRICS_JSON]) if row[METRICS_JSON] else {}
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise SystemBPoolProductionError(
+                    "INVALID_POOL_METRICS_JSON", f"height row {row[ASSET_ID]}"
+                ) from exc
+            if not isinstance(metrics, dict):
+                raise SystemBPoolProductionError(
+                    "INVALID_POOL_METRICS_JSON", f"height row {row[ASSET_ID]}"
+                )
+            parsed_start = pd.to_datetime(metrics.get(HEIGHT_START_DATE), errors="coerce")
+            start_day = None if pd.isna(parsed_start) else parsed_start.date()
+            group = market_by_asset.get(row[ASSET_ID])
+            base_close: float | None = None
+            current_close: float | None = None
+            if group is not None and start_day is not None:
+                prior = group.loc[group[TRADE_DATE] < start_day]
+                current = group.loc[group[TRADE_DATE] == row[TRADE_DATE]]
+                if not prior.empty:
+                    candidate = float(prior.iloc[-1]["close"])
+                    if math.isfinite(candidate) and candidate > 0:
+                        base_close = candidate
+                if not current.empty:
+                    candidate = float(current.iloc[-1]["close"])
+                    if math.isfinite(candidate) and candidate > 0:
+                        current_close = candidate
+            metrics[HEIGHT_START_BASE_CLOSE] = base_close
+            metrics[HEIGHT_SINCE_START_RETURN] = (
+                current_close / base_close - 1.0
+                if base_close is not None and current_close is not None
+                else None
+            )
+            data.at[index, METRICS_JSON] = json.dumps(
+                metrics, ensure_ascii=False, sort_keys=True, default=str
+            )
     return data.loc[:, columns]
 
 
@@ -234,7 +304,7 @@ def build_stock_pool(
     calculation_started_at = perf_counter()
     result = calculate_stock_pool(context, pool_type)
     run_id = f"system_b_pool_{uuid.uuid4().hex}"
-    membership = _normalise_membership(result.membership, run_id)
+    membership = _normalise_membership(result.membership, run_id, market_panel=panel)
     membership = membership.loc[
         membership[TRADE_DATE].between(start_date, end_date)
     ].reset_index(drop=True)
