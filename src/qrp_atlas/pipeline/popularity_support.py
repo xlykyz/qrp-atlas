@@ -7,6 +7,7 @@ for dc_hot (Eastmoney popularity rank) and ths_hot (THS hot stock rank).
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -26,6 +27,7 @@ from qrp_atlas.contracts import (
     CURRENT_PRICE,
     DC_HOT,
     HOT,
+    INPUT_VERSION,
     LIST_NAME,
     NAME,
     PCT_CHANGE,
@@ -34,11 +36,18 @@ from qrp_atlas.contracts import (
     SNAPSHOT_COMPLETED_AT,
     SNAPSHOT_SEQ,
     SNAPSHOT_STARTED_AT,
+    SNAPSHOT_SEQS,
     SOURCE,
     SOURCE_RANK_TIME,
+    SOURCE_PROVENANCE,
+    SOURCE_STATUS,
     THS_HOT,
     TICKER,
     TRADE_DATE,
+    POPULARITY_AVAILABLE,
+    POPULARITY_SOURCE_AVAILABILITY_TABLE,
+    POPULARITY_UNAVAILABLE,
+    VALID_SNAPSHOT_COUNT,
     align_to_schema,
     get_table,
     normalize_ticker,
@@ -690,6 +699,7 @@ def replace_popularity_batch(
 ) -> tuple[int, float]:
     """Single-connection, single-transaction atomic replacement for one popularity batch."""
     table = get_table(table_name)
+    availability_table = get_table(POPULARITY_SOURCE_AVAILABILITY_TABLE)
     requested_dates = target_dates(context.target_window)
     requested_date_set = set(requested_dates)
     empty_date_set = set(empty_dates)
@@ -700,10 +710,12 @@ def replace_popularity_batch(
     connection: duckdb.DuckDBPyConnection | None = None
     transaction_open = False
     registered = False
+    availability_registered = False
     try:
         context.execution_control.check()
         connection = duckdb.connect(str(context.settings.paths.duckdb_path))
         connection.execute(table.duckdb_create_sql())
+        connection.execute(availability_table.duckdb_create_sql())
 
         # Section 13: Fail-closed check if empty response would wipe existing historical data
         for empty_date in requested_dates:
@@ -735,6 +747,10 @@ def replace_popularity_batch(
                 f"DELETE FROM {table.name} WHERE trade_date = ?",
                 [requested_date],
             )
+            connection.execute(
+                f"DELETE FROM {availability_table.name} WHERE trade_date = ? AND source = ?",
+                [requested_date, table_name],
+            )
             context.execution_control.check()
 
         if not prepared.empty:
@@ -747,6 +763,66 @@ def replace_popularity_batch(
             )
             connection.unregister("_popularity_batch_rows")
             registered = False
+
+        # Availability is a first-class, replayable source/date fact. It is
+        # committed with the popularity rows so Task06 never observes a source
+        # table and an unrelated availability version.
+        availability_rows: list[dict[str, object]] = []
+        for requested_date in requested_dates:
+            if requested_date in empty_date_set:
+                snapshot_seqs: list[int] = []
+                status = POPULARITY_UNAVAILABLE
+                consumed_rows = 0
+            else:
+                date_rows = prepared.loc[prepared[TRADE_DATE].eq(requested_date)]
+                snapshot_seqs = sorted(
+                    int(value) for value in date_rows[SNAPSHOT_SEQ].dropna().unique()
+                )
+                status = POPULARITY_AVAILABLE
+                consumed_rows = len(date_rows)
+            availability_rows.append(
+                {
+                    TRADE_DATE: requested_date,
+                    SOURCE: table_name,
+                    SOURCE_STATUS: status,
+                    VALID_SNAPSHOT_COUNT: len(snapshot_seqs),
+                    SNAPSHOT_SEQS: json.dumps(snapshot_seqs, separators=(",", ":")),
+                    INPUT_VERSION: f"{context.pipeline_id}:{context.run_id}:{requested_date.isoformat()}",
+                    SOURCE_PROVENANCE: json.dumps(
+                        {
+                            "pipeline_id": context.pipeline_id,
+                            "pipeline_run_id": context.run_id,
+                            "table": table_name,
+                            "consumed_rows": consumed_rows,
+                            "target_date": requested_date.isoformat(),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "source_pipeline_run_id": context.run_id,
+                }
+            )
+        availability_frame = pd.DataFrame(availability_rows)
+        availability_columns = [
+            column for column in availability_table.column_names() if column != CREATED_AT
+        ]
+        connection.register(
+            "_popularity_availability_rows",
+            availability_frame[availability_columns],
+        )
+        availability_registered = True
+        connection.execute(
+            f"DELETE FROM {availability_table.name} WHERE trade_date IN "
+            f"(SELECT trade_date FROM _popularity_availability_rows) AND source = ?",
+            [table_name],
+        )
+        connection.execute(
+            f"INSERT INTO {availability_table.name} ({', '.join(availability_columns)}) "
+            f"SELECT {', '.join(availability_columns)} FROM _popularity_availability_rows"
+        )
+        connection.unregister("_popularity_availability_rows")
+        availability_registered = False
 
         context.execution_control.check()
         connection.execute("COMMIT")
@@ -780,6 +856,11 @@ def replace_popularity_batch(
                     connection.unregister("_popularity_batch_rows")
                 except Exception as unregister_err:
                     LOGGER.debug("unregister failed", exc_info=unregister_err)
+            if availability_registered:
+                try:
+                    connection.unregister("_popularity_availability_rows")
+                except Exception as unregister_err:
+                    LOGGER.debug("availability unregister failed", exc_info=unregister_err)
             connection.close()
 
 

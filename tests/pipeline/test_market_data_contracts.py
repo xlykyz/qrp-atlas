@@ -286,6 +286,7 @@ def test_market_data_contracts_are_registered_with_one_quant_writer_lock() -> No
         *(contract.pipeline_id for contract in MEMBERSHIP_CONTRACTS),
         *(contract.pipeline_id for contract in PIT_FUNDAMENTALS_CONTRACTS),
         *(contract.pipeline_id for contract in SYSTEM_B_CONTRACTS),
+        "system_b_asset_rank_daily",
         *(contract.pipeline_id for contract in RESEARCH_REPORT_CONTRACTS),
         *(contract.pipeline_id for contract in RESEARCH_INDUSTRY_CONTRACTS),
         "theme_m4_production",

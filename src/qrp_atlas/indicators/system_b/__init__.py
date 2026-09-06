@@ -37,6 +37,26 @@ from qrp_atlas.indicators.system_b.pools import (
     PoolCalculationResult, build_common_features, calculate_stock_pool, calculate_stock_pools,
     evaluate_capacity, evaluate_height, evaluate_recognition,
 )
+from qrp_atlas.indicators.system_b.asset_ranking import (
+    ASSET_RANK_CALCULATION_VERSION,
+    AssetRankingError,
+    AssetRankingResult,
+    RankComponentResult,
+    PopularityScores,
+    HIGHER_IS_BETTER,
+    LOWER_IS_BETTER,
+    calculate_asset_rank,
+    calculate_asset_ranking,
+    calculate_m1,
+    calculate_m2,
+    calculate_m3,
+    calculate_popularity_scores,
+    compute_popularity_scores,
+    normalized_rank_details,
+    normalized_rank_score,
+    rank_component,
+    snapshot_hot_score,
+)
 
 __all__ = [
     "SYSTEM_B_EXIT_TRIGGERED",
@@ -62,4 +82,9 @@ __all__ = [
     "calculate_system_b_episode_segments",
     "PoolCalculationResult", "build_common_features", "evaluate_height",
     "evaluate_capacity", "evaluate_recognition", "calculate_stock_pool", "calculate_stock_pools",
+    "ASSET_RANK_CALCULATION_VERSION", "AssetRankingError", "AssetRankingResult",
+    "RankComponentResult", "PopularityScores", "HIGHER_IS_BETTER", "LOWER_IS_BETTER",
+    "calculate_asset_rank", "calculate_asset_ranking", "calculate_m1", "calculate_m2",
+    "calculate_m3", "calculate_popularity_scores", "compute_popularity_scores",
+    "normalized_rank_details", "normalized_rank_score", "rank_component", "snapshot_hot_score",
 ]

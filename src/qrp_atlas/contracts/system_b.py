@@ -125,6 +125,69 @@ RETURN5_RANK = "return5_rank"
 RETURN10 = "return10"
 RETURN10_RANK = "return10_rank"
 
+# Task06-A asset-relative ranking facts.  These names intentionally live beside
+# the existing System B contracts so that the ranking result and its audit
+# trail use the same common persistence/runtime vocabulary.
+SYSTEM_B_ASSET_RANK_SNAPSHOT_TABLE = "system_b_asset_rank_snapshot"
+SYSTEM_B_ASSET_RANK_COMPONENT_AUDIT_TABLE = "system_b_asset_rank_component_audit"
+POPULARITY_SOURCE_AVAILABILITY_TABLE = "popularity_source_availability"
+# Explicit aliases make the ownership of the shared availability fact clear to
+# callers that discover it through the System B namespace.
+SYSTEM_B_POPULARITY_SOURCE_AVAILABILITY_TABLE = POPULARITY_SOURCE_AVAILABILITY_TABLE
+
+SYSTEM_B_ASSET_RANK_CALCULATION_VERSION = "system_b_asset_rank@0.1.0"
+ASSET_RANK_CALCULATION_VERSION = SYSTEM_B_ASSET_RANK_CALCULATION_VERSION
+
+M1_SCORE = "m1_score"
+M1_RANK = "m1_rank"
+M1_STATUS = "m1_status"
+M1_UNIVERSE_SIZE = "m1_universe_size"
+M2_SCORE = "m2_score"
+M2_RANK = "m2_rank"
+M2_STATUS = "m2_status"
+M2_UNIVERSE_SIZE = "m2_universe_size"
+M3_SCORE = "m3_score"
+M3_RANK = "m3_rank"
+M3_STATUS = "m3_status"
+M3_UNIVERSE_SIZE = "m3_universe_size"
+M1_RAW = "m1_raw"
+M2_RAW = "m2_raw"
+M3_RAW = "m3_raw"
+HEIGHT_START_BASE_CLOSE = "height_start_base_close"
+HEIGHT_SINCE_START_RETURN = "height_since_start_return"
+INPUT_PROVENANCE = "input_provenance"
+EVIDENCE = "evidence"
+
+DIMENSION = "dimension"
+COMPONENT = "component"
+RAW_VALUE = "raw_value"
+DIRECTION = "direction"
+RAW_RANK = "raw_rank"
+NORMALIZED_RANK_SCORE = "normalized_rank_score"
+DIMENSION_RAW = "dimension_raw"
+FINAL_DIMENSION_RANK = "final_dimension_rank"
+FINAL_DIMENSION_SCORE = "final_dimension_score"
+TIE_COUNT = "tie_count"
+STATUS = "status"
+SOURCE_PROVENANCE = "source_provenance"
+METADATA_JSON = "metadata_json"
+
+POPULARITY_SOURCE = "source"
+SOURCE_STATUS = "source_status"
+VALID_SNAPSHOT_COUNT = "valid_snapshot_count"
+SNAPSHOT_SEQS = "snapshot_seqs"
+INPUT_VERSION = "input_version"
+
+ASSET_RANK_OK = "OK"
+ASSET_RANK_NOT_ELIGIBLE = "NOT_ELIGIBLE"
+ASSET_RANK_MISSING_INPUT = "MISSING_INPUT"
+ASSET_RANK_INSUFFICIENT_UNIVERSE = "INSUFFICIENT_UNIVERSE"
+ASSET_RANK_NO_VARIATION = "NO_VARIATION"
+ASSET_RANK_INCOMPLETE_COMPONENTS = "INCOMPLETE_COMPONENTS"
+
+POPULARITY_AVAILABLE = "AVAILABLE"
+POPULARITY_UNAVAILABLE = "UNAVAILABLE"
+
 HEIGHT_NATURAL_MIN = 2
 HEIGHT_LIMIT_WINDOW_DAYS = 7
 HEIGHT_LIMIT_MIN_COUNT = 3

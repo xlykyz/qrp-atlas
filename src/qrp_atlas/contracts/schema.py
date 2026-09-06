@@ -210,6 +210,19 @@ from .system_b import (
     POOL_TYPE, MEMBERSHIP_STATE, POOL_CYCLE_NO, ENTRY_DATE, EXIT_DATE,
     ENTRY_REASON, EXIT_REASON, METRICS_JSON, COMPLETED_RUN_ID,
     POOL_COMPLETED_AT, SYSTEM_B_POOL_RULE_VERSION,
+    SYSTEM_B_ASSET_RANK_SNAPSHOT_TABLE,
+    SYSTEM_B_ASSET_RANK_COMPONENT_AUDIT_TABLE,
+    POPULARITY_SOURCE_AVAILABILITY_TABLE,
+    M1_SCORE, M1_RANK, M1_STATUS, M1_UNIVERSE_SIZE,
+    M2_SCORE, M2_RANK, M2_STATUS, M2_UNIVERSE_SIZE,
+    M3_SCORE, M3_RANK, M3_STATUS, M3_UNIVERSE_SIZE,
+    M1_RAW, M2_RAW, M3_RAW, HEIGHT_START_BASE_CLOSE,
+    HEIGHT_SINCE_START_RETURN, INPUT_PROVENANCE, EVIDENCE,
+    DIMENSION, COMPONENT, RAW_VALUE, DIRECTION, RAW_RANK,
+    NORMALIZED_RANK_SCORE, DIMENSION_RAW, FINAL_DIMENSION_RANK,
+    FINAL_DIMENSION_SCORE, TIE_COUNT, SOURCE_PROVENANCE,
+    METADATA_JSON, POPULARITY_SOURCE, SOURCE_STATUS, VALID_SNAPSHOT_COUNT,
+    SNAPSHOT_SEQS, INPUT_VERSION,
 )
 from .stock_collection import (
     COLLECTION_ID,
@@ -1037,6 +1050,81 @@ SYSTEM_B_POOL_RUN = TableSchema(
 
 
 
+SYSTEM_B_ASSET_RANK_SNAPSHOT = TableSchema(
+    name=SYSTEM_B_ASSET_RANK_SNAPSHOT_TABLE,
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(M1_SCORE, "DOUBLE"),
+        ColumnSpec(M1_RANK, "DOUBLE"),
+        ColumnSpec(M1_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(M1_UNIVERSE_SIZE, "INTEGER", nullable=False),
+        ColumnSpec(M2_SCORE, "DOUBLE"),
+        ColumnSpec(M2_RANK, "DOUBLE"),
+        ColumnSpec(M2_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(M2_UNIVERSE_SIZE, "INTEGER", nullable=False),
+        ColumnSpec(M3_SCORE, "DOUBLE"),
+        ColumnSpec(M3_RANK, "DOUBLE"),
+        ColumnSpec(M3_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(M3_UNIVERSE_SIZE, "INTEGER", nullable=False),
+        ColumnSpec(M1_RAW, "DOUBLE"),
+        ColumnSpec(M2_RAW, "DOUBLE"),
+        ColumnSpec(M3_RAW, "DOUBLE"),
+        ColumnSpec(INPUT_PROVENANCE, "VARCHAR", nullable=False),
+        ColumnSpec("diagnostics", "VARCHAR", nullable=False),
+        ColumnSpec(EVIDENCE, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(TRADE_DATE, TICKER),
+)
+
+
+SYSTEM_B_ASSET_RANK_COMPONENT_AUDIT = TableSchema(
+    name=SYSTEM_B_ASSET_RANK_COMPONENT_AUDIT_TABLE,
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(TICKER, "VARCHAR", nullable=False),
+        ColumnSpec(DIMENSION, "VARCHAR", nullable=False),
+        ColumnSpec(COMPONENT, "VARCHAR", nullable=False),
+        ColumnSpec(RAW_VALUE, "DOUBLE"),
+        ColumnSpec(DIRECTION, "VARCHAR", nullable=False),
+        ColumnSpec(RAW_RANK, "DOUBLE"),
+        ColumnSpec(NORMALIZED_RANK_SCORE, "DOUBLE"),
+        ColumnSpec(DIMENSION_RAW, "DOUBLE"),
+        ColumnSpec(FINAL_DIMENSION_RANK, "DOUBLE"),
+        ColumnSpec(FINAL_DIMENSION_SCORE, "DOUBLE"),
+        ColumnSpec("universe_size", "INTEGER", nullable=False),
+        ColumnSpec(TIE_COUNT, "INTEGER", nullable=False),
+        ColumnSpec(STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(CALCULATION_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_PROVENANCE, "VARCHAR", nullable=False),
+        ColumnSpec(METADATA_JSON, "VARCHAR", nullable=False),
+        ColumnSpec(PRODUCTION_RUN_ID, "VARCHAR", nullable=False),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(TRADE_DATE, TICKER, DIMENSION, COMPONENT),
+)
+
+
+POPULARITY_SOURCE_AVAILABILITY = TableSchema(
+    name=POPULARITY_SOURCE_AVAILABILITY_TABLE,
+    columns=(
+        ColumnSpec(TRADE_DATE, "DATE", nullable=False),
+        ColumnSpec(SOURCE, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_STATUS, "VARCHAR", nullable=False),
+        ColumnSpec(VALID_SNAPSHOT_COUNT, "INTEGER", nullable=False),
+        ColumnSpec(SNAPSHOT_SEQS, "VARCHAR", nullable=False),
+        ColumnSpec(INPUT_VERSION, "VARCHAR", nullable=False),
+        ColumnSpec(SOURCE_PROVENANCE, "VARCHAR", nullable=False),
+        ColumnSpec("source_pipeline_run_id", "VARCHAR"),
+        ColumnSpec(CREATED_AT, "TIMESTAMP", nullable=False),
+    ),
+    primary_key=(TRADE_DATE, SOURCE),
+)
+
+
 _PIT_META_COLUMNS = (
     ColumnSpec(SOURCE, "VARCHAR", nullable=False),
     ColumnSpec(SOURCE_RECORD_ID, "VARCHAR", nullable=False),
@@ -1478,6 +1566,9 @@ ALL_TABLES = (
     SYSTEM_B_EPISODE_SEGMENT,
     SYSTEM_B_POOL_MEMBERSHIP,
     SYSTEM_B_POOL_RUN,
+    SYSTEM_B_ASSET_RANK_SNAPSHOT,
+    SYSTEM_B_ASSET_RANK_COMPONENT_AUDIT,
+    POPULARITY_SOURCE_AVAILABILITY,
     IRM_INTERACTION_QA,
     LIMIT_STEP,
     THS_DAILY,
