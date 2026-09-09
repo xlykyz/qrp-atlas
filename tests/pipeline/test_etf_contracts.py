@@ -139,8 +139,10 @@ def test_etf_daily_volume_scaling_uses_decimal_semantics() -> None:
     assert normalized["volume"].tolist() == [6931001]
 
     raw.loc[:, "vol"] = [69310.011]
-    with pytest.raises(ContractError, match="whole shares"):
+    with pytest.raises(ContractError) as exc_info:
         normalize_fund_daily(raw, TARGET)
+    assert exc_info.value.code == "ETF_DAILY_API_PARTIAL"
+    assert exc_info.value.detail == "vol cannot be represented as whole shares"
 
 
 def test_etf_adj_factor_requires_daily_coverage_and_writes_full_factors(tmp_path: Path, monkeypatch) -> None:
