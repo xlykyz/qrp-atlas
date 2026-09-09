@@ -286,3 +286,47 @@ def test_m6_ddl_and_contracts_schema_consistency(tmp_path):
         assert set(actual_pk) == set(table_schema.primary_key)
     finally:
         con.close()
+
+
+def test_task09_ddl_and_contracts_schema_consistency(tmp_path):
+    """Task09 deploy DDL must be executable, idempotent, and match TableSchema."""
+    from pathlib import Path
+
+    from qrp_atlas.contracts import (
+        SYSTEM_B_DECISION_FACTS_DAILY,
+        SYSTEM_B_STRATEGY_CLOSEOUT,
+        SYSTEM_B_STRATEGY_RESULT,
+        SYSTEM_B_STRATEGY_TARGET,
+    )
+
+    ddl_path = Path("deploy/duckdb/010_system_b_task09.sql")
+    assert ddl_path.exists()
+    sql_text = ddl_path.read_text(encoding="utf-8")
+    table_schemas = (
+        SYSTEM_B_DECISION_FACTS_DAILY,
+        SYSTEM_B_STRATEGY_RESULT,
+        SYSTEM_B_STRATEGY_TARGET,
+        SYSTEM_B_STRATEGY_CLOSEOUT,
+    )
+
+    db_path = tmp_path / "task09_ddl_test.duckdb"
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(sql_text)
+        con.execute(sql_text)
+
+        actual_tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
+        assert actual_tables == {table.name for table in table_schemas}
+
+        for table_schema in table_schemas:
+            info = con.execute(f"PRAGMA table_info('{table_schema.name}')").fetchall()
+            assert [row[1] for row in info] == list(table_schema.column_names())
+            for row, column in zip(info, table_schema.columns):
+                _, name, column_type, notnull, _, _ = row
+                assert name == column.name
+                assert column_type.upper() == column.dtype.upper()
+                assert bool(notnull) == (not column.nullable)
+            actual_pk = tuple(row[1] for row in info if row[5])
+            assert set(actual_pk) == set(table_schema.primary_key)
+    finally:
+        con.close()

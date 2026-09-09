@@ -16,6 +16,7 @@ dependencies = [
     "akshare",
     "tushare",
     "python-dotenv",
+    "pytz",
     "streamlit",
     "plotly",
     "fastapi",
