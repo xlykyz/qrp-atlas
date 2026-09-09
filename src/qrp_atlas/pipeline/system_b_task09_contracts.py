@@ -166,9 +166,9 @@ def _strategy_completed(context: PipelineRunContext) -> CheckResult:
             ).fetchone()[0]
         finally:
             connection.close()
-        if int(count) != 1:
-            return CheckResult.failure("task09_strategy_completion", "TASK09_RESULT_COMPLETION_MISSING", "target date does not have exactly one complete strategy result and target", records=int(count))
-        return CheckResult.success("task09_strategy_completion", target_date=target.isoformat())
+        if int(count) < 1:
+            return CheckResult.failure("task09_strategy_completion", "TASK09_RESULT_COMPLETION_MISSING", "target date does not have a complete strategy result and target", records=int(count))
+        return CheckResult.success("task09_strategy_completion", target_date=target.isoformat(), records=int(count))
     except Exception as exc:
         return CheckResult.failure("task09_strategy_completion", "TASK09_RESULT_COMPLETION_MISSING", "strategy records could not be verified", exception=type(exc).__name__)
 
@@ -195,9 +195,9 @@ def _closeout_completed(context: PipelineRunContext) -> CheckResult:
             ).fetchone()[0]
         finally:
             connection.close()
-        if int(count) != 1:
-            return CheckResult.failure("task09_closeout_completion", "TASK09_CLOSEOUT_COMPLETION_MISSING", "target date does not have exactly one complete closeout", records=int(count))
-        return CheckResult.success("task09_closeout_completion", target_date=target.isoformat())
+        if int(count) < 1:
+            return CheckResult.failure("task09_closeout_completion", "TASK09_CLOSEOUT_COMPLETION_MISSING", "target date does not have a complete closeout", records=int(count))
+        return CheckResult.success("task09_closeout_completion", target_date=target.isoformat(), records=int(count))
     except Exception as exc:
         return CheckResult.failure("task09_closeout_completion", "TASK09_CLOSEOUT_COMPLETION_MISSING", "closeout records could not be verified", exception=type(exc).__name__)
 
@@ -258,7 +258,7 @@ def _facts_executor(context: PipelineRunContext) -> BusinessExecution:
         connection.close()
     return BusinessExecution.success(
         metrics=PipelineMetrics(rows_written=written, dates_processed=1, assets_processed=written),
-        outputs=(OutputResult("system_b_decision_facts_daily", written, str(_path(context)), True),),
+        outputs=(OutputResult("system_b_decision_facts_daily", written, "quant_db", True),),
     )
 
 
@@ -291,13 +291,19 @@ def _strategy_executor(context: PipelineRunContext) -> BusinessExecution:
         raise ContractError("TASK09_TARGET_DATE_MISSING")
     params = context.parameter_overrides
     persisted_provenance: dict[str, object] = {}
-    if params.get("facts_json"):
-        facts = json.loads(params["facts_json"])
+    trading_day = _calendar_status(_path(context), target)
+    if trading_day:
+        if params.get("facts_json"):
+            facts = json.loads(params["facts_json"])
+        else:
+            try:
+                facts, persisted_provenance = load_persisted_decision_facts(_path(context), target)
+            except ValueError as exc:
+                raise ContractError(str(exc)) from exc
     else:
-        try:
-            facts, persisted_provenance = load_persisted_decision_facts(_path(context), target)
-        except ValueError as exc:
-            raise ContractError(str(exc)) from exc
+        # Closed dates have no decision-facts production. run_task09_daily creates
+        # the fixed NO_OP provenance required for an immutable formal result.
+        facts = []
     holdings = json.loads(params.get("holdings_json") or "[]")
     authorization_input = json.loads(params.get("authorization_json") or "{}")
     candidates = json.loads(params["candidate_asset_ids_json"]) if params.get("candidate_asset_ids_json") else None
@@ -316,13 +322,13 @@ def _strategy_executor(context: PipelineRunContext) -> BusinessExecution:
         parameter_set_id=params.get("parameter_set_id"),
         input_snapshot_id=params.get("input_snapshot_id"),
         comparison_score_provenance=provenance,
-        trading_day=_calendar_status(_path(context), target),
+        trading_day=trading_day,
     )
     return BusinessExecution.success(
         metrics=PipelineMetrics(rows_written=2, dates_processed=1, assets_processed=len(result["target"].positions)),
         outputs=(
-            OutputResult("system_b_strategy_result", 1, str(_path(context)), True, {"strategy_run_id": result["strategy_run_id"]}),
-            OutputResult("system_b_strategy_target", 1, str(_path(context)), True, {"target_identity": result["target_identity"]}),
+            OutputResult("system_b_strategy_result", 1, "quant_db", True, {"strategy_run_id": result["strategy_run_id"]}),
+            OutputResult("system_b_strategy_target", 1, "quant_db", True, {"target_identity": result["target_identity"]}),
         ),
     )
 
@@ -341,7 +347,7 @@ def _closeout_executor(context: PipelineRunContext) -> BusinessExecution:
     )
     return BusinessExecution.success(
         metrics=PipelineMetrics(rows_written=1, dates_processed=1),
-        outputs=(OutputResult("system_b_strategy_closeout", 1, str(_path(context)), True, {"completion_identity": identity}),),
+        outputs=(OutputResult("system_b_strategy_closeout", 1, "quant_db", True, {"completion_identity": identity}),),
     )
 
 

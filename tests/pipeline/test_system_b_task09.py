@@ -7,10 +7,13 @@ import duckdb
 import pandas as pd
 import pytest
 
-from qrp_atlas.contracts import MARKET_PHASE
+from qrp_atlas.config.settings import AppSettings
+from qrp_atlas.contracts import MARKET_PHASE, init_database
 from qrp_atlas.backtest.harness.strategy_driver import run_system_b_day_by_day_replay
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio.models import PortfolioBacktestConfig
+from qrp_atlas.pipeline.contracts import PipelineInvocation, PipelineRunContext, ResultStatus, TargetWindow
+from qrp_atlas.pipeline.execution import execute_pipeline_contract
 from qrp_atlas.pipeline.registry import default_registry
 from qrp_atlas.pipeline.system_b_task09 import (
     canonical_target_json,
@@ -27,6 +30,27 @@ from qrp_atlas.strategies.models import StrategyPortfolioTarget, StrategyPortfol
 
 def _target(trade_date: str, positions=()):
     return StrategyPortfolioTarget(trade_date, "system_b_portfolio", "1.0.0", tuple(positions))
+
+
+def _task09_settings(tmp_path: Path) -> AppSettings:
+    return AppSettings.load(
+        environ={
+            "QRP_HOME": str(tmp_path / "home"),
+            "QRP_DATA_DIR": str(tmp_path / "data"),
+            "QRP_RUNTIME_ENV": "test",
+            "TUSHARE_TOKEN": "test-token",
+        },
+        project_root=tmp_path / "repo",
+    )
+
+
+def _initialize_task09_database(settings: AppSettings) -> None:
+    settings.paths.duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = duckdb.connect(str(settings.paths.duckdb_path))
+    try:
+        init_database(connection)
+    finally:
+        connection.close()
 
 
 def test_frozen_target_digest_fixtures_are_stable():
@@ -186,6 +210,84 @@ def test_non_trading_day_is_explicit_no_op(tmp_path: Path):
         assert connection.execute("SELECT target_kind FROM system_b_strategy_target").fetchone()[0] == "NO_OP"
         assert connection.execute("SELECT result_status FROM system_b_strategy_result").fetchone()[0] == "NO_OP"
         assert connection.execute("SELECT completion_status, closeout_identity FROM system_b_strategy_closeout").fetchone() == ("NO_OP", closeout)
+
+
+def test_non_trading_contract_execution_persists_no_op_without_decision_facts(tmp_path: Path):
+    settings = _task09_settings(tmp_path)
+    _initialize_task09_database(settings)
+    target = date(2024, 2, 3)
+    with duckdb.connect(str(settings.paths.duckdb_path)) as connection:
+        connection.execute("INSERT INTO trading_calendar (trade_date, is_open) VALUES (?, ?)", [target, False])
+
+    contract = default_registry().get("system_b_strategy_daily")
+    result = execute_pipeline_contract(
+        contract,
+        PipelineInvocation(
+            run_id="closed-calendar-contract-run",
+            pipeline_id=contract.pipeline_id,
+            scheduled_for=datetime(2024, 2, 3, 1, tzinfo=timezone.utc),
+            attempt=1,
+            settings=settings,
+        ),
+    )
+
+    assert result.status is ResultStatus.SUCCESS
+    assert result.target_window.target_date == target
+    assert {output.output_id for output in result.outputs} == {"system_b_strategy_result", "system_b_strategy_target"}
+    with duckdb.connect(str(settings.paths.duckdb_path), read_only=True) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM system_b_decision_facts_daily").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT result_status, rule_version_set_id, parameter_set_id, input_snapshot_id FROM system_b_strategy_result"
+        ).fetchone() == ("NO_OP", "NO_OP", "NO_OP", "NO_OP")
+        assert connection.execute("SELECT target_kind FROM system_b_strategy_target").fetchone()[0] == "NO_OP"
+
+
+def test_multiple_immutable_results_allow_asserted_closeout_and_completion(tmp_path: Path):
+    settings = _task09_settings(tmp_path)
+    _initialize_task09_database(settings)
+    target = date(2024, 1, 10)
+    facts = [{"ticker": "A", "comparison_score": 60.0, "entry_eligible": True, "system_b_exit_triggered": False, "severe_abnormal_supervision_status": "INACTIVE"}]
+    first = run_task09_daily(
+        trade_date=target, facts=facts, holdings=[], authorization_input={"phase": "B", "V_triggered": False},
+        invocation_id="first-runtime", duckdb_path=settings.paths.duckdb_path, candidate_asset_ids=["A"],
+        rule_version_set_id="rules-v1", parameter_set_id="params-v1", input_snapshot_id="snapshot-v1",
+        comparison_score_provenance={"score_version": "score-v1", "rule_version": "rules-v1", "parameter_version": "params-v1", "input_snapshot_id": "snapshot-v1"},
+    )
+    second = run_task09_daily(
+        trade_date=target, facts=facts, holdings=[], authorization_input={"phase": "B", "V_triggered": False},
+        invocation_id="second-runtime", duckdb_path=settings.paths.duckdb_path, candidate_asset_ids=["A"],
+        rule_version_set_id="rules-v2", parameter_set_id="params-v2", input_snapshot_id="snapshot-v2",
+        comparison_score_provenance={"score_version": "score-v2", "rule_version": "rules-v2", "parameter_version": "params-v2", "input_snapshot_id": "snapshot-v2"},
+    )
+    assert first["strategy_run_id"] != second["strategy_run_id"]
+    with pytest.raises(ValueError, match="TASK09_CLOSEOUT_RESULT_AMBIGUOUS"):
+        closeout_strategy_daily(duckdb_path=settings.paths.duckdb_path, trade_date=target)
+
+    completion = closeout_strategy_daily(
+        duckdb_path=settings.paths.duckdb_path,
+        trade_date=target,
+        strategy_run_id=second["strategy_run_id"],
+    )
+    assert completion
+    context = PipelineRunContext(
+        run_id="completion-check",
+        pipeline_id="system_b_strategy_daily",
+        scheduled_for=datetime(2024, 1, 10, 1, tzinfo=timezone.utc),
+        attempt=1,
+        settings=settings,
+        parameter_overrides={},
+        target_window=TargetWindow.for_date(target),
+        audit_context={},
+    )
+    strategy_contract = default_registry().get("system_b_strategy_daily")
+    closeout_contract = default_registry().get("system_b_daily_closeout")
+    assert strategy_contract.outputs[0].completion.checker(context).passed
+    assert strategy_contract.outputs[0].quality_checks[0](context).passed
+    assert closeout_contract.outputs[0].completion.checker(context).passed
+    assert closeout_contract.outputs[0].quality_checks[0](context).passed
+    with duckdb.connect(str(settings.paths.duckdb_path), read_only=True) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM system_b_strategy_result WHERE trade_date=?", [target]).fetchone()[0] == 2
+        assert connection.execute("SELECT strategy_run_id FROM system_b_strategy_closeout").fetchone()[0] == second["strategy_run_id"]
 
 
 def test_authorization_defaults_to_formal_market_phase_fact(tmp_path: Path):

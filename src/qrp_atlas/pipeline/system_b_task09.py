@@ -464,7 +464,14 @@ def run_task09_daily(
                 provenance.setdefault(key, expected)
         provenance.setdefault("producer_version", TASK09_FACTS_PRODUCER_VERSION)
         if trading_day is False:
-            provenance.setdefault("score_calculation_version", "NO_OP")
+            for key in (
+                "score_calculation_version",
+                "rule_version_set_id",
+                "parameter_set_id",
+                "input_snapshot_id",
+            ):
+                if not isinstance(provenance.get(key), str) or provenance[key] == "UNAVAILABLE":
+                    provenance[key] = "NO_OP"
     for key in ("rule_version_set_id", "parameter_set_id", "input_snapshot_id", "score_calculation_version"):
         value = provenance.get(key)
         if not isinstance(value, str) or not value.strip() or value == "UNAVAILABLE":
@@ -600,16 +607,28 @@ def closeout_strategy_daily(
         _create_task09_tables(connection)
         connection.execute("BEGIN TRANSACTION")
         transaction_started = True
+        clauses = ["r.trade_date=?"]
+        arguments: list[Any] = [trade_date]
+        for column, value in (
+            ("r.strategy_run_id", strategy_run_id),
+            ("r.result_digest", result_digest),
+            ("t.target_identity", target_identity),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                arguments.append(value)
         rows = connection.execute(
             """SELECT r.strategy_run_id, r.trade_date, r.result_digest, r.result_status,
                       r.strategy_code, r.strategy_version, r.rule_version_set_id,
                       r.parameter_set_id, r.input_snapshot_id, t.target_identity, t.target_digest
                  FROM system_b_strategy_result r
                  JOIN system_b_strategy_target t ON t.strategy_run_id=r.strategy_run_id
-                WHERE r.trade_date=?""",
-            [trade_date],
+                WHERE """ + " AND ".join(clauses),
+            arguments,
         ).fetchall()
         if not rows:
+            if any(value is not None for value in (strategy_run_id, result_digest, target_identity)):
+                raise ValueError("TASK09_CLOSEOUT_RESULT_MISMATCH")
             raise ValueError("TASK09_CLOSEOUT_RESULT_UNAVAILABLE")
         if len(rows) != 1:
             raise ValueError("TASK09_CLOSEOUT_RESULT_AMBIGUOUS")
