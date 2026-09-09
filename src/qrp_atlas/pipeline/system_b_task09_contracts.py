@@ -46,6 +46,7 @@ from .contracts import (
 from .registry import register_pipeline
 from .system_b_task09 import (
     closeout_strategy_daily,
+    load_persisted_decision_facts,
     normalize_decision_facts,
     persist_decision_facts,
     resolve_task09_target_date,
@@ -108,16 +109,23 @@ def _facts_freshness(context: PipelineRunContext) -> CheckResult:
             ).fetchone()
             if calendar_row is None:
                 return CheckResult.failure("task09_facts_freshness", "TASK09_CALENDAR_UNAVAILABLE", "calendar does not cover target date")
-            count = connection.execute(
-                f"SELECT COUNT(*) FROM {SYSTEM_B_DECISION_FACTS_DAILY.name} WHERE trade_date=?", [target]
-            ).fetchone()[0]
+            snapshots = connection.execute(
+                f"""SELECT input_snapshot_id, score_calculation_version, rule_version_set_id,
+                           parameter_set_id, producer_version, provenance_json, COUNT(*)
+                      FROM {SYSTEM_B_DECISION_FACTS_DAILY.name} WHERE trade_date=?
+                     GROUP BY input_snapshot_id, score_calculation_version, rule_version_set_id,
+                              parameter_set_id, producer_version, provenance_json""",
+                [target],
+            ).fetchall()
         finally:
             connection.close()
         if not bool(calendar_row[0]):
-            return CheckResult.success("task09_facts_freshness", target_date=target.isoformat(), rows=int(count), non_trading_day=True)
-        if int(count) == 0:
+            return CheckResult.success("task09_facts_freshness", target_date=target.isoformat(), rows=sum(int(row[-1]) for row in snapshots), non_trading_day=True)
+        if not snapshots:
             return CheckResult.failure("task09_facts_freshness", "TASK09_FACTS_UNAVAILABLE", "no decision facts cover target date")
-        return CheckResult.success("task09_facts_freshness", target_date=target.isoformat(), rows=int(count))
+        if len(snapshots) != 1:
+            return CheckResult.failure("task09_facts_freshness", "TASK09_FACTS_SNAPSHOT_AMBIGUOUS", "multiple fact snapshots cover target date", snapshots=len(snapshots))
+        return CheckResult.success("task09_facts_freshness", target_date=target.isoformat(), rows=int(snapshots[0][-1]), input_snapshot_id=snapshots[0][0])
     except Exception as exc:
         return CheckResult.failure("task09_facts_freshness", "TASK09_FACTS_UNAVAILABLE", "facts could not be read", exception=type(exc).__name__)
 
@@ -139,13 +147,59 @@ def _calendar_freshness(context: PipelineRunContext) -> CheckResult:
         return CheckResult.failure("task09_calendar_freshness", "TASK09_CALENDAR_UNAVAILABLE", "calendar could not be read", exception=type(exc).__name__)
 
 
-def _completed(context: PipelineRunContext) -> CheckResult:
-    return _table_check(
-        context,
-        "task09_result_tables",
-        (SYSTEM_B_STRATEGY_RESULT.name, SYSTEM_B_STRATEGY_TARGET.name, SYSTEM_B_STRATEGY_CLOSEOUT.name),
-        "TASK09_RESULT_STRUCTURE_MISSING",
-    )
+def _strategy_completed(context: PipelineRunContext) -> CheckResult:
+    target = context.target_window.target_date
+    if target is None:
+        return CheckResult.failure("task09_strategy_completion", "TASK09_TARGET_DATE_MISSING", "target date is required")
+    structure = _table_check(context, "task09_strategy_structure", (SYSTEM_B_STRATEGY_RESULT.name, SYSTEM_B_STRATEGY_TARGET.name), "TASK09_RESULT_STRUCTURE_MISSING")
+    if not structure.passed:
+        return structure
+    try:
+        connection = duckdb.connect(str(_path(context)), read_only=True)
+        try:
+            count = connection.execute(
+                """SELECT COUNT(*) FROM system_b_strategy_result r
+                      JOIN system_b_strategy_target t ON t.strategy_run_id=r.strategy_run_id
+                     WHERE r.trade_date=? AND t.trade_date=?
+                       AND t.target_identity=t.target_digest""",
+                [target, target],
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        if int(count) != 1:
+            return CheckResult.failure("task09_strategy_completion", "TASK09_RESULT_COMPLETION_MISSING", "target date does not have exactly one complete strategy result and target", records=int(count))
+        return CheckResult.success("task09_strategy_completion", target_date=target.isoformat())
+    except Exception as exc:
+        return CheckResult.failure("task09_strategy_completion", "TASK09_RESULT_COMPLETION_MISSING", "strategy records could not be verified", exception=type(exc).__name__)
+
+
+def _closeout_completed(context: PipelineRunContext) -> CheckResult:
+    target = context.target_window.target_date
+    if target is None:
+        return CheckResult.failure("task09_closeout_completion", "TASK09_TARGET_DATE_MISSING", "target date is required")
+    structure = _table_check(context, "task09_closeout_structure", (SYSTEM_B_STRATEGY_CLOSEOUT.name, SYSTEM_B_STRATEGY_RESULT.name, SYSTEM_B_STRATEGY_TARGET.name), "TASK09_CLOSEOUT_COMPLETION_MISSING")
+    if not structure.passed:
+        return structure
+    try:
+        connection = duckdb.connect(str(_path(context)), read_only=True)
+        try:
+            count = connection.execute(
+                """SELECT COUNT(*) FROM system_b_strategy_closeout c
+                      JOIN system_b_strategy_result r ON r.strategy_run_id=c.strategy_run_id
+                      JOIN system_b_strategy_target t ON t.strategy_run_id=r.strategy_run_id
+                     WHERE c.trade_date=? AND r.trade_date=? AND t.trade_date=?
+                       AND c.result_digest=r.result_digest
+                       AND c.target_identity=t.target_identity
+                       AND c.target_digest=t.target_digest""",
+                [target, target, target],
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        if int(count) != 1:
+            return CheckResult.failure("task09_closeout_completion", "TASK09_CLOSEOUT_COMPLETION_MISSING", "target date does not have exactly one complete closeout", records=int(count))
+        return CheckResult.success("task09_closeout_completion", target_date=target.isoformat())
+    except Exception as exc:
+        return CheckResult.failure("task09_closeout_completion", "TASK09_CLOSEOUT_COMPLETION_MISSING", "closeout records could not be verified", exception=type(exc).__name__)
 
 
 def _facts_completed(context: PipelineRunContext) -> CheckResult:
@@ -177,11 +231,11 @@ def _facts_quality(context: PipelineRunContext) -> CheckResult:
 
 
 def _result_quality(context: PipelineRunContext) -> CheckResult:
-    return _task09_quality(context, "task09_result_quality", SYSTEM_B_STRATEGY_RESULT.name)
+    return _strategy_completed(context)
 
 
 def _closeout_quality(context: PipelineRunContext) -> CheckResult:
-    return _task09_quality(context, "task09_closeout_quality", SYSTEM_B_STRATEGY_CLOSEOUT.name)
+    return _closeout_completed(context)
 
 
 def _facts_executor(context: PipelineRunContext) -> BusinessExecution:
@@ -206,18 +260,6 @@ def _facts_executor(context: PipelineRunContext) -> BusinessExecution:
         metrics=PipelineMetrics(rows_written=written, dates_processed=1, assets_processed=written),
         outputs=(OutputResult("system_b_decision_facts_daily", written, str(_path(context)), True),),
     )
-
-
-def _load_facts(path: Path, target: date) -> list[dict]:
-    connection = duckdb.connect(str(path), read_only=True)
-    try:
-        rows = connection.execute(
-            f"SELECT * EXCLUDE (created_at,provenance_json,producer_version) FROM {SYSTEM_B_DECISION_FACTS_DAILY.name} WHERE trade_date=? ORDER BY ticker",
-            [target],
-        ).fetchdf()
-    finally:
-        connection.close()
-    return rows.to_dict("records")
 
 
 def _calendar_status(path: Path, target: date) -> bool | None:
@@ -248,11 +290,20 @@ def _strategy_executor(context: PipelineRunContext) -> BusinessExecution:
     if target is None:
         raise ContractError("TASK09_TARGET_DATE_MISSING")
     params = context.parameter_overrides
-    facts = json.loads(params["facts_json"]) if params.get("facts_json") else _load_facts(_path(context), target)
+    persisted_provenance: dict[str, object] = {}
+    if params.get("facts_json"):
+        facts = json.loads(params["facts_json"])
+    else:
+        try:
+            facts, persisted_provenance = load_persisted_decision_facts(_path(context), target)
+        except ValueError as exc:
+            raise ContractError(str(exc)) from exc
     holdings = json.loads(params.get("holdings_json") or "[]")
     authorization_input = json.loads(params.get("authorization_json") or "{}")
     candidates = json.loads(params["candidate_asset_ids_json"]) if params.get("candidate_asset_ids_json") else None
     provenance = json.loads(params.get("provenance_json") or "{}")
+    if not provenance:
+        provenance = persisted_provenance
     result = run_task09_daily(
         trade_date=target,
         facts=facts,
@@ -269,7 +320,10 @@ def _strategy_executor(context: PipelineRunContext) -> BusinessExecution:
     )
     return BusinessExecution.success(
         metrics=PipelineMetrics(rows_written=2, dates_processed=1, assets_processed=len(result["target"].positions)),
-        outputs=(OutputResult("system_b_strategy_result", 1, str(_path(context)), True, {"strategy_run_id": result["strategy_run_id"]}),),
+        outputs=(
+            OutputResult("system_b_strategy_result", 1, str(_path(context)), True, {"strategy_run_id": result["strategy_run_id"]}),
+            OutputResult("system_b_strategy_target", 1, str(_path(context)), True, {"target_identity": result["target_identity"]}),
+        ),
     )
 
 
@@ -278,15 +332,12 @@ def _closeout_executor(context: PipelineRunContext) -> BusinessExecution:
     params = context.parameter_overrides
     if target is None:
         raise ContractError("TASK09_TARGET_DATE_MISSING")
-    required = ("strategy_run_id", "result_digest", "target_identity")
-    if any(not params.get(key) for key in required):
-        raise ContractError("TASK09_CLOSEOUT_INPUT_MISSING")
     identity = closeout_strategy_daily(
         duckdb_path=_path(context),
-        strategy_run_id=str(params["strategy_run_id"]),
+        strategy_run_id=params.get("strategy_run_id"),
         trade_date=target,
-        result_digest=str(params["result_digest"]),
-        target_identity=str(params["target_identity"]),
+        result_digest=params.get("result_digest"),
+        target_identity=params.get("target_identity"),
     )
     return BusinessExecution.success(
         metrics=PipelineMetrics(rows_written=1, dates_processed=1),
@@ -324,18 +375,21 @@ def _strategy_contract() -> PipelineContract:
             _parameter("authorization_json", "JSON phase/V authorization input", default="{}"),
             _parameter("candidate_asset_ids_json", "Optional explicit candidate IDs JSON"),
             _parameter("provenance_json", "JSON score provenance", default="{}"),
-            _parameter("rule_version_set_id", "Rule set identity", required=True),
-            _parameter("parameter_set_id", "Parameter identity", required=True),
-            _parameter("input_snapshot_id", "Input snapshot identity", required=True),
+            _parameter("rule_version_set_id", "Optional rule-set identity assertion"),
+            _parameter("parameter_set_id", "Optional parameter identity assertion"),
+            _parameter("input_snapshot_id", "Optional facts snapshot identity assertion"),
         ),
-        inputs=(facts_input,), outputs=(OutputContract("system_b_strategy_result", "DUCKDB", "quant_db", SYSTEM_B_STRATEGY_RESULT.name, ("strategy_run_id",), WriteMode.UPSERT, "TARGET_DATE", CompletionContract("result and target persisted", "TASK09_RESULT_COMPLETION_MISSING", _completed), (_result_quality,), False),), dependencies=("system_b_state_daily", "system_b_episode_rebuild", "system_b_pool_height", "system_b_pool_capacity", "system_b_pool_recognition", "system_b_asset_rank_daily", "system_b_decision_facts_daily"), resource_locks=("quant_db_writer",), idempotency=IdempotencyContract("strategy_run_id", "same invocation is idempotent; new invocation is immutable history", "reject digest collision", "transaction rollback", True, "result+target"), transaction=TransactionContract(TransactionMode.DATABASE_TRANSACTION, "result and target", "rollback"), execution=ExecutionPolicy(OverlapPolicy.FORBID, 1), performance=PerformanceBudget(300, 120, 600, "one target date", "Task09 v1"),
+        inputs=(facts_input,), outputs=(
+            OutputContract("system_b_strategy_result", "DUCKDB", "quant_db", SYSTEM_B_STRATEGY_RESULT.name, ("strategy_run_id",), WriteMode.UPSERT, "TARGET_DATE", CompletionContract("result and target persisted", "TASK09_RESULT_COMPLETION_MISSING", _strategy_completed), (_result_quality,), False),
+            OutputContract("system_b_strategy_target", "DUCKDB", "quant_db", SYSTEM_B_STRATEGY_TARGET.name, ("strategy_run_id", "target_identity"), WriteMode.UPSERT, "TARGET_DATE", CompletionContract("result and target persisted", "TASK09_RESULT_COMPLETION_MISSING", _strategy_completed), (_result_quality,), False),
+        ), dependencies=("system_b_state_daily", "system_b_episode_rebuild", "system_b_pool_height", "system_b_pool_capacity", "system_b_pool_recognition", "system_b_asset_rank_daily", "system_b_decision_facts_daily"), resource_locks=("quant_db_writer",), idempotency=IdempotencyContract("strategy_run_id", "same business envelope is idempotent and immutable", "reject digest collision", "transaction rollback", True, "result+target"), transaction=TransactionContract(TransactionMode.DATABASE_TRANSACTION, "result and target", "rollback"), execution=ExecutionPolicy(OverlapPolicy.FORBID, 1), performance=PerformanceBudget(300, 120, 600, "one target date", "Task09 v1"),
     )
 
 
 def _closeout_contract() -> PipelineContract:
     return PipelineContract(
         pipeline_id="system_b_daily_closeout", name="System B Daily Closeout", description="Explicit completion marker for a persisted strategy result and target.", contract_version="1.0.0", kind=PipelineKind.ATOMIC, executor=_closeout_executor, target_date_policy=TASK09_TARGET_DATE_POLICY,
-        parameters=tuple(_parameter(name, name, required=True) for name in ("strategy_run_id", "result_digest", "target_identity")), inputs=(), outputs=(OutputContract("system_b_strategy_closeout", "DUCKDB", "quant_db", SYSTEM_B_STRATEGY_CLOSEOUT.name, ("closeout_identity",), WriteMode.UPSERT, "TARGET_DATE", CompletionContract("closeout persisted", "TASK09_CLOSEOUT_COMPLETION_MISSING", _completed), (_closeout_quality,), False),), dependencies=("system_b_strategy_daily",), resource_locks=("quant_db_writer",), idempotency=IdempotencyContract("strategy_run_id", "repeat closeout is idempotent", "upsert same completion", "retry", False, "closeout row"), transaction=TransactionContract(TransactionMode.DATABASE_TRANSACTION, "closeout row", "rollback"), execution=ExecutionPolicy(OverlapPolicy.FORBID, 1), performance=PerformanceBudget(60, 30, 120, "one result", "Task09 v1"),
+        parameters=tuple(_parameter(name, f"Optional {name} assertion") for name in ("strategy_run_id", "result_digest", "target_identity")), inputs=(), outputs=(OutputContract("system_b_strategy_closeout", "DUCKDB", "quant_db", SYSTEM_B_STRATEGY_CLOSEOUT.name, ("closeout_identity",), WriteMode.UPSERT, "TARGET_DATE", CompletionContract("closeout persisted", "TASK09_CLOSEOUT_COMPLETION_MISSING", _closeout_completed), (_closeout_quality,), False),), dependencies=("system_b_strategy_daily",), resource_locks=("quant_db_writer",), idempotency=IdempotencyContract("strategy_run_id", "repeat closeout of the unique dated result is idempotent", "resolve one dated result or fail closed", "retry", False, "closeout row"), transaction=TransactionContract(TransactionMode.DATABASE_TRANSACTION, "closeout row", "rollback"), execution=ExecutionPolicy(OverlapPolicy.FORBID, 1), performance=PerformanceBudget(60, 30, 120, "one result", "Task09 v1"),
     )
 
 
