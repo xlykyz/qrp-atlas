@@ -26,7 +26,7 @@ from qrp_atlas.pipeline.production_jobs import (
     resolve_instance_dependencies,
     validate_production_jobs,
 )
-from qrp_atlas.pipeline.registry import default_registry
+from qrp_atlas.pipeline.registry import PipelineRegistry, default_registry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -71,6 +71,22 @@ def test_one_contract_can_be_referenced_by_two_job_definitions() -> None:
         "research-stock-report-evening",
     }
     assert {job.pipeline_id for job in validated} == {"research_stock_report_ingest"}
+
+
+def test_task09_recurring_jobs_need_no_dynamic_business_identity_parameters() -> None:
+    """Daily identities are resolved from facts/results, not frozen in a job definition."""
+
+    source = _registry()
+    registry = PipelineRegistry()
+    strategy = replace(source.get("system_b_strategy_daily"), dependencies=())
+    closeout = replace(source.get("system_b_daily_closeout"), dependencies=())
+    registry.register(strategy)
+    registry.register(closeout)
+    jobs = (
+        _job("system-b-strategy-daily", pipeline_id=strategy.pipeline_id),
+        _job("system-b-closeout-daily", pipeline_id=closeout.pipeline_id),
+    )
+    assert validate_production_jobs(jobs, registry=registry) == jobs
 
 
 def test_two_instances_keep_independent_job_ids() -> None:
@@ -273,7 +289,7 @@ def test_two_instances_produce_distinct_run_history(tmp_path: Path) -> None:
 
 def test_existing_registry_has_no_regression() -> None:
     contracts = validate_contracts(default_registry().all())
-    assert len(contracts) == 35
+    assert len(contracts) == 38
 
 
 def test_example_definitions_are_all_disabled() -> None:
