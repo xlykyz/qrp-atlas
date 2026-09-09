@@ -1612,6 +1612,93 @@ MARKET_M6_OBSERVATION = TableSchema(
     primary_key=(TRADE_DATE, MARKET_SCOPE),
 )
 
+# Task09 business-result tables.  These are deliberately separate from the
+# orchestration job runtime tables: strategy results are immutable business
+# facts and closeout is their explicit completion marker.
+SYSTEM_B_DECISION_FACTS_DAILY = TableSchema(
+    name="system_b_decision_facts_daily",
+    columns=(
+        ColumnSpec("trade_date", "DATE", nullable=False),
+        ColumnSpec("ticker", "VARCHAR", nullable=False),
+        ColumnSpec("comparison_score", "DOUBLE"),
+        ColumnSpec("comparison_score_status", "VARCHAR", nullable=False),
+        ColumnSpec("entry_eligible", "BOOLEAN"),
+        ColumnSpec("entry_eligibility_status", "VARCHAR", nullable=False),
+        ColumnSpec("system_b_exit_triggered", "BOOLEAN"),
+        ColumnSpec("exit_status", "VARCHAR", nullable=False),
+        ColumnSpec("severe_abnormal_supervision_status", "VARCHAR", nullable=False),
+        ColumnSpec("candidate_membership", "BOOLEAN"),
+        ColumnSpec("candidate_membership_status", "VARCHAR", nullable=False),
+        ColumnSpec("score_calculation_version", "VARCHAR"),
+        ColumnSpec("rule_version_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("parameter_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("input_snapshot_id", "VARCHAR", nullable=False),
+        ColumnSpec("producer_version", "VARCHAR", nullable=False),
+        ColumnSpec("provenance_json", "JSON", nullable=False),
+        ColumnSpec("created_at", "TIMESTAMP", nullable=False),
+    ),
+    primary_key=("trade_date", "ticker", "producer_version", "input_snapshot_id"),
+)
+
+SYSTEM_B_STRATEGY_RESULT = TableSchema(
+    name="system_b_strategy_result",
+    columns=(
+        ColumnSpec("strategy_run_id", "VARCHAR", nullable=False),
+        ColumnSpec("trade_date", "DATE", nullable=False),
+        ColumnSpec("strategy_code", "VARCHAR", nullable=False),
+        ColumnSpec("strategy_version", "VARCHAR", nullable=False),
+        ColumnSpec("rule_version_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("parameter_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("input_snapshot_id", "VARCHAR", nullable=False),
+        ColumnSpec("input_provenance_json", "JSON", nullable=False),
+        ColumnSpec("parameters_json", "JSON", nullable=False),
+        ColumnSpec("authorization_json", "JSON", nullable=False),
+        ColumnSpec("result_json", "JSON", nullable=False),
+        ColumnSpec("result_digest", "VARCHAR", nullable=False),
+        ColumnSpec("result_status", "VARCHAR", nullable=False),
+        ColumnSpec("created_at", "TIMESTAMP", nullable=False),
+    ),
+    primary_key=("strategy_run_id",),
+)
+
+SYSTEM_B_STRATEGY_TARGET = TableSchema(
+    name="system_b_strategy_target",
+    columns=(
+        ColumnSpec("strategy_run_id", "VARCHAR", nullable=False),
+        ColumnSpec("target_identity", "VARCHAR", nullable=False),
+        ColumnSpec("trade_date", "DATE", nullable=False),
+        ColumnSpec("strategy_code", "VARCHAR", nullable=False),
+        ColumnSpec("strategy_version", "VARCHAR", nullable=False),
+        ColumnSpec("target_kind", "VARCHAR", nullable=False),
+        ColumnSpec("target_digest", "VARCHAR", nullable=False),
+        ColumnSpec("canonical_target_json", "JSON", nullable=False),
+        ColumnSpec("created_at", "TIMESTAMP", nullable=False),
+    ),
+    primary_key=("strategy_run_id", "target_identity"),
+)
+
+SYSTEM_B_STRATEGY_CLOSEOUT = TableSchema(
+    name="system_b_strategy_closeout",
+    columns=(
+        ColumnSpec("closeout_identity", "VARCHAR", nullable=False),
+        ColumnSpec("strategy_run_id", "VARCHAR", nullable=False),
+        ColumnSpec("trade_date", "DATE", nullable=False),
+        ColumnSpec("strategy_code", "VARCHAR", nullable=False),
+        ColumnSpec("strategy_version", "VARCHAR", nullable=False),
+        ColumnSpec("result_digest", "VARCHAR", nullable=False),
+        ColumnSpec("target_identity", "VARCHAR", nullable=False),
+        ColumnSpec("target_digest", "VARCHAR", nullable=False),
+        ColumnSpec("rule_version_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("parameter_set_id", "VARCHAR", nullable=False),
+        ColumnSpec("input_snapshot_id", "VARCHAR", nullable=False),
+        ColumnSpec("completion_identity", "VARCHAR", nullable=False),
+        ColumnSpec("completion_status", "VARCHAR", nullable=False),
+        ColumnSpec("completed_at", "TIMESTAMP", nullable=False),
+        ColumnSpec("created_at", "TIMESTAMP", nullable=False),
+    ),
+    primary_key=("closeout_identity",),
+)
+
 ALL_TABLES = (
     DAILY_MARKET_SNAPSHOT,
     MARKET_PHASE,
@@ -1667,6 +1754,10 @@ ALL_TABLES = (
     THEME_M5_OBSERVATION,
     THEME_PRODUCTION_RUN,
     MARKET_M6_OBSERVATION,
+    SYSTEM_B_DECISION_FACTS_DAILY,
+    SYSTEM_B_STRATEGY_RESULT,
+    SYSTEM_B_STRATEGY_TARGET,
+    SYSTEM_B_STRATEGY_CLOSEOUT,
 )
 
 TABLE_BY_NAME = {table.name: table for table in ALL_TABLES}
@@ -1787,4 +1878,3 @@ def init_stock_collections_database(con) -> None:
     con.execute(THEME.duckdb_create_sql())
     con.execute(THEME_MEMBERSHIP_HISTORY.duckdb_create_sql())
     con.execute(THEME_EFFECTIVE_MEMBER_DAILY.duckdb_create_sql())
-
