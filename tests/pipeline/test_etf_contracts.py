@@ -12,10 +12,10 @@ import pytest
 from qrp_atlas.config.settings import AppSettings
 from qrp_atlas.contracts import ETF_ADJ_FACTOR, ETF_DAILY, init_database
 from qrp_atlas.orchestration.execution_control import ExecutionControl
-from qrp_atlas.pipeline.contracts import PipelineContract, ResultStatus
+from qrp_atlas.pipeline.contracts import ContractError, PipelineContract, ResultStatus
 from qrp_atlas.pipeline.etf_adj_factor_contracts import ETF_ADJ_FACTOR_UPDATE
 from qrp_atlas.pipeline.etf_daily_contracts import ETF_DAILY_UPDATE
-from qrp_atlas.pipeline.etf_support import fetch_fund_adj_pages
+from qrp_atlas.pipeline.etf_support import fetch_fund_adj_pages, normalize_fund_daily
 from qrp_atlas.pipeline.testing import ContractTestHarness
 
 
@@ -128,6 +128,19 @@ def test_etf_daily_normalizes_units_and_replaces_target_idempotently(tmp_path: P
         assert connection.execute("SELECT COUNT(*) FROM etf_daily WHERE trade_date = ?", [TARGET]).fetchone()[0] == 2
     finally:
         connection.close()
+
+
+def test_etf_daily_volume_scaling_uses_decimal_semantics() -> None:
+    raw = FakeTushare().daily_frame.iloc[:1].copy()
+    raw.loc[:, "vol"] = [69310.01]
+
+    normalized = normalize_fund_daily(raw, TARGET)
+
+    assert normalized["volume"].tolist() == [6931001]
+
+    raw.loc[:, "vol"] = [69310.011]
+    with pytest.raises(ContractError, match="whole shares"):
+        normalize_fund_daily(raw, TARGET)
 
 
 def test_etf_adj_factor_requires_daily_coverage_and_writes_full_factors(tmp_path: Path, monkeypatch) -> None:
