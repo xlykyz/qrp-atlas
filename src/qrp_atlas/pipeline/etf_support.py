@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, time as clock_time, timedelta
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -573,10 +574,10 @@ def normalize_fund_daily(raw: pd.DataFrame, target: date) -> pd.DataFrame:
         (OPEN, HIGH, LOW, CLOSE, PRE_CLOSE, CHANGE, PCT_CHANGE, VOLUME, AMOUNT),
         "ETF_DAILY_API_PARTIAL",
     )
-    volume_in_shares = frame[VOLUME] * 100
-    if (volume_in_shares % 1 != 0).any():
+    volume_in_shares = frame[VOLUME].map(lambda value: Decimal(str(value)) * 100)
+    if any(value != value.to_integral_value() for value in volume_in_shares):
         raise ContractError("ETF_DAILY_API_PARTIAL", "vol cannot be represented as whole shares")
-    frame[VOLUME] = volume_in_shares.astype("int64")
+    frame[VOLUME] = volume_in_shares.map(int).astype("int64")
     frame[AMOUNT] = frame[AMOUNT] * 1000
     frame = _deduplicate(frame, [TRADE_DATE, TICKER], "ETF_DAILY_API_PARTIAL")
     return frame.loc[:, [TRADE_DATE, TICKER, OPEN, HIGH, LOW, CLOSE, PRE_CLOSE, CHANGE, PCT_CHANGE, VOLUME, AMOUNT]]

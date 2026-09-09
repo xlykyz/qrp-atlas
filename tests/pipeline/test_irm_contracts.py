@@ -178,7 +178,7 @@ def test_repeated_scan_is_pid_idempotent_and_reports_zero_insertions(tmp_path, m
     assert _count_rows(settings) == 1
 
 
-def test_partial_page_overlap_fails_closed_without_writing(tmp_path, monkeypatch) -> None:
+def test_partial_page_overlap_is_successful_boundary_and_keeps_new_rows(tmp_path, monkeypatch) -> None:
     page_one = {"success": True, "rows": [_raw_row(index) for index in range(10)]}
     page_two = {"success": True, "rows": [_raw_row(index) for index in range(9, 19)]}
     calls = _install_pages(monkeypatch, {1: page_one, 2: page_two})
@@ -186,10 +186,14 @@ def test_partial_page_overlap_fails_closed_without_writing(tmp_path, monkeypatch
 
     result = _run_contract(settings)
 
-    assert result.status is ResultStatus.FAILED
-    assert "IRM_PROVIDER_PARTIAL_PAGE_OVERLAP" in _diagnostic_codes(result)
+    assert result.status is ResultStatus.SUCCESS
+    assert "IRM_PROVIDER_PARTIAL_PAGE_OVERLAP" not in _diagnostic_codes(result)
     assert calls == [1, 2]
-    assert _count_rows(settings) == 0
+    assert result.metrics.rows_read == 20
+    assert result.metrics.rows_written == 19
+    assert result.outputs[0].detail["rows_deduplicated"] == 19
+    assert result.outputs[0].detail["stop_reason"] == "partial_page_overlap"
+    assert _count_rows(settings) == 19
 
 
 def test_missing_provider_field_fails_closed(tmp_path, monkeypatch) -> None:

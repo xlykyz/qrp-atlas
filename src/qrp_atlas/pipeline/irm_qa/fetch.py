@@ -202,10 +202,11 @@ def fetch_interaction_qa_with_report(
     """Scan the provider's latest feed and return records plus work metrics.
 
     The provider's ``total`` field is intentionally ignored because the local
-    investigation found it is not a reliable total. A full repeated page is a
-    known provider wrap-around terminator. A partial overlap, malformed page,
-    failed page, or exhausted page limit is not sufficient evidence of a
-    complete scan and fails closed.
+    investigation found it is not a reliable total. Full-page overlap is the
+    provider's known wrap-around terminator. Partial overlap is also accepted
+    as a successful boundary because offset pages can slide while the latest
+    feed is being updated; unseen pid values from that boundary page are kept.
+    Malformed pages, failed requests, or exhausted page limits still fail closed.
     """
 
     if max_pages <= 0 or max_retries < 0 or timeout <= 0:
@@ -238,26 +239,28 @@ def fetch_interaction_qa_with_report(
         if len(page_pids) != len(set(page_pids)):
             raise ContractError("IRM_PROVIDER_DUPLICATE_PAGE", f"page {page} contains duplicate pid values")
         overlap = set(page_pids) & seen_pids
-        if overlap:
-            if len(overlap) == len(page_pids):
-                report.stop_reason = "full_page_overlap"
-                break
-            raise ContractError(
-                "IRM_PROVIDER_PARTIAL_PAGE_OVERLAP",
-                f"page {page} overlaps {len(overlap)} prior pid values",
-            )
+        if overlap and len(overlap) == len(page_pids):
+            report.stop_reason = "full_page_overlap"
+            break
+        partial_overlap = bool(overlap)
 
         stop_by_date = False
         for row in rows:
+            pid = str(row["pid"]).strip()
+            if pid in seen_pids:
+                continue
             reply_time = str(row.get("replyerTimeStr") or "").strip()
             if since_date and reply_time and reply_time[:10] < since_date:
                 stop_by_date = True
                 continue
-            seen_pids.add(str(row["pid"]).strip())
+            seen_pids.add(pid)
             all_records.append(row)
 
         if stop_by_date:
             report.stop_reason = "since_date"
+            break
+        if partial_overlap:
+            report.stop_reason = "partial_page_overlap"
             break
         if len(rows) < P5W_PAGE_SIZE:
             report.stop_reason = "short_page"
