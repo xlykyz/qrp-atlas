@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "policy": "existing debt may remain, new debt must not grow",
+  "maintained_by": "docs/governance/SSOT元规则.md (D6) + tools/arch_check.py",
+  "entries": [
+    {
+      "path": "src/qrp_atlas/indicators/cross_section/universe.py",
+      "rule_id": "ARCH-DEP-INDICATORS",
+      "symbol": "qrp_atlas.backtest.pit_queries",
+      "occurrences": 1,
+      "reason": "历史债务（2026-09-11 登记）：cross_section universe 通过函数内延迟导入注入 backtest 的 PIT 查询服务作为可替换 query。收敛需要在 indicators 侧引入正式的查询注入边界（或把 index universe 成员解析移出纯计算层），属业务重构，超出本轮治理范围。occurrences 表示允许出现的条数，超出即视为新债。"
+    }
+  ]
+}
