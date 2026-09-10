@@ -177,13 +177,20 @@ source .venv/bin/activate          # Linux / macOS
 pip install -e ".[test]"
 ```
 
-### 运行测试
+### 运行验证（正式入口）
 
 ```bash
-python -m pytest
+python -m tools.verify          # full：语法 + diff-check + 架构检查 + 全量 pytest
+python -m tools.verify --fast   # fast：仅静态检查（开发中快速自检）
 ```
 
-新增模块、修改公共契约或准备合并运行逻辑时，应运行完整测试检查跨模块回归；开发过程中可以先运行与变更范围匹配的测试目录。纯文档任务可以不运行测试，但应在交付说明中明确记录。
+**这是唯一推荐的正式验证入口**，交付前运行它即可覆盖完整验证。任一步失败时总入口返回非零并标明失败阶段。开发过程中可先运行与变更范围匹配的测试目录：
+
+```bash
+python -m pytest tests/pipeline -q
+```
+
+新增模块、修改公共契约或准备合并运行逻辑时，应运行完整验证检查跨模块回归。纯文档任务可以不运行测试，但应在交付说明中明确记录。
 
 ### 运行日更管线
 
