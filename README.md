@@ -1,3 +1,5 @@
+
+
 # qrp-atlas
 
 qrp-atlas（QRP）是一个面向个人 A 股交易研究的量化平台：以标准数据契约为基础，由指标层生成可复用事实，策略层输出标准化决策，回测系统负责数据准备、现实成交模拟、研究评价与结果产品化。
@@ -282,7 +284,7 @@ QRP_AUTH_DATABASE_URL=postgresql://USER:PASSWORD@db.example.com:5432/qrp_atlas
 QRP_AUTH_SESSION_TTL_SECONDS=86400
 ```
 
-`database` 模式缺少 DSN 会立即失败且不会降级到本地认证。真实 DSN、Tushare token 和带认证信息的代理 URL 必须由安全环境注入，不得提交、打印或写入诊断结果。正式环境还应显式收紧 `QRP_API_CORS_ORIGINS`。
+首次启用 `database` 模式前，先执行 [`deploy/postgres/001_auth_schema.sql`](deploy/postgres/001_auth_schema.sql) 创建认证表。`database` 模式缺少 DSN 会立即失败且不会降级到本地认证。真实 DSN、Tushare token 和带认证信息的代理 URL 必须由安全环境注入，不得提交、打印或写入诊断结果。正式环境还应显式收紧 `QRP_API_CORS_ORIGINS`。
 
 旧的 `QRP_DB_READ_ONLY` 和 `QRP_ATLAS_*_DIR` 路径变量仍作为兼容别名，但新部署应使用 `.env.example` 中的 `QRP_*` 名称。应用不会自动迁移已有数据。
 
