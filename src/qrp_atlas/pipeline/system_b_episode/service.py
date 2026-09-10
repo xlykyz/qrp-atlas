@@ -30,6 +30,20 @@ from qrp_atlas.indicators.system_b import (
 
 ACCEPTANCE_START_DATE = date(2013, 1, 1)
 
+_SEGMENT_QUALITY_KEYS = frozenset({
+    "orphan_segments",
+    "duplicate_segment_id",
+    "duplicate_segment_keys",
+    "segment_no_gaps",
+    "adjacent_same_state",
+    "trading_days_mismatch",
+    "segment_start_boundary_mismatch",
+    "segment_end_boundary_mismatch",
+    "first_anchor_mismatch",
+    "active_sprint_count_mismatch",
+    "return_closure_violations",
+})
+
 
 class SystemBEpisodeProductionError(RuntimeError):
     """Stable production failure with a machine-readable code."""
@@ -123,6 +137,55 @@ def inspect_state_input(connection: duckdb.DuckDBPyConnection) -> dict[str, obje
     }
 
 
+
+def _insert_segments_from_committed_episodes(
+    output: duckdb.DuckDBPyConnection,
+    *,
+    assets: list[str],
+    run_id: str,
+    created_at: datetime,
+    asset_batch_size: int,
+) -> int:
+    """Build Segment in its own transaction from committed Episode outputs."""
+    segment_rows = 0
+    for offset in range(0, len(assets), asset_batch_size):
+        batch = assets[offset:offset + asset_batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        episode_frame = output.execute(
+            f"""SELECT * FROM {SYSTEM_B_EPISODE_TABLE}
+            WHERE rule_version=? AND asset_id IN ({placeholders})
+            ORDER BY asset_id, episode_no""",
+            [SYSTEM_B_EPISODE_RULE_VERSION, *batch],
+        ).fetchdf()
+        if episode_frame.empty:
+            continue
+        observation_frame = output.execute(
+            f"""SELECT * FROM {SYSTEM_B_EPISODE_OBSERVATION_TABLE}
+            WHERE rule_version=? AND asset_id IN ({placeholders})
+            ORDER BY asset_id, trade_date""",
+            [SYSTEM_B_EPISODE_RULE_VERSION, *batch],
+        ).fetchdf()
+        seg_res = calculate_system_b_episode_segments(episode_frame, observation_frame)
+        segment_frame = seg_res.segments.copy()
+        if segment_frame.empty:
+            continue
+        segment_frame[CREATED_RUN_ID] = run_id
+        segment_frame[SOURCE_EPISODE_RULE_VERSION] = SYSTEM_B_EPISODE_RULE_VERSION
+        segment_frame[SEGMENT_VERSION] = SYSTEM_B_EPISODE_SEGMENT_VERSION
+        segment_frame[CREATED_AT] = created_at
+        output.register("episode_segment_batch", segment_frame)
+        try:
+            columns = ",".join(column.name for column in SYSTEM_B_EPISODE_SEGMENT.columns)
+            output.execute(
+                f"INSERT INTO {SYSTEM_B_EPISODE_SEGMENT_TABLE} ({columns}) "
+                f"SELECT {columns} FROM episode_segment_batch"
+            )
+        finally:
+            output.unregister("episode_segment_batch")
+        segment_rows += len(segment_frame)
+    return segment_rows
+
+
 def rebuild_episodes(
     state_input_database: Path,
     output_database: Path,
@@ -130,6 +193,7 @@ def rebuild_episodes(
     end_date: date,
     acceptance_start_date: date = ACCEPTANCE_START_DATE,
     asset_batch_size: int = 128,
+    include_segments: bool = False,
 ) -> dict[str, object]:
     input_path, source = open_state_input(state_input_database)
     try:
@@ -167,7 +231,8 @@ def rebuild_episodes(
                 f"DELETE FROM {SYSTEM_B_EPISODE_TABLE} WHERE rule_version=?",
                 [SYSTEM_B_EPISODE_RULE_VERSION],
             )
-            episode_rows = observation_rows = segment_rows = excluded_null_state = excluded_indicator_warmup = 0
+            episode_rows = observation_rows = excluded_null_state = excluded_indicator_warmup = 0
+            segment_rows = 0
             for offset in range(0, len(assets), asset_batch_size):
                 batch = assets[offset:offset + asset_batch_size]
                 placeholders = ",".join("?" for _ in batch)
@@ -200,22 +265,10 @@ def rebuild_episodes(
                 observation_frame = result.observations.loc[
                     result.observations["episode_id"].isin(kept_ids)
                 ].copy()
-                if not episode_frame.empty and not observation_frame.empty:
-                    seg_res = calculate_system_b_episode_segments(episode_frame, observation_frame)
-                    segment_frame = seg_res.segments.copy()
-                else:
-                    segment_frame = pd.DataFrame(columns=[column.name for column in SYSTEM_B_EPISODE_SEGMENT.columns])
-
                 for frame in (episode_frame, observation_frame):
                     frame[CREATED_RUN_ID] = run_id
                     frame[RULE_VERSION] = SYSTEM_B_EPISODE_RULE_VERSION
                     frame[CREATED_AT] = now
-                if not segment_frame.empty:
-                    segment_frame[CREATED_RUN_ID] = run_id
-                    segment_frame[SOURCE_EPISODE_RULE_VERSION] = SYSTEM_B_EPISODE_RULE_VERSION
-                    segment_frame[SEGMENT_VERSION] = SYSTEM_B_EPISODE_SEGMENT_VERSION
-                    segment_frame[CREATED_AT] = now
-
                 if not episode_frame.empty:
                     output.register("episode_batch", episode_frame)
                     columns = ",".join(column.name for column in SYSTEM_B_EPISODE.columns)
@@ -226,29 +279,98 @@ def rebuild_episodes(
                     columns = ",".join(column.name for column in SYSTEM_B_EPISODE_OBSERVATION.columns)
                     output.execute(f"INSERT INTO {SYSTEM_B_EPISODE_OBSERVATION_TABLE} ({columns}) SELECT {columns} FROM episode_observation_batch")
                     output.unregister("episode_observation_batch")
-                if not segment_frame.empty:
-                    output.register("episode_segment_batch", segment_frame)
-                    columns = ",".join(column.name for column in SYSTEM_B_EPISODE_SEGMENT.columns)
-                    output.execute(f"INSERT INTO {SYSTEM_B_EPISODE_SEGMENT_TABLE} ({columns}) SELECT {columns} FROM episode_segment_batch")
-                    output.unregister("episode_segment_batch")
-
                 episode_rows += len(episode_frame)
                 observation_rows += len(observation_frame)
-                segment_rows += len(segment_frame)
-            audit = audit_episodes(output, source, acceptance_start_date=acceptance_start_date, end_date=end_date)
-            violations = {key: value for key, value in audit["quality"].items() if value and key != "shared_boundary_days"}
+            core_audit = audit_episodes(
+                output,
+                source,
+                acceptance_start_date=acceptance_start_date,
+                end_date=end_date,
+            )
+            core_quality = {
+                key: value
+                for key, value in core_audit["quality"].items()
+                if key not in _SEGMENT_QUALITY_KEYS
+            }
+            core_audit = {**core_audit, "quality": core_quality}
+            violations = {
+                key: value
+                for key, value in core_quality.items()
+                if value and key != "shared_boundary_days"
+            }
             if violations:
-                error_detail: dict[str, object] = {"violations": violations}
-                if violations.get("return_closure_violations"):
-                    error_detail["return_closure_diagnostics"] = audit["evidence"].get("return_closure_diagnostics", [])
-                raise SystemBEpisodeProductionError("INVARIANT_VIOLATION", repr(error_detail))
+                raise SystemBEpisodeProductionError(
+                    "INVARIANT_VIOLATION",
+                    repr({"violations": violations}),
+                )
             output.execute("COMMIT")
+
+            # Segment is a downstream optional stage.  The production Episode
+            # path currently leaves it disabled; when explicitly enabled it
+            # runs in a separate transaction and can never roll back Episode.
+            segment_status = "SKIPPED"
+            segment_error_code: str | None = None
+            segment_error_detail: str | None = None
+            audit = core_audit
+            if include_segments:
+                try:
+                    output.execute("BEGIN")
+                    segment_rows = _insert_segments_from_committed_episodes(
+                        output,
+                        assets=assets,
+                        run_id=run_id,
+                        created_at=now,
+                        asset_batch_size=asset_batch_size,
+                    )
+                    segment_audit = audit_episodes(
+                        output,
+                        source,
+                        acceptance_start_date=acceptance_start_date,
+                        end_date=end_date,
+                    )
+                    segment_violations = {
+                        key: value
+                        for key, value in segment_audit["quality"].items()
+                        if key in _SEGMENT_QUALITY_KEYS and value
+                    }
+                    if segment_violations:
+                        error_detail: dict[str, object] = {"violations": segment_violations}
+                        if segment_violations.get("return_closure_violations"):
+                            error_detail["return_closure_diagnostics"] = (
+                                segment_audit["evidence"].get("return_closure_diagnostics", [])
+                            )
+                        raise SystemBEpisodeProductionError(
+                            "SEGMENT_INVARIANT_VIOLATION",
+                            repr(error_detail),
+                        )
+                    output.execute("COMMIT")
+                    audit = segment_audit
+                    segment_status = "SUCCEEDED"
+                except Exception as exc:
+                    try:
+                        output.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    segment_rows = 0
+                    segment_status = "FAILED"
+                    segment_error_code = (
+                        exc.code if isinstance(exc, SystemBEpisodeProductionError)
+                        else type(exc).__name__
+                    )
+                    segment_error_detail = (
+                        exc.detail if isinstance(exc, SystemBEpisodeProductionError)
+                        else str(exc)
+                    )
+
             return {
                 "created_run_id": run_id, "state_input_database": str(input_path),
                 "episode_output_database": str(output_path), "acceptance_start_date": str(acceptance_start_date),
-                "effective_end_date": str(end_date), "output_rebuild_strategy": "transactional rule-version replacement",
+                "effective_end_date": str(end_date),
+                "output_rebuild_strategy": "split transactional replacement; segment optional",
                 "episode_rows": episode_rows, "observation_rows": observation_rows,
-                "segment_rows": segment_rows,
+                "segment_rows": segment_rows, "segment_status": segment_status,
+                "segment_error_code": segment_error_code,
+                "segment_error_detail": segment_error_detail,
                 "excluded_null_state_rows": excluded_null_state,
                 "excluded_indicator_warmup_rows": excluded_indicator_warmup,
                 **state, **audit,
