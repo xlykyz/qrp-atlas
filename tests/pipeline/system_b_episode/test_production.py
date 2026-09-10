@@ -44,12 +44,57 @@ def test_rebuild_uses_state_table_and_official_sma(tmp_path: Path):
     first=rebuild_episodes(state.resolve(),output.resolve(),end_date=pd.Timestamp("2026-01-23").date(),acceptance_start_date=ACCEPTANCE_START)
     second=rebuild_episodes(state.resolve(),output.resolve(),end_date=pd.Timestamp("2026-01-23").date(),acceptance_start_date=ACCEPTANCE_START)
     assert first["episode_rows"]==second["episode_rows"]==1
-    assert first["segment_rows"]==second["segment_rows"]>=1
+    assert first["segment_rows"]==second["segment_rows"]==0
+    assert first["segment_status"]==second["segment_status"]=="SKIPPED"
     assert first["state_input_database"]==str(state.resolve())
     con=duckdb.connect(str(output),read_only=True)
     assert con.execute("select count(*) from system_b_episode").fetchone()[0]==1
     assert con.execute("select count(*) from system_b_episode_observation").fetchone()[0]>0
+    assert con.execute("select count(*) from system_b_episode_segment").fetchone()[0]==0
+    con.close()
+
+
+def test_segment_stage_runs_in_separate_transaction_when_explicitly_enabled(tmp_path: Path):
+    state=_state_database(tmp_path); output=tmp_path/"episode-with-segment.duckdb"
+    result=rebuild_episodes(
+        state.resolve(),output.resolve(),
+        end_date=pd.Timestamp("2026-01-23").date(),
+        acceptance_start_date=ACCEPTANCE_START,
+        include_segments=True,
+    )
+    assert result["episode_rows"]==1
+    assert result["segment_status"]=="SUCCEEDED"
+    assert result["segment_rows"]>=1
+    con=duckdb.connect(str(output),read_only=True)
+    assert con.execute("select count(*) from system_b_episode").fetchone()[0]==1
+    assert con.execute("select count(*) from system_b_episode_observation").fetchone()[0]>0
     assert con.execute("select count(*) from system_b_episode_segment").fetchone()[0]>0
+    con.close()
+
+
+def test_segment_failure_does_not_rollback_episode_or_fail_rebuild(tmp_path: Path,monkeypatch):
+    state=_state_database(tmp_path); output=tmp_path/"episode-segment-failure.duckdb"
+    import qrp_atlas.pipeline.system_b_episode.service as service
+    monkeypatch.setattr(
+        service,
+        "calculate_system_b_episode_segments",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("segment boom")),
+    )
+    result=rebuild_episodes(
+        state.resolve(),output.resolve(),
+        end_date=pd.Timestamp("2026-01-23").date(),
+        acceptance_start_date=ACCEPTANCE_START,
+        include_segments=True,
+    )
+    assert result["episode_rows"]==1
+    assert result["segment_status"]=="FAILED"
+    assert result["segment_error_code"]=="RuntimeError"
+    assert result["segment_error_detail"]=="segment boom"
+    assert result["segment_rows"]==0
+    con=duckdb.connect(str(output),read_only=True)
+    assert con.execute("select count(*) from system_b_episode").fetchone()[0]==1
+    assert con.execute("select count(*) from system_b_episode_observation").fetchone()[0]>0
+    assert con.execute("select count(*) from system_b_episode_segment").fetchone()[0]==0
     con.close()
 
 
