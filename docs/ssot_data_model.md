@@ -1,9 +1,11 @@
 # qrp-atlas 数据契约 SSOT 总览
 
+> **角色声明（2026-09-11）**：本文件是 `src/qrp_atlas/contracts/`（`fields.py` / `schema.py` / `mappings.py`）的**派生整理稿，非权威**。数据定义的唯一权威是 contracts/ 源码；维度归属见 [SSOT 元规则](governance/SSOT元规则.md)（D1）。若本文件与 contracts/ 不一致，以 contracts/ 为准。
+
 > 本文件自动整理自 `contracts/` 下 3 个核心单事实来源(SSOT)文件：
 > `fields.py`（字段常量）、`schema.py`（表结构）、`mappings.py`（数据源映射）
 >
-> **原则：所有数据定义以此为唯一权威来源，其他模块只引用不重定义。**
+> **原则：所有数据定义以 contracts/ 为唯一权威来源，其他模块只引用不重定义。**
 
 ---
 

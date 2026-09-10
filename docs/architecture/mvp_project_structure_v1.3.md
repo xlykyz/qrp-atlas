@@ -1,5 +1,7 @@
 # qrp-atlas --- MVP Project Structure (SSOT Blueprint)
 
+> **状态声明（2026-09-11）**：本文件是 **MVP 阶段**的结构蓝图（历史文档），保留供追溯。文中 "Dual SSOT"（Runtime `quant.db` / Recovery `canonical/**`）描述的是**数据实例层**的运行时与恢复源，不是 schema 或业务语义权威；当前各维度权威归属见 [SSOT 元规则](../governance/SSOT元规则.md)（D1 / D9）。
+
 > 本文档定义 qrp-atlas 在 MVP 阶段的唯一项目结构标准。
 > 基于原始版本，仅对齐最新讨论的 **Dual‑SSOT 与 scripts/src
 > 职责边界**，不改变原有的结构表达方式。

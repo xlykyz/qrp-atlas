@@ -9,9 +9,11 @@ enablement, schedule, explicit timezone, fixed parameters, and optional
 display information.  One Contract may be referenced by many job instances;
 every business rule is resolved from the referenced Contract at runtime.
 
-The manifest lives in the repository deployment area, is version-controlled,
-contains no credentials and no machine-specific absolute paths, and every
-example is disabled.
+The production manifest lives in the repository deployment area, is
+version-controlled, contains no credentials and no machine-specific
+absolute paths, and mirrors the authoritative production job set.  A
+format-only example manifest uses the ``*.example.json`` suffix and stays
+fully disabled.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ DEFAULT_PRODUCTION_JOBS_PATH = Path("deploy/pipeline/production-job-definitions.
 
 @dataclass(frozen=True, slots=True)
 class ProductionJobDefinition:
-    """A disabled-by-default scheduling instance referencing one Contract."""
+    """A scheduling instance referencing one Contract."""
 
     job_id: str
     pipeline_id: str

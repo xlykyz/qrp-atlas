@@ -2,24 +2,302 @@
   "schema_version": 1,
   "jobs": [
     {
+      "job_id": "irm-qa-incremental",
+      "pipeline_id": "irm_qa_incremental",
+      "enabled": true,
+      "schedule": "*/5 8-21 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "IRM Q&A incremental ingestion",
+      "description": "Production canary for the QRP Pipeline scheduler."
+    },
+    {
+      "job_id": "suspend-d-ingest-morning",
+      "pipeline_id": "suspend_d_ingest",
+      "enabled": true,
+      "schedule": "15 9 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Suspended stock daily ingestion (morning)",
+      "description": "Daily trading-day suspend_d ingestion at 09:15 Beijing time."
+    },
+    {
+      "job_id": "index-basic-morning",
+      "pipeline_id": "index_basic_update",
+      "enabled": true,
+      "schedule": "0 8 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Index basic dictionary (morning)",
+      "description": "Daily full-rebuild reference-data snapshot of the configured Tushare index markets."
+    },
+    {
+      "job_id": "stock-basic-morning",
+      "pipeline_id": "stock_basic_update",
+      "enabled": true,
+      "schedule": "10 8 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Stock basic dictionary (morning)",
+      "description": "Daily full-rebuild stock reference-data snapshot."
+    },
+    {
+      "job_id": "market-daily-close",
+      "pipeline_id": "market_daily_update",
+      "enabled": true,
+      "schedule": "15 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "A-share daily market snapshot (close)",
+      "description": "Hermes job b8c670f02f9b first stage."
+    },
+    {
+      "job_id": "adj-factor-close",
+      "pipeline_id": "adj_factor_daily",
+      "enabled": true,
+      "schedule": "25 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "A-share daily adjustment factors (close)",
+      "description": "Hermes job b8c670f02f9b second stage; depends on market-daily-close."
+    },
+    {
+      "job_id": "etf-daily-close",
+      "pipeline_id": "etf_daily_update",
+      "enabled": true,
+      "schedule": "30 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "ETF daily snapshot (close)",
+      "description": "Daily target-date ETF snapshot replacement."
+    },
+    {
+      "job_id": "etf-adj-factor-close",
+      "pipeline_id": "etf_adj_factor_update",
+      "enabled": true,
+      "schedule": "45 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "ETF adjustment factors (close)",
+      "description": "Daily ETF adjustment-factor replacement after etf-daily-close."
+    },
+    {
+      "job_id": "limit-step-close",
+      "pipeline_id": "limit_step_ingest",
+      "enabled": true,
+      "schedule": "40 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Limit-step events (close)",
+      "description": "Daily target-date Tushare limit-step snapshot replacement."
+    },
+    {
+      "job_id": "ths-daily-close",
+      "pipeline_id": "ths_daily_ingest",
+      "enabled": true,
+      "schedule": "50 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "THS daily events (close)",
+      "description": "Daily target-date Tushare THS snapshot replacement."
+    },
+    {
+      "job_id": "stk-high-shock-close",
+      "pipeline_id": "stk_high_shock_ingest",
+      "enabled": true,
+      "schedule": "0 17 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Stock high-shock events (close)",
+      "description": "Daily target-date Tushare stock high-shock snapshot replacement."
+    },
+    {
+      "job_id": "daily-basic-close",
+      "pipeline_id": "daily_basic_update",
+      "enabled": true,
+      "schedule": "15 17 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "A-share daily basic indicators (close)",
+      "description": "Hermes job 4afb74bd0769; depends on market-daily-close."
+    },
+    {
+      "job_id": "zt-dt-pool-close",
+      "pipeline_id": "zt_dt_pool_daily",
+      "enabled": true,
+      "schedule": "30 16 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Eastmoney limit-up/down pools (close)",
+      "description": "Hermes job 3c40deda0c79. Schedule adjusted from Hermes 15:30 to 16:30: the Contract resolves market targets after 16:00, so 15:30 would use the previous natural day."
+    },
+    {
+      "job_id": "index-daily-close",
+      "pipeline_id": "index_daily_update",
+      "enabled": true,
+      "schedule": "0 20 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "Index daily snapshot (close)",
+      "description": "Hermes job 0450c10ccb5f."
+    },
+    {
+      "job_id": "fundamentals-daily-announcement",
+      "pipeline_id": "fundamentals_ingest",
+      "enabled": true,
+      "schedule": "0 18 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {"mode": "ann_date", "tables": "all"},
+      "name": "Fundamentals announcement-date ingestion",
+      "description": "Daily four-table VIP pull by announcement date; the Contract derives the D-1,D,D+1 calendar window."
+    },
+    {
+      "job_id": "earnings-forecast-daily-announcement",
+      "pipeline_id": "earnings_forecast_ingest",
+      "enabled": true,
+      "schedule": "15 18 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {"mode": "ann_date"},
+      "name": "Earnings forecast announcement-date ingestion",
+      "description": "Daily forecast pull by the Contract-derived D-1,D,D+1 announcement-date window."
+    },
+    {
+      "job_id": "system-b-readiness-daily",
+      "pipeline_id": "system_b_state_readiness",
+      "enabled": true,
+      "schedule": "30 18 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B state readiness",
+      "description": "Checks market, adjustment-factor, suspend, and source-table readiness before state calculation."
+    },
+    {
+      "job_id": "system-b-state-daily",
+      "pipeline_id": "system_b_state_daily",
+      "enabled": true,
+      "schedule": "40 18 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B daily state",
+      "description": "Daily target-date state calculation after readiness."
+    },
+    {
+      "job_id": "system-b-episode-daily",
+      "pipeline_id": "system_b_episode_rebuild",
+      "enabled": true,
+      "schedule": "50 18 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B episode rebuild",
+      "description": "Daily rebuild through the target date; requires the separately planned manual historical state initialization."
+    },
+    {
+      "job_id": "system-b-pool-height-daily",
+      "pipeline_id": "system_b_pool_height",
+      "enabled": true,
+      "schedule": "0 19 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B HEIGHT pool",
+      "description": "Daily HEIGHT pool target-date replacement after the episode rebuild."
+    },
+    {
+      "job_id": "system-b-pool-capacity-daily",
+      "pipeline_id": "system_b_pool_capacity",
+      "enabled": true,
+      "schedule": "10 19 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B CAPACITY pool",
+      "description": "Daily CAPACITY pool target-date replacement after the episode rebuild."
+    },
+    {
+      "job_id": "system-b-pool-recognition-daily",
+      "pipeline_id": "system_b_pool_recognition",
+      "enabled": true,
+      "schedule": "20 19 * * 1-5",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "System B RECOGNITION pool",
+      "description": "Daily RECOGNITION pool target-date replacement after the episode rebuild."
+    },
+    {
+      "job_id": "cninfo-research-morning",
+      "pipeline_id": "cninfo_research_visit_ingest",
+      "enabled": true,
+      "schedule": "0 8 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "CNINFO research visits (morning)",
+      "description": "Hermes job 83895a6a24a7."
+    },
+    {
+      "job_id": "cninfo-research-noon-evening",
+      "pipeline_id": "cninfo_research_visit_ingest",
+      "enabled": true,
+      "schedule": "0 12,21 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "CNINFO research visits (noon and evening)",
+      "description": "Hermes job e56ff366b299 (single instance for both times)."
+    },
+    {
+      "job_id": "cninfo-research-afternoon",
+      "pipeline_id": "cninfo_research_visit_ingest",
+      "enabled": true,
+      "schedule": "15 15 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {},
+      "name": "CNINFO research visits (afternoon)",
+      "description": "Hermes job 053db3ea5a9f."
+    },
+    {
       "job_id": "research-stock-report-morning",
       "pipeline_id": "research_stock_report_ingest",
-      "enabled": false,
-      "schedule": "0 7 * * 1-5",
+      "enabled": true,
+      "schedule": "0 7 * * *",
       "timezone": "Asia/Shanghai",
-      "parameters": {"incremental": "true"},
+      "parameters": {
+        "incremental": "true"
+      },
       "name": "Stock research report ingestion (morning)",
-      "description": "Disabled offline example: second schedule instance of research_stock_report_ingest. Not part of any formal deployment selection."
+      "description": "Hermes job 2b3c60fc1bcc; historical script passed --incremental."
     },
     {
       "job_id": "research-stock-report-evening",
       "pipeline_id": "research_stock_report_ingest",
-      "enabled": false,
-      "schedule": "0 19 * * 1-5",
+      "enabled": true,
+      "schedule": "0 19 * * *",
       "timezone": "Asia/Shanghai",
-      "parameters": {},
+      "parameters": {
+        "incremental": "true"
+      },
       "name": "Stock research report ingestion (evening)",
-      "description": "Disabled offline example: third schedule instance of research_stock_report_ingest. Not part of any formal deployment selection."
+      "description": "Hermes job cd3ce52ff14a; historical script passed --incremental."
+    },
+    {
+      "job_id": "research-industry-report-morning",
+      "pipeline_id": "research_industry_report_ingest",
+      "enabled": true,
+      "schedule": "0 7 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {
+        "incremental": "true"
+      },
+      "name": "Industry research report ingestion (morning)",
+      "description": "Hermes job 3591486225dc; historical script passed --incremental."
+    },
+    {
+      "job_id": "research-industry-report-evening",
+      "pipeline_id": "research_industry_report_ingest",
+      "enabled": true,
+      "schedule": "0 19 * * *",
+      "timezone": "Asia/Shanghai",
+      "parameters": {
+        "incremental": "true"
+      },
+      "name": "Industry research report ingestion (evening)",
+      "description": "Hermes job 16a55246bddc; historical script passed --incremental."
     }
   ]
 }

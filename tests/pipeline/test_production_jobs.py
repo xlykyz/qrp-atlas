@@ -22,6 +22,7 @@ from qrp_atlas.pipeline.job_adapter import runtime_definition_from_production_jo
 from qrp_atlas.pipeline.production_jobs import (
     DEFAULT_PRODUCTION_JOBS_PATH,
     ProductionJobDefinition,
+    load_and_validate_production_jobs,
     load_production_jobs,
     resolve_instance_dependencies,
     validate_production_jobs,
@@ -29,6 +30,17 @@ from qrp_atlas.pipeline.production_jobs import (
 from qrp_atlas.pipeline.registry import PipelineRegistry, default_registry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+#: 生产 manifest 必须包含的关键链路 job（防截断/清空的锚点，不追求穷举）
+REQUIRED_PRODUCTION_JOB_IDS = frozenset(
+    {
+        "irm-qa-incremental",
+        "market-daily-close",
+        "adj-factor-close",
+        "system-b-state-daily",
+        "system-b-episode-daily",
+    }
+)
 
 
 def _job(
@@ -292,15 +304,31 @@ def test_existing_registry_has_no_regression() -> None:
     assert len(contracts) == 38
 
 
+def test_production_manifest_is_versioned_and_contract_valid() -> None:
+    """仓库内 production manifest 是生产调度实例的版本化权威镜像。
+
+    结构校验由 ``load_production_jobs`` 完成；``pipeline_id`` 引用、固定参数与
+    依赖图由 ``load_and_validate_production_jobs`` 对照 Contract 注册表
+    fail-closed 校验。
+    """
+
+    jobs = load_and_validate_production_jobs(
+        PROJECT_ROOT / "deploy" / "pipeline" / "production-job-definitions.json"
+    )
+    assert jobs
+    assert len({job.job_id for job in jobs}) == len(jobs)
+    # 锚定关键链路 job，防止 manifest 被截断/清空后仍然“绿灯”
+    assert REQUIRED_PRODUCTION_JOB_IDS <= {job.job_id for job in jobs}
+
+
 def test_example_definitions_are_all_disabled() -> None:
-    jobs = load_production_jobs(PROJECT_ROOT / "deploy" / "pipeline" / "production-job-definitions.json")
-    assert len(jobs) == 2
-    assert {job.job_id for job in jobs} == {
-        "research-stock-report-morning",
-        "research-stock-report-evening",
-    }
+    """示例清单（``*.example.json``）只演示格式，必须全部 disabled，不代表生产。"""
+
+    jobs = load_production_jobs(
+        PROJECT_ROOT / "deploy" / "pipeline" / "production-job-definitions.example.json"
+    )
+    assert jobs
     assert all(job.enabled is False for job in jobs)
-    assert all(job.pipeline_id == "research_stock_report_ingest" for job in jobs)
 
 
 def test_manifest_reload_is_stable(tmp_path: Path) -> None:
