@@ -1,10 +1,13 @@
 # Task06-A Walkthrough｜Asset Relative Ranking 交付说明
 
-> 状态：**IMPLEMENTED / SOURCE REVIEW PASSED**  
+> 状态：**SEVERE DEVELOPMENT INCIDENT / FROZEN / PENDING REMEDIATION**  
 > 分支：`feature/v1.1-task06-ranking`  
 > 设计基线：`Task06 System B 横截面相对评分与排名设计书 v0.1.md`  
 > 实现基线：`8e0b72edf20f3611cf0ece53bc478a67a5c439a1`  
+> 事故标记日期：`2026-09-11`  
 > 本文只覆盖 **Task06-A / Asset Relative Ranking**；Task06-B Theme Rank 不在本次交付范围。
+>
+> **事故声明：** Task06-A 在交付新能力时未经 Old Contract Change 隔离，修改了既有 System B Pool production path，并造成严重性能回归及潜在旧业务语义变化。此前“SOURCE REVIEW PASSED”只能视为历史源码审查记录，**不得再作为 production-ready 证据**。Task06-A 自本声明起冻结，待后续独立事故处理；当前 Pool recovery **禁止修改 Task06 代码**。修复边界见：`docs/incidents/SystemB_Pool旧路径恢复修复方案_20260911.md`。
 
 ---
 
@@ -162,7 +165,7 @@ ACTUAL_TRADING only
 target-date truncated
 ```
 
-该实现同时被 System B Pool production 复用，从而减少 State / Pool / Task06 对跨日价格序列的口径漂移。
+历史实现曾将该 loader 同时接入 System B Pool production，原意是减少 State / Pool / Task06 的跨日价格口径漂移。**该跨边界复用已于 2026-09-11 被定性为严重开发事故的一部分：Pool recovery 将恢复 Task06 介入前旧路径；本轮不得以“统一口径”为由继续修改旧 Pool。**
 
 实现过程中复现并修复了一个真实边界：
 
