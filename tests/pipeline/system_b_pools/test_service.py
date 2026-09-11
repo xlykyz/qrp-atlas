@@ -202,6 +202,42 @@ def test_relative_input_is_rejected(tmp_path: Path):
         )
 
 
+def test_pool_production_never_uses_task06_canonical_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Guard: Pool production must not depend on the Task06 canonical loader.
+
+    Task06's ``load_canonical_market_series`` replaced the Pool's set-based DuckDB
+    path with a full-history pandas materialization and is the root cause of the
+    pool loading performance regression; it must not be wired back into Pool
+    production.  The structural assertion catches a reintroduced module-level
+    import (the bound name would appear in the service namespace), and the
+    behavioural sentinel proves a ``build_stock_pool`` run completes without the
+    loader ever being consulted.
+    """
+    from qrp_atlas.pipeline.system_b import market_series
+    from qrp_atlas.pipeline.system_b_pools import service as pool_service
+
+    assert not hasattr(pool_service, "load_canonical_market_series")
+    assert not hasattr(pool_service, "CanonicalMarketSeriesError")
+
+    def _forbidden(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("Task06 canonical loader must not be used by Pool production")
+
+    monkeypatch.setattr(market_series, "load_canonical_market_series", _forbidden)
+
+    source = _input_database(tmp_path / "input.duckdb")
+    output = tmp_path / "pools.duckdb"
+    result = build_stock_pool(
+        source.resolve(),
+        output.resolve(),
+        pool_type="HEIGHT",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 8),
+    )
+    assert result["status"] == "COMPLETED"
+
+
 def test_stock_memberships_excludes_exit_records_but_history_keeps_them(tmp_path: Path):
     output = tmp_path / "pools.duckdb"
     con = duckdb.connect(str(output))
