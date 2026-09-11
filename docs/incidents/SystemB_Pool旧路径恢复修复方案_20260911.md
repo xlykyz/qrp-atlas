@@ -1,6 +1,6 @@
 # System B Pool 旧路径恢复修复方案｜2026-09-11
 
-> 状态：**APPROVED FOR PRE-EXECUTION AUDIT / CODE NOT STARTED**
+> 状态：**PRE-EXECUTION AUDIT PASSED / IMPLEMENTATION AUTHORIZED**
 > 事故等级：**严重开发事故（SEVERE DEVELOPMENT INCIDENT）**
 > 修复目标：**恢复 Task06 介入前的 System B Pool 生产执行路径**
 > 目标基线：Task06 提交 `8e0b72e` 的父提交 `118acfc35b7ba22d141a85feb4e4d2deb9bd6f4c`
@@ -8,6 +8,23 @@
 > 本文是本轮唯一授权范围；**Task06 本轮冻结，不做任何修复、优化、重构或兼容性补偿。**
 
 ---
+
+
+## 0. 执行前审计结果
+
+2026-09-11 本地 Agent 已完成执行前审计，结论：**PASS**。
+
+确认：
+
+- `8e0b72e^ == 118acfc`；
+- `src/qrp_atlas/pipeline/system_b_pools/service.py` 自 `8e0b72e` 起未再发生后续修改；
+- 本轮恢复可精确限定为该文件中 Task06 引入的 Pool 越界改动；
+- 不需要机械 revert 整个 Task06 commit；
+- 未发现恢复旧 Pool production path 的代码阻塞；
+- Task06 / contracts / Episode / State / scheduler 均保持冻结，不在本轮修改范围。
+
+审计提出“恢复后 Task06 将失效”的判断，当前**不作为已核实结论**。现有 `asset_ranking.py::_height_values()` 存在缺少 `height_since_start_return` 时基于 `height_start_date + canonical market series` 的 fallback。Task06 与 legacy Pool 的实际兼容性留待后续 Task06 事故任务单独验证；无论结果如何，都不得反向阻塞本轮 Pool recovery。
+
 
 ## 1. 事故定性
 
