@@ -1,0 +1,16 @@
+id: KI-003
+date: 2026-09-12
+status: open
+symptom: |
+  手工提交 run 时 job_id 传错（误传 pipeline_id，或漏加 --production-jobs），生成 job_id 在服务
+  清单中不存在的 PENDING Run。示例：误传 index_basic_update / stock_basic_update /
+  stk_high_shock_ingest（正确 job_id 应为 index-basic-morning / stock-basic-morning /
+  stk-high-shock-close）。服务端按 job_id 找不到定义，永不领取执行，记录永久悬挂。
+  当前无正规 CLI 可取消 PENDING：cleanup 只处理 stale RUNNING，retry 只针对 FAILED。
+mitigation: |
+  手工提交 run 时使用清单中的真实 job_id（如 stock-basic-morning）并显式带
+  --production-jobs <path>。已产生的 3 条孤儿 PENDING 判定无危害，暂不处理，
+  等待 runtime 增加自动清理能力。
+root_cause: |
+  jobs_cli 的 run 命令在不带 --production-jobs 时按 pipeline_id 解析，未校验其是否为清单中真实
+  存在的 job_id；提交侧也未对"服务不可能领取的 Run"做防护或回滚，从而留下孤儿 PENDING。
