@@ -1,8 +1,7 @@
 id: KI-002
 date: 2026-09-12
 status: open
-title: |
-  12 分区串行请求且任一分区失败即整体 FAILED，放大 provider 的偶发超时。
+title: 12 分区串行请求且任一分区失败即整体 FAILED，放大 provider 的偶发超时。
 symptom: |
   stock_basic_update 连续多次补跑失败，JobResult diagnostics 为
   STOCK_BASIC_API_FAILED，contract_error_detail: ReadTimeout，rows_read=0/rows_written=0。

@@ -15,8 +15,7 @@
 id: KI-001
 date: 2026-09-12     # 建立 issue 的时间 (YYYY-MM-DD)
 status: open         # 枚举：open | closed
-title: |             # 必填：一句话说明该 Known Issue 是什么
-  同一目标日失败后无法重跑。
+title: 同一目标日失败后无法重跑。  # 必填：一句话说明该 Known Issue 是什么
 # 仅记录：触发操作 -> 屏幕/日志/数据观测到的客观异常
 symptom: |
   执行 `run_task --target-date 2026-09-12`，日志打印 "Skip: already processed"，但数据库对应日期的更新时间戳与数据均未更新。
