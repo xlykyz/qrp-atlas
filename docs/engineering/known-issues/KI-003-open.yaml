@@ -1,6 +1,8 @@
 id: KI-003
 date: 2026-09-12
 status: open
+title: |
+  手工 run 传错 job_id 会留下服务永不领取的孤儿 PENDING Run。
 symptom: |
   手工提交 run 时 job_id 传错（误传 pipeline_id，或漏加 --production-jobs），生成 job_id 在服务
   清单中不存在的 PENDING Run。示例：误传 index_basic_update / stock_basic_update /

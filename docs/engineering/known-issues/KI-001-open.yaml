@@ -1,6 +1,8 @@
 id: KI-001
 date: 2026-09-12
 status: open
+title: |
+  快照型 Contract 的 target-date 幂等去重导致同一目标日失败后无法重跑。
 symptom: |
   执行 `qrp-atlas-jobs run stock-basic-morning --target-date 2026-09-11 --production-jobs
   <production-job-definitions.json>`，命令未创建新的 attempt，
