@@ -1,0 +1,34 @@
+id: KI-012
+date: 2026-09-13
+status: open
+title: setup 建库 schema 与 contracts 权威 schema 不一致，daily_market_snapshot 缺 pre_close 导致日线入库失败。
+symptom: |
+  在本机执行 `qrp-atlas-config setup --profile local --database create` 创建空库后，
+  运行 `python -m qrp_atlas.pipeline.daily_update.run --date 2026-09-07`：
+  fetch / clean / enrich 全部成功（`[FETCH] tushare 成功，获取 5549 条数据`；
+  `[DAILY_UPDATE] enriched_rows=5549`），raw 与 canonical CSV 均已落盘，
+  但 load 阶段抛异常：
+    _duckdb.BinderException: Binder Error: Table "daily_market_snapshot"
+    does not have a column with name "pre_close"
+  该 trade_date 入库行数为 0。逐日重试 2026-09-07 ~ 2026-09-11 五天全部同样失败。
+  `DESCRIBE daily_market_snapshot` 实测：该表 17 列，缺 pre_close；
+  同为基础表的 market_phase、trade_execution 与 contracts 一致，仅此表受影响。
+mitigation: |
+  测试库该表为 0 行，直接 `DROP TABLE daily_market_snapshot` 后调用
+  `qrp_atlas.contracts.init_database(con)` 重建为 18 列（含 pre_close），
+  再执行 `python -m qrp_atlas.pipeline.daily_update.run --skip-fetch tushare`
+  从已有 raw 重跑入库，5 天共 27759 行全部成功。
+  已有数据的库不能直接 DROP，需 `ALTER TABLE ... ADD COLUMN pre_close DOUBLE`
+  或重建后回填；本问题没有自动缓解路径。
+root_cause: |
+  两套 schema 定义不一致：
+  - `src/qrp_atlas/database/schema.py` 的 `_SCHEMA_STATEMENTS` 中 daily_market_snapshot
+    定义为 17 列，缺 pre_close（列序为 ... close, pct_change, volume, ...）。
+  - `src/qrp_atlas/contracts/schema.py` 的 DAILY_MARKET_SNAPSHOT 定义为 18 列，
+    pre_close 位于 pct_change 与 volume 之间，是权威定义。
+  `qrp-atlas-config setup` 通过 `database.create_empty_database()`（前者）建空库；
+  而 pipeline 入库前调用的 `contracts.init_database()` 使用 `CREATE TABLE IF NOT EXISTS`
+  （contracts/schema.py:351），对已存在的 daily_market_snapshot 不做列级修补，
+  缺列被保留，直到 INSERT 引用 pre_close 才暴露。
+  影响面：任何用 setup `--database create` 建空库再跑 pipeline 的场景都会命中。
+  `scripts/migrate_canonical_schema.py` 只补齐缺失的表集合、不校验列差异，无法修复本问题。
