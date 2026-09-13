@@ -1,0 +1,18 @@
+id: KI-006
+date: 2026-09-13
+status: open
+title: 热度池日期范围补跑采用单事务原子替换，范围内任一目标日校验失败即整批回滚。
+symptom: |
+  以日期范围方式补跑 dc_hot（2026-08-13 ~ 2026-09-10）时整批失败，diagnostics 为
+  DC_HOT_API_FAILED（contract_error_detail: ReadTimeout），rows_written=0，未产生部分写入。
+  结合 KI-004（该范围内含多日 provider 数据不完整）：一旦范围中任一目标日触发
+  *_API_PARTIAL，整批将因单事务回滚而全部失败，无法"跳过坏日、保留好日"。
+  因此对这两个池，日期范围补跑在实际数据条件下几乎不可用，只能逐日提交。
+mitigation: |
+  改用逐日提交（每日一个 run），单日失败不牵连其他日期。
+root_cause: |
+  设计书 §12 规定日期范围为单 Batch：内部逐日请求 provider -> concat 为一个 Raw/Clean ->
+  一次数据库事务原子替换（write_mode REPLACE_TARGET_RANGE）。_reconstruct_snapshots 对整个
+  date_df 逐日校验，任一日 raise 即整批 raise，事务回滚。
+  注：本条为基于代码与设计书的确定性推论（范围失败的直接观测原因是网络超时），
+  未单独构造"范围内仅含 partial 日"的复现。

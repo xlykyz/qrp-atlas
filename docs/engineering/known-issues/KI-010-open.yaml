@@ -1,0 +1,23 @@
+id: KI-010
+date: 2026-09-13
+status: open
+title: market_m6_production 对无法映射 market scope 的 ticker 直接拒绝整日，导致该能力长期必现失败。
+symptom: |
+  上线 market_m6_production（job market-m6-daily）后首次补跑 2026-09-11 即失败：
+  diagnostics 为 M6_CANONICAL_MARKET_UNRESOLVED，
+  contract_error_detail: "3 tickers cannot be mapped to canonical market scope:
+  ['600849.SH', '810011.BJ', '810013.BJ']"，rows_written=0，wall≈0.2s。
+  复核 daily_market_snapshot 2026-09-11：共 5903 行，5900 行可映射 stock_info，仅这 3 个不可映射，
+  且三者 close 均为 NULL、volume=0（占位行）。
+  进一步查近 10 个交易日（2026-08-28 ~ 09-11）：每天都是同样这 3 个不可映射，
+  即该失败为长期必现（非偶发），m6 自上线起每个交易日都会失败。
+mitigation: |
+  无。已将 market-m6-daily 置为 enabled=false，待修复后再上线。
+root_cause: |
+  src/qrp_atlas/pipeline/market_m6/service.py 在遍历当日 daily_market_snapshot 时，
+  对 ticker_to_scope 映射不到的 ticker 收集进 unresolved_tickers，随后无条件
+  `raise ContractError("M6_CANONICAL_MARKET_UNRESOLVED", ...)`（约 170-174 行），即
+  "任一 ticker 无法映射 → 拒绝整日"。映射规则 resolve_canonical_market_scope 严格依赖
+  stock_info.market/exchange（明确不从 ticker 前缀推断）。
+  与热度池 KI-004 同属"fail-closed 过严"：少数占位/退市标的（close=NULL、volume=0）本可跳过，
+  却被当作阻断整日的致命错误。策略问题是：无法映射的 ticker 应"跳过并记录"还是"拒绝整日"。

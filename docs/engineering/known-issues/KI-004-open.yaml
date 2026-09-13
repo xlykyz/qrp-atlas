@@ -1,0 +1,25 @@
+id: KI-004
+date: 2026-09-13
+status: open
+title: 热度池快照完整性校验以"当日总行数为 100 的整数倍"为前提，任一行缺失即整日拒绝入库。
+symptom: |
+  补跑 dc_hot / ths_hot 2026-08-13 ~ 2026-09-11 期间，多日以
+  DC_HOT_API_PARTIAL / THS_HOT_API_PARTIAL 失败，diagnostics.contract_error_detail 形如
+  "trade_date 2026-08-20 has 1699 rows, not a multiple of 100"，rows_written=0。
+  用与生产相同的直连客户端复取 provider 原始数据并复刻契约口径复核，失败日全部卡在"总行数非
+  100 倍数"这一条；逐日实测：
+    dc_hot 2026-08-20: 1699 行，17 档中仅 20:00 档 99 行，其余 16 档各满 100；
+    dc_hot 2026-08-14:  898 行，当日 provider 只返回 9 档（正常 17 档）；
+    dc_hot 2026-08-17/18/26/28/30、09-08: 1199/1593/1696/1697/1698/1698 行，个别快照 96-98 行；
+    ths_hot 2026-08-17:  198 行（仅 2 档各 99）；2026-08-18: 98 行；2026-08-19: 99 行；
+    ths_hot 2026-08-15/16/20/22/25、09-05/06/09/11: 1693-1699 行，个别快照 99 行。
+  即"个别快照缺 1-2 行"导致整日约 1700 行完整数据被整体丢弃，且重试无法解决（provider 数据固有残缺）。
+mitigation: |
+  无自动缓解。已入库覆盖：dc_hot 18/30 天、ths_hot 17/30 天；其余 22 天次因本条无法入库。
+  临时处置为"逐日提交、失败即接受缺失"，不影响其他日期。
+root_cause: |
+  src/qrp_atlas/pipeline/popularity_support.py::_reconstruct_snapshots 在按 trade_date 分组后，
+  第一道校验即 `if len(date_df) % 100 != 0: raise ContractError`，把设计书 §8 的"每个完整快照
+  必须满 Top100"放大为"当日所有快照必须全部完整"，与设计书 §4"保存 provider 能返回的全部日内
+  快照"存在语义冲突。策略问题是：单快照不完整时应"丢弃该快照、保留其余"还是"丢弃整日"——当前
+  实现选择丢弃整日。该选择是 provider 历史残缺日无法入库的直接原因。

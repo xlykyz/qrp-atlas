@@ -1,0 +1,19 @@
+id: KI-011
+date: 2026-09-13
+status: open
+title: daily_market_snapshot 与 stock_info 的标的集合不一致，行情表含基础资料表中不存在的 ticker。
+symptom: |
+  排查 KI-010（m6 无法映射 ticker）时发现：daily_market_snapshot 中存在 stock_info 里
+  查不到的 ticker。当前共 6 个：
+    - 600849.SH / 810011.BJ / 810013.BJ：2026-02-24 ~ 2026-09-11 持续存在（各 139 个交易日），
+      close 全为 NULL、volume=0（占位行），是 KI-010 每日失败的直接来源；
+    - 000022.SZ / 000043.SZ / 300114.SZ：历史数据止于 2026-02-13（此后不再出现，疑似退市），
+      这三个有正常 close，但当前 snapshot 已无、stock_info 也无。
+  2026-09-11 当日：daily_market_snapshot 5903 行，其中 3 行（上述占位行）在 stock_info 无对应。
+mitigation: |
+  无。下游需自行容错（见 KI-010）。不建议直接删除行情表中的占位行（属生产数据变更）。
+root_cause: |
+  daily_market_snapshot（由 market-daily-close / market_daily_update 产出）与 stock_info
+  （由 stock-basic-morning / stock_basic_update 产出）是两条独立链路，标的集合未做一致性约束：
+  行情源会返回已从基础资料表消失的标的（退市、长期停牌摘牌）的占位行（close=NULL、volume=0），
+  而基础资料链路不再收录这些标的。缺少"行情标的是否都在 stock_info 中"的对账/告警机制。

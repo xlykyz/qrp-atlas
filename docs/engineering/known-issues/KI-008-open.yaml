@@ -1,0 +1,14 @@
+id: KI-008
+date: 2026-09-13
+status: open
+title: 热度池快照时序单调性校验以 source_rank_time 字符串直接比较，格式/时区不统一时静默失效。
+symptom: |
+  未观测到实际故障，属低风险潜在问题。
+mitigation: |
+  无。当前 provider 返回的 source_rank_time 格式统一（YYYY-MM-DD HH:MM:SS），
+  字符串比较等价于时间比较，暂不构成问题。
+root_cause: |
+  _reconstruct_snapshots 用 min/max 得到的 source_rank_time 字符串，直接做
+  `prev_completed < next_started` 的字典序比较，未解析为 datetime 或带时区的时间对象。
+  若 provider 混入不同格式（如带毫秒、不同分隔符）或不同时区的时间字符串，
+  比较结果可能与真实时序不一致，且不会报错，从而静默漏过真正的时序异常。

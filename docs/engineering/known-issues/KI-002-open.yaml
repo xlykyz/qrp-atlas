@@ -1,0 +1,20 @@
+id: KI-002
+date: 2026-09-12
+status: open
+title: 12 分区串行请求且任一分区失败即整体 FAILED，放大 provider 的偶发超时。
+symptom: |
+  stock_basic_update 连续多次补跑失败，JobResult diagnostics 为
+  STOCK_BASIC_API_FAILED，contract_error_detail: ReadTimeout，rows_read=0/rows_written=0。
+  用与生产相同的客户端探测 12 个分区请求：生产直连路径单次请求失败率约 10%
+  （48 次请求中 5 次 ReadTimeout），单轮 12 分区整体失败率约 72%。
+  同一 provider 的其他接口（index_basic 单次返回全量、stk_high_shock 逐日单请求）未出现同等失败。
+mitigation: |
+  反复重跑以命中约 1/4 的成功窗口（2026-09-12 一次无参数重跑即成功，写入 5900 行）；
+  修复前不作为稳定依赖。
+root_cause: |
+  provider `stock_basic` 单次返回上限 6000 行，Contract 按
+  STOCK_BASIC_LIST_STATUSES(L,D,P,G) × STOCK_BASIC_EXCHANGES(SSE,SZSE,BSE) 切分为 12 个分区
+  串行请求（为保证完整性、避免静默截断，设计正确），且语义为"任一分区失败 → 整体 FAILED"。
+  该结构把单次请求的偶发超时放大为整体高失败率（0.9^12 ≈ 28% 成功率）。
+  另注：经本地 proxy（HTTPS_PROXY=<local-proxy>）失败率更高（约 23%，ProxyError），但生产服务
+  进程无 proxy 变量、走直连，故生产表现为 ReadTimeout；诊断时须区分探测环境与实际服务环境。
