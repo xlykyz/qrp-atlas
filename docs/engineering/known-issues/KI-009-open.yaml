@@ -1,0 +1,25 @@
+id: KI-009
+date: 2026-09-13
+status: open
+title: 热度池单请求单日结构叠加 max_retries=0，一次 ReadTimeout 即整日失败且无正规重跑通道。
+symptom: |
+  补跑 dc_hot / ths_hot 2026-08-13 ~ 2026-09-11（逐日提交，共 60 个 run）期间，出现 12 次
+  网络类失败（约占 20%），diagnostics 为 DC_HOT_API_FAILED / THS_HOT_API_FAILED，
+  contract_error_detail: ReadTimeout，rows_read=0/rows_written=0：
+    dc_hot: 2026-08-13(att1/att2)、08-20、08-22、09-09(att1/att2)、及 1 条范围 run；
+    ths_hot: 2026-08-27、08-30、09-02、09-08(att1/att2)。
+  特征：wall_duration_ms 均 >= 30s（SDK 默认 30s 超时被触发，ths_hot 08-30 达 90.8s）。
+  其中 dc_hot 2026-08-13、2026-09-09 与 ths_hot 2026-09-08 用直连客户端复取 provider 数据，
+  8/8 次均返回完整 1700 行、17 快照全满（即数据完好，失败纯属超时）。
+mitigation: |
+  retry 可救回部分（08-22、08-27、08-30、09-02 经一次 retry 成功）；
+  但已达 max_retries=1 的日期（08-13、09-09、09-08 的 att2）无法再重跑，最终留下缺失。
+root_cause: |
+  热度池 Contract 为"单日一次 provider 请求"（无分区），一旦该次请求 ReadTimeout 即整日失败。
+  叠加 Contract ExecutionPolicy(max_retries=0 的 client 层调用 + max_retries=1 的 Run 重试上限)：
+  进程内 client 不重试（tushare_client._configured_call），Run 级最多 attempt 2，
+  叠加 create_scheduled_run 的 trade_date_override 去重键（见 KI-001），
+  使超时失败的目标日既不能靠 run 重发、也不能无限 retry，形成"超时即锁死"。
+  注：直连客户端探测复取同样日期 8/8 成功，无法从探测端复现生产约 20% 的失败率；
+  12 次失败集中在 2026-09-13 凌晨 03:14-03:45 窗口，疑似时段性/连接层偶发，未完全定性。
+  与 KI-002 同源（max_retries=0），但 KI-002 的放大机制是"12 分区串行"，本条是"单请求即全日"。
