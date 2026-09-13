@@ -1,0 +1,19 @@
+id: KI-001
+date: 2026-09-12
+status: open
+title: 快照型 Contract 的 target-date 幂等去重导致同一目标日失败后无法重跑。
+symptom: |
+  执行 `qrp-atlas-jobs run stock-basic-morning --target-date 2026-09-11 --production-jobs
+  <production-job-definitions.json>`，命令未创建新的 attempt，
+  而是返回已存在的失败 Run（run_id 2d8fa230-b58f-4364-8918-490be76a7e35，status FAILED）；
+  随后 `retry` 报错 "max_retries=1 exhausted for stock-basic-morning"。
+  结果：同一目标日（2026-09-11）无法再次执行，补跑被锁死。
+mitigation: |
+  快照型 Contract 手动补跑改为**不带 --target-date** 运行一次：不带该参数时不触发
+  trade_date_override 去重键，可新建 Run。2026-09-12 以无参数方式重跑 stock-basic-morning 成功
+  （写入 5900 行）。
+root_cause: |
+  stock_basic_update 是当前全量覆盖快照（current-state full replacement），target_date 仅作为
+  观测标记（snapshot_date），不构成真正的业务幂等键。但 create_scheduled_run 以唯一约束
+  UNIQUE(job_id, definition_version, trade_date_override, attempt) 去重，将"同目标日重跑"误判为
+  重复提交；叠加 Contract ExecutionPolicy(max_retries=1) 耗尽后 retry 通道关闭，导致无正规途径重跑。

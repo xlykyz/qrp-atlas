@@ -1,0 +1,18 @@
+id: KI-007
+date: 2026-09-13
+status: open
+title: 热度池快照切组按 rank 出现次数（cumcount）分配 seq，隐含"每个 rank 每快照恰好出现一次"假设。
+symptom: |
+  未在现有数据中观测到实际故障，属潜在正确性风险。
+  相关背景：排障过程中曾以"rank_time 分钟取整"错误口径分组，得出 ths_hot 2026-09-08
+  "21:00=92 + 21:01=8"的错误结论；改用契约真实口径（按 rank 的 source_rank_time 顺序
+  cumcount）复核后，该日实为 17 个快照各满 100 行、完全合法（当日失败纯属网络超时）。
+  此更正本身即说明：切组口径对"分钟边界/rank 缺行"敏感，易被误读。
+mitigation: |
+  无。排障时须严格以 _reconstruct_snapshots 的口径复核，不可自行用时间取整近似。
+root_cause: |
+  _reconstruct_snapshots 以 `groupby("rank_position").cumcount() + 1` 分配 snapshot_seq，
+  隐含假设"同一 trade_date 内每个 rank_position 在每个快照恰好出现一次"。
+  若某快照缺失某 rank，而另一快照该 rank 重复出现（总行数仍为 100 倍数、绕过 KI-004 的闸门），
+  cumcount 会使该 rank 后续 seq 整体错位，造成跨快照混组与误判。
+  建议改用更稳健的切组方式（如按 source_rank_time 聚类切分），或增加"每 rank 计数一致"的前置校验。

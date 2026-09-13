@@ -1,0 +1,17 @@
+id: KI-005
+date: 2026-09-13
+status: open
+title: 热度池数据不完整与字段/映射错误共用同一错误码 *_API_PARTIAL，报错信息不足以定位。
+symptom: |
+  排障时仅凭 JobResult 无法区分两类性质完全不同的问题：
+  (a) provider 历史数据固有残缺（不可修复，如 dc_hot 2026-08-20 的 99 行快照）；
+  (b) 我方字段缺失 / 类型非法 / rank 越界 / 时间缺失（需改代码）。
+  二者都只报 DC_HOT_API_PARTIAL 或 THS_HOT_API_PARTIAL；完整性类失败的信息也只有
+  "trade_date X has N rows, not a multiple of 100"，不含"哪个快照、缺几行、缺哪些 rank"。
+  本次排障为区分这两类，额外消耗多轮人工复现（含一次因分组口径用错而得出错误结论）。
+mitigation: |
+  无。排障时需自行用直连客户端复取 provider 原始数据、复刻契约口径手工复核。
+root_cause: |
+  popularity_support.py 中字段校验、rank 校验、时间校验、完整性校验等约 8 处均复用同一个
+  *_API_PARTIAL 错误码（458/467/480/496/509/522/529 行等），未按失败性质细分错误码；
+  完整性失败的 message 也未携带快照级定位信息（seq、缺失 rank 集合）。
