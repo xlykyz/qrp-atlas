@@ -17,8 +17,8 @@
 ``handle_bar`` 返回的是**当日完整目标权重快照**：未出现的既有持仓会被清算为 0，
 返回空字典等价于“当日目标为全现金”。
 
-隔离方式：每次请求派生一个独立的 ``multiprocessing`` 子进程，带硬超时掐断，
-FastAPI 工作进程内绝不直接执行用户代码。
+隔离方式：每次请求派生一个独立的 ``multiprocessing`` 子进程（``daemon=True``），
+带硬超时掐断，FastAPI 工作进程内绝不直接执行用户代码。
 
 性能约定：全市场行情只用于策略选股；交给引擎结算的行情会裁剪到策略实际引用过的
 标的（见 ``_engine_panel``）。引擎逐行标记全量面板的成本与市场标的数成正比，而
@@ -627,7 +627,11 @@ def execute_sandbox_code(
 
     context = mp.get_context("spawn")
     result_queue = context.Queue()
-    process = context.Process(target=_worker, args=(dict(payload), result_queue))
+    # daemon=True：API 进程正常退出（含 systemd 重启）时，未跑完的沙盒子进程会被
+    # 自动 terminate + join，不会留下继续占用 CPU 的孤儿进程。
+    process = context.Process(
+        target=_worker, args=(dict(payload), result_queue), daemon=True
+    )
     process.start()
     process.join(timeout_sec)
 

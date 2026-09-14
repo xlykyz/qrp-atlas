@@ -379,5 +379,26 @@ def test_sandbox_run_creates_no_persisted_run():
     assert _listing(runs_dir) == before
 
 
+def test_worker_process_is_daemonic():
+    """沙盒子进程必须是 daemon，API 退出时才不会残留孤儿进程。"""
+
+    outcome = execute_sandbox_code(
+        {
+            "code": (
+                "import multiprocessing\n"
+                "print('daemon=', multiprocessing.current_process().daemon)\n"
+            ),
+            "start_date": "2024-01-02",
+            "end_date": "2024-02-28",
+            "initial_cash": 1_000_000.0,
+            "benchmark_id": None,
+        },
+        timeout_sec=30,
+    )
+
+    assert outcome["success"] is False
+    assert any("daemon= True" in line for line in outcome["logs"])
+
+
 def test_timeout_default_is_thirty_minutes():
     assert DEFAULT_TIMEOUT_SEC == 1800
