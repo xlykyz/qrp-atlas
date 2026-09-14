@@ -18,6 +18,7 @@ from qrp_atlas.config.settings import AppSettings, require_writable
 from ..portfolio.models import ORDER_REJECTED, PortfolioBacktestResult
 from .analytics import (
     align_benchmark_series,
+    annualized_return_pct,
     benchmark_summary,
     calmar_ratio,
     daily_returns_from_equity,
@@ -166,31 +167,15 @@ def portfolio_fills_to_trades(
 
 
 def _annual_return_pct(result: PortfolioBacktestResult) -> float | None:
-    """Geometric annualization.
-
-    Full loss (total_return == -1.0 / final equity 0) is a valid outcome and
-    returns -100.0. Only values strictly below -1.0 or non-finite are invalid.
-    """
+    """Delegate to the shared annualization convention in analytics."""
 
     if len(result.snapshots) < 2:
         return None
-    start = pd.Timestamp(result.snapshots[0].trade_date)
-    end = pd.Timestamp(result.snapshots[-1].trade_date)
-    days = (end - start).days
-    total_return = float(result.summary["total_return"])
-    if days <= 0:
-        return None
-    if total_return < -1.0:
-        return None
-    if total_return == -1.0:
-        return -100.0
-    try:
-        annual = ((1.0 + total_return) ** (365.0 / days) - 1.0) * 100.0
-    except (OverflowError, ValueError, ZeroDivisionError):
-        return None
-    if annual != annual or annual in (float("inf"), float("-inf")):  # NaN/Inf
-        return None
-    return float(annual)
+    return annualized_return_pct(
+        result.summary.get("total_return"),
+        result.snapshots[0].trade_date,
+        result.snapshots[-1].trade_date,
+    )
 
 
 def _summary_payload(
