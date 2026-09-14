@@ -1,0 +1,35 @@
+id: KI-013
+date: 2026-09-14
+status: open
+title: 历史重放相关表的时间语义不统一，current snapshot、可回溯修订数据与 finalized lifecycle 表存在 PIT 泄漏风险。
+symptom: |
+  对 develop/v1.1 的 contracts/schema.py 逐表审计发现，QRP 当前同时存在严格 revision-PIT、
+  天然按交易日成立的历史事实、派生 observation、current snapshot 和 finalized lifecycle 等多种时间模型，
+  但这些语义并未在所有历史消费路径上形成统一的硬边界。已确认的高风险结构包括：
+    - stock_info：主键仅 ticker，只有 updated_at，没有 available_trade_date / revision_id /
+      ingested_at 等历史版本字段；今天的基础资料会覆盖此前状态，不能直接回答历史 as-of。
+    - stock_info_historical_identity：虽有 snapshot_date / captured_at，但主键为
+      (provider, ts_code)，并非 append-only revision history，不能替代 stock_info 的 PIT 身份历史。
+    - adj_factor_changes / etf_adj_factor：仅按 (ticker, trade_date) 保存复权因子，没有
+      knowledge/revision 时间；若 provider 后续对历史因子发生回溯调整，当前值无法重建“当时已知”的因子版本。
+    - system_b_episode / system_b_episode_segment / theme_custom_index_episode：保存
+      episode_end_date、peak_date、peak_return、max_drawdown 等生命周期最终信息；若历史查询直接读取
+      当前完整记录，可能提前看到观察时点之后才确定的结束/峰值事实。
+    - system_b_pool_membership_daily、system_b_asset_rank_snapshot、
+      system_b_theme_rank_snapshot 等日频派生快照虽然保存 rule/calculation/run 信息，但版本字段未全部进入主键，
+      新版本重算可能覆盖同一 trade_date 的旧结果，无法天然保留完整 revision history。
+  与上述结构相对，income_statement、balance_sheet、cashflow_statement、financial_indicator、
+  industry_membership_history、index_component_history、earnings_forecast_event、stock_collection、
+  theme、theme_membership_history 已具备 available/effective/revision/ingested 等明确 PIT 语义。
+mitigation: |
+  在完成统一治理前，历史研究、回测和 replay 不得把 stock_info、finalized episode/segment 主表或
+  当前复权因子默认视为严格 PIT source。System B 历史状态优先消费对应 trade_date 的 observation
+  和已锁定 input_snapshot_id；需要 lifecycle 信息时只使用截至目标时点可证明的字段。
+  对无法证明历史 knowledge 版本的数据，应显式标记为 current-knowledge / non-PIT，并阻止其进入
+  要求严格 PIT 的历史决策链。
+root_cause: |
+  QRP 的 PIT 能力最初按特定数据域逐步建设（财务、行业、指数，后扩展至事件与 Theme/Collection），
+  而早期行情、基础资料、复权、System B 派生状态等表沿用 snapshot/observation/finalized-result 模型。
+  contracts 当前能定义各表字段与主键，但尚未为所有可被历史能力消费的表声明并强制统一的
+  time model（例如 revision-PIT、daily observation、current snapshot、finalized lifecycle、operational result），
+  因此“表中有历史日期”与“可按历史 knowledge time 安全查询”之间缺少机器可校验的边界。
