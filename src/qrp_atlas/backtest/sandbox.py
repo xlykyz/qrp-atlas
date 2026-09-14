@@ -60,7 +60,10 @@ from .results.analytics import (
 )
 from .results.writer import portfolio_fills_to_trades
 
-DEFAULT_TIMEOUT_SEC = 30
+# 单次沙盒运行的硬超时上限（30 分钟）。
+# 策略研究与全市场计算动辄数分钟，因此这是“防挂死”而不是“防慢”的上限：
+# 正常策略远不会用满，只有死循环或不可取消的阻塞才会被掐断。
+DEFAULT_TIMEOUT_SEC = 1800
 MAX_POSITIONS = 100
 
 # 沙盒运行不落库，因此不能复用正式 run_id；该标记只用于前端展示。

@@ -379,5 +379,5 @@ def test_sandbox_run_creates_no_persisted_run():
     assert _listing(runs_dir) == before
 
 
-def test_timeout_default_is_thirty_seconds():
-    assert DEFAULT_TIMEOUT_SEC == 30
+def test_timeout_default_is_thirty_minutes():
+    assert DEFAULT_TIMEOUT_SEC == 1800
