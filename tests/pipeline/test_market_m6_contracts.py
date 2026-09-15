@@ -263,19 +263,63 @@ def test_m6_production_fail_closed_on_missing_snapshot() -> None:
         con.close()
 
 
-def test_m6_production_fail_closed_on_unresolved_market_scope() -> None:
+def test_m6_production_skips_unresolved_market_scope() -> None:
+    """Unmappable tickers are skipped (and logged), not treated as a fatal error."""
+    con = duckdb.connect()
+    try:
+        _init_test_db(con)
+        con.execute(
+            """
+            INSERT INTO trading_calendar (trade_date, is_open) VALUES
+                ('2026-08-07', TRUE),
+                ('2026-08-10', TRUE)
+            """
+        )
+        # One mappable A-share and one unmappable placeholder
+        con.execute(
+            """
+            INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) VALUES
+                ('2026-08-07', '000001.SZ', 10.0, FALSE, FALSE, 1000),
+                ('2026-08-10', '000001.SZ', 10.0, TRUE, FALSE, 1000),
+                ('2026-08-10', '999999.ZZ', 10.0, FALSE, FALSE, 100)
+            """
+        )
+
+        service = MarketM6PipelineService(con)
+        df = service.run_m6_daily(date(2026, 8, 10), production_run_id="run-skip-unresolved")
+
+        # Still produces the full 5-scope observation set
+        assert len(df) == 5
+        assert set(df[MARKET_SCOPE].tolist()) == set(MARKET_SCOPES)
+
+        # The unmappable ticker is excluded from the calculation
+        persisted = con.execute(
+            f"SELECT COUNT(*) FROM {MARKET_M6_OBSERVATION_TABLE} WHERE trade_date = ?",
+            [date(2026, 8, 10)],
+        ).fetchone()[0]
+        assert persisted == 5
+    finally:
+        con.close()
+
+
+def test_m6_production_all_unresolved_still_emits_zeroed_scopes() -> None:
+    """When every ticker is unmappable, still emit the 5 scopes with zero counts."""
     con = duckdb.connect()
     try:
         _init_test_db(con)
         con.execute("INSERT INTO trading_calendar (trade_date, is_open) VALUES ('2026-08-10', TRUE)")
-        # Stock with unmappable market
-        con.execute("INSERT INTO stock_info (ticker, market, exchange) VALUES ('999999.ZZ', '未知板块', 'ZZ')")
-        con.execute("INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) VALUES ('2026-08-10', '999999.ZZ', 10.0, FALSE, FALSE, 100)")
+        con.execute(
+            "INSERT INTO daily_market_snapshot (trade_date, ticker, close, is_limit_up, is_limit_down, volume) "
+            "VALUES ('2026-08-10', '999999.ZZ', 10.0, FALSE, FALSE, 100)"
+        )
 
         service = MarketM6PipelineService(con)
-        with pytest.raises(ContractError) as exc_info:
-            service.run_m6_daily(date(2026, 8, 10))
-        assert exc_info.value.code == "M6_CANONICAL_MARKET_UNRESOLVED"
+        df = service.run_m6_daily(date(2026, 8, 10), production_run_id="run-all-unresolved")
+
+        assert len(df) == 5
+        assert set(df[MARKET_SCOPE].tolist()) == set(MARKET_SCOPES)
+        assert df[LIMIT_UP_COUNT].sum() == 0
+        assert df[LIMIT_DOWN_COUNT].sum() == 0
     finally:
         con.close()
 

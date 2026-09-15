@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Sequence
 from datetime import date
 from typing import Any
@@ -52,6 +53,8 @@ from qrp_atlas.indicators.m6 import calculate_market_m6_observations
 from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.contracts import ContractError
 
+
+logger = logging.getLogger(__name__)
 
 _BOARD_TO_MARKET_SCOPE: dict[str, str] = {
     BOARD_SH_MAIN: MARKET_SCOPE_MAIN_BOARD,
@@ -163,12 +166,17 @@ class MarketM6PipelineService:
             )
 
         if unresolved_tickers:
-            raise ContractError(
-                "M6_CANONICAL_MARKET_UNRESOLVED",
-                f"{len(unresolved_tickers)} tickers cannot be mapped to canonical market scope: {unresolved_tickers[:5]}",
+            logger.warning(
+                "M6: %d tickers cannot be mapped to a canonical market scope and were "
+                "excluded from today's calculation: %s",
+                len(unresolved_tickers),
+                unresolved_tickers[:20],
             )
 
-        today_market = pd.DataFrame(market_rows)
+        today_market = pd.DataFrame(
+            market_rows,
+            columns=[TICKER, MARKET_SCOPE, IS_LIMIT_UP, IS_LIMIT_DOWN, CLOSE, "is_trading"],
+        )
 
         if execution_control is not None:
             execution_control.check()
