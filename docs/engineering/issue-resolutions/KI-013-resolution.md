@@ -250,9 +250,93 @@ def check_is_equity(self, asset_id: str) -> bool:
 
 ---
 
+## 改动 5：M6 去掉无意义的 fail-closed raise（修复 KI-010 计算阻塞）
+
+- **日期**：2026-09-14
+- **分支**：`refactor/v1.1-decouple-stock-info`
+- **提交**：`fix(market-m6): skip unmappable tickers instead of failing the whole day`
+- **关联**：KI-010（M6 长期必现失败）、KI-011（标的集合不一致）
+
+### 位置
+
+`src/qrp_atlas/pipeline/market_m6/service.py:168-172`（`MarketM6PipelineService.run_m6_daily`）
+
+### 原行为
+
+循环内对无法映射 scope 的 ticker 已 `continue` 跳过（不进 `market_rows`），但循环后无条件：
+
+```python
+if unresolved_tickers:
+    raise ContractError("M6_CANONICAL_MARKET_UNRESOLVED", ...)
+```
+
+只要当日存在任一不可映射标的（KI-011 的 `600849.SH`/`810011.BJ`/`810013.BJ` 占位行），
+即拒绝整日、`rows_written=0`，导致 M6 每个交易日必现失败（KI-010，已 `enabled=false` 下线）。
+
+### 改后行为
+
+删除该 `raise`，改为 `logger.warning` 记录被排除的标的，计算照常继续：
+
+```python
+if unresolved_tickers:
+    logger.warning(
+        "M6: %d tickers cannot be mapped to a canonical market scope and were "
+        "excluded from today's calculation: %s",
+        len(unresolved_tickers),
+        unresolved_tickers[:20],
+    )
+```
+
+### 依据（实测）
+
+`calculate_market_m6_observations` 对缺失板块自动填 0，实测只喂 2 个板块的行仍输出完整 5 行
+（`ALL_MARKET`/`MAIN_BOARD`/`CHINEXT`/`STAR_MARKET`/`BSE`，无标的板块计数为 0）。即"丢弃 None 后
+已映射板块可正常计算"——原 `raise` 是纯策略选择，非计算依赖。
+
+### 附带修复
+
+`today_market = pd.DataFrame(market_rows)` 在 `market_rows` 为空（全部标的不可映射）时无列，
+后续访问 `IS_LIMIT_UP` 会 `KeyError`。改为显式指定列：
+
+```python
+today_market = pd.DataFrame(
+    market_rows,
+    columns=[TICKER, MARKET_SCOPE, IS_LIMIT_UP, IS_LIMIT_DOWN, CLOSE, "is_trading"],
+)
+```
+
+### 行为变化
+
+| 场景 | 改前 | 改后 |
+| --- | --- | --- |
+| 当日有 1 个不可映射标的 | 拒绝整日（`rows_written=0`） | 跳过该标的 + `warning`，正常出 5 行 |
+| 当日全部标的不可映射 | 拒绝整日 | 出 5 行（各 scope 计数为 0） |
+| 已映射标的的计算 | 不受影响 | 不受影响 |
+
+### 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/pipeline/test_market_m6_contracts.py -q` | 8 passed |
+| `.venv/bin/python -m pytest tests/pipeline/test_market_m6_contracts.py tests/pipeline/test_market_data_contracts.py tests/indicators/test_m6_observations.py tests/contracts/test_schema_contracts.py -q` | 78 passed |
+
+测试改造：原 `test_m6_production_fail_closed_on_unresolved_market_scope`（断言抛
+`M6_CANONICAL_MARKET_UNRESOLVED`）改为两个新测试——`test_m6_production_skips_unresolved_market_scope`
+（混合标的：跳过 + 正常出数）与 `test_m6_production_all_unresolved_still_emits_zeroed_scopes`
+（全部不可映射：仍出 5 行、计数为 0）。全库已无 `M6_CANONICAL_MARKET_UNRESOLVED` 残留。
+
+### 残留（未处理）
+
+`810011.BJ`/`810013.BJ` 前缀 `81` 不在 `conventions.py` 的 `BJ_TICKER_PREFIXES=("43","83","87","88","92")`
+中，`resolve_canonical_market_scope` 仍返回 `None`——但改后不再阻塞整日，仅被跳过并记录。
+是否补前缀（若 `81` 是真实北交所代码段）属独立议题，本次不动。
+
+---
+
 ## 进度
 
 - 已解耦：**3 / 10**（#4、#6、#7）
 - 已豁免：**1 / 10**（#5，见改动 2）
 - 降级（低优先/展示层，本次不处理）：**4 / 10**（#1、#2、#3、#10，见改动 4）
+- 附带修复：M6 fail-closed `raise` 移除（改动 5，修复 KI-010）
 - 下一个：消费点 #8 `pipeline/system_b_asset_rank/service.py:177-188`（目标日 canonical A 股域）
