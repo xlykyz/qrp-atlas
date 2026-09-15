@@ -27,8 +27,8 @@ KI-013 确认 `stock_info` 是 current snapshot 表（主键 `(ticker,)`，仅 `
 | 3 | `api/routes/system_b.py:306-307` | ticker,name | System B 活跃 episode 取显示名 | 待处理 |
 | 4 | `stock_collections/repository.py:179-183` | ticker | 校验资产为有效 EQUITY | **已解耦** |
 | 5 | `pipeline/market_facts.py:60-77` | ticker,list_date,delist_date | 市场事实域 | **豁免不改**（见改动 2） |
-| 6 | `pipeline/market_m6/service.py:107-117` | ticker,market,exchange | M6 子市场映射 | 待处理 |
-| 7 | `pipeline/market_m6/query.py:127-130` | ticker,market,exchange | M6 查询 | 待处理 |
+| 6 | `pipeline/market_m6/service.py:107-117` | ticker,market,exchange | M6 子市场映射 | **已解耦**（见改动 3） |
+| 7 | `pipeline/market_m6/query.py:127-130` | ticker,market,exchange | M6 查询 | **已解耦**（见改动 3） |
 | 8 | `pipeline/system_b_asset_rank/service.py:177-188` | ticker,list_date,delist_date(+exchange,market,list_status 可选) | 目标日 canonical A 股域 | 待处理 |
 | 9 | `pipeline/system_b/repository.py:225-230` | ticker,list_date,delist_date | System B 域 | 待处理 |
 | 10 | `pipeline/daily_update/enrich.py:59-74` | ticker,name | 补全缺失股票名 | 待处理 |
@@ -147,8 +147,72 @@ def check_is_equity(self, asset_id: str) -> bool:
 
 ---
 
+## 改动 3：消费点 #6 / #7 —— M6 子市场映射解耦
+
+- **日期**：2026-09-14
+- **分支**：`refactor/v1.1-decouple-stock-info`
+- **提交**：`refactor(market-m6): derive market scope from ticker prefix`
+
+### 位置
+
+- `src/qrp_atlas/pipeline/market_m6/service.py:107-117`（`MarketM6PipelineService.run_m6_daily`）
+- `src/qrp_atlas/pipeline/market_m6/query.py:127-130`（`MarketM6QueryService.audit_m6_observation`）
+- 函数 `resolve_canonical_market_scope`（`market_m6/service.py`）
+
+### 原行为
+
+两处均从 `stock_info` 全量读取 `(ticker, market, exchange)`，对每行调
+`resolve_canonical_market_scope(market, exchange)` 建 `ticker_to_scope` 映射，再按快照 ticker 查。
+`resolve_canonical_market_scope` 基于 `market`/`exchange` 字段值判断，其 docstring 明写
+**"Never infer from ticker prefix."**。
+
+### 改后行为
+
+`resolve_canonical_market_scope` 入参改为 **`ticker`**，内部用 `conventions.get_board()`（纯前缀函数）
+推导板块，再经 `_BOARD_TO_MARKET_SCOPE` 映射为 4 个 scope：
+
+| get_board(ticker) | MARKET_SCOPE |
+| --- | --- |
+| 上证主板 / 深证主板（60 / 00） | `MAIN_BOARD` |
+| 创业板（30） | `CHINEXT` |
+| 科创板（688 / 689，**含 CDR**） | `STAR_MARKET` |
+| 北交所（43/83/87/88/92） | `BSE` |
+| 其他 | `None`（unresolved） |
+
+两处消费点删除 `stock_info` 查询，改为在 `daily_market_snapshot` 的 ticker 上直接
+`resolve_canonical_market_scope(ticker)`；`service.py` 中 `input_snapshot_id` 的 payload 移除
+`stock_info_count` 项；`service.py` 移除未再使用的 `STOCK_INFO` 导入。
+
+### 决策记录
+
+- **CDR 归科创板**：provider `market` 可取 `CDR`（如 `689009.SH`），前缀落在 `689`，`get_board`
+  判为科创板；经确认，CDR 直接归入 `STAR_MARKET`，不再单独区分。这是本次唯一的语义取舍点。
+- **"Never infer from ticker prefix" 被推翻**：该约束是设计约定而非技术限制——前缀规则
+  （`conventions.py`）对 M6 所需 4 个板块与 `market` 字段口径一一对应，唯一差异即 CDR。
+
+### 行为变化
+
+| 场景 | 改前 | 改后 |
+| --- | --- | --- |
+| `market` 字段缺失/NULL 的在市股票 | `resolve` 返回 `None` → `M6_CANONICAL_MARKET_UNRESOLVED` | 按 ticker 前缀正常映射 |
+| `999999.ZZ`（非法代码） | `None`（market='未知板块'） | `None`（前缀 `99` 不匹配任何规则） |
+| CDR `689009.SH` | `None`（market='CDR' 无匹配） | `STAR_MARKET` |
+| 依赖 `stock_info` 行集 | 是 | 否（完全解耦） |
+
+### 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `.venv/bin/python -m pytest tests/pipeline/test_market_m6_contracts.py -q` | 7 passed |
+| `.venv/bin/python -m pytest tests/pipeline/test_market_m6_contracts.py tests/pipeline/test_market_data_contracts.py tests/indicators/test_m6_observations.py tests/contracts/test_schema_contracts.py -q` | 77 passed |
+
+测试 `test_market_scope_resolver` 的断言由 `(market, exchange)` 入参改为 ticker 入参。
+`market_m6/` 已无 `stock_info` 引用；`git diff` 3 文件 `+43/-55`。
+
+---
+
 ## 进度
 
-- 已解耦：**1 / 10**（#4）
+- 已解耦：**3 / 10**（#4、#6、#7）
 - 已豁免：**1 / 10**（#5，见改动 2）
-- 下一个：消费点 #6 `pipeline/market_m6/service.py:107-117`（M6 子市场映射）
+- 下一个：消费点 #8 `pipeline/system_b_asset_rank/service.py:177-188`（目标日 canonical A 股域）
