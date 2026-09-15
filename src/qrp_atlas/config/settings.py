@@ -220,6 +220,9 @@ class PathSettings:
     backtest_tasks_dir: Path
     robustness_runs_dir: Path
     declarative_strategies_dir: Path
+    # 独立研究区回测产物根目录（只读暴露，不属于 persistent_directories）。
+    # 语义与 backtest_runs_dir 隔离，避免研究区契约与生产契约混用。
+    research_runs_dir: Path
     log_dir: Path
     tmp_dir: Path
     research_pdfs_dir: Path
@@ -436,6 +439,16 @@ class AppSettings:
             reader.get("QRP_LOG_DIR", str(home / ".runtime" / "logs")),
             base=root,
         )
+        # 研究区回测产物根：独立于 backtest_runs_dir，只读暴露。
+        # 默认指向独立研究工作区；缺失/为空不影响服务启动（接口返回 []）。
+        research_runs_dir = _resolve_path(
+            "QRP_RESEARCH_RUNS_DIR",
+            reader.get(
+                "QRP_RESEARCH_RUNS_DIR",
+                str(Path.home() / "projects" / "backtest-research" / "results"),
+            ),
+            base=root,
+        )
         tmp_dir = _resolve_path(
             "QRP_TMP_DIR",
             reader.get("QRP_TMP_DIR", str(home / ".runtime" / "tmp")),
@@ -583,6 +596,7 @@ class AppSettings:
             backtest_tasks_dir=backtest_tasks_dir,
             robustness_runs_dir=robustness_runs_dir,
             declarative_strategies_dir=declarative_strategies_dir,
+            research_runs_dir=research_runs_dir,
             log_dir=log_dir,
             tmp_dir=tmp_dir,
             research_pdfs_dir=research_pdfs_dir,
@@ -648,6 +662,7 @@ class AppSettings:
                 "backtest_runs_dir": str(self.paths.backtest_runs_dir),
                 "backtest_tasks_dir": str(self.paths.backtest_tasks_dir),
                 "robustness_runs_dir": str(self.paths.robustness_runs_dir),
+                "research_runs_dir": str(self.paths.research_runs_dir),
                 "declarative_strategies_dir": str(
                     self.paths.declarative_strategies_dir
                 ),
@@ -799,6 +814,7 @@ SUPPORTED_ENV_VARS = frozenset(
         "QRP_BACKTEST_RUNS_DIR",
         "QRP_BACKTEST_TASKS_DIR",
         "QRP_ROBUSTNESS_RUNS_DIR",
+        "QRP_RESEARCH_RUNS_DIR",
         "QRP_DECLARATIVE_STRATEGIES_DIR",
         "QRP_LOG_DIR",
         "QRP_TMP_DIR",
