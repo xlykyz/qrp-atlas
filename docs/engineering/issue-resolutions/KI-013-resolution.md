@@ -29,7 +29,7 @@ KI-013 确认 `stock_info` 是 current snapshot 表（主键 `(ticker,)`，仅 `
 | 5 | `pipeline/market_facts.py:60-77` | ticker,list_date,delist_date | 市场事实域 | **豁免不改**（见改动 2） |
 | 6 | `pipeline/market_m6/service.py:107-117` | ticker,market,exchange | M6 子市场映射 | **已解耦**（见改动 3） |
 | 7 | `pipeline/market_m6/query.py:127-130` | ticker,market,exchange | M6 查询 | **已解耦**（见改动 3） |
-| 8 | `pipeline/system_b_asset_rank/service.py:177-188` | ticker,list_date,delist_date(+exchange,market,list_status 可选) | 目标日 canonical A 股域 | 待处理 |
+| 8 | `pipeline/system_b_asset_rank/service.py:177-188` | ticker,list_date,delist_date(+exchange,market,list_status 可选) | 目标日 canonical A 股域 | **豁免不改**（见改动 6） |
 | 9 | `pipeline/system_b/repository.py:225-230` | ticker,list_date,delist_date | System B 域 | 待处理 |
 | 10 | `pipeline/daily_update/enrich.py:59-74` | ticker,name | 补全缺失股票名 | **低优先/展示层**（见改动 4，本次不处理） |
 
@@ -333,10 +333,61 @@ today_market = pd.DataFrame(
 
 ---
 
+## 改动 6：消费点 #8 —— `build_canonical_a_share_universe` 豁免不改（判定记录）
+
+- **日期**：2026-09-14
+- **结论**：**不改代码**（豁免）
+- **提交**：无（仅本判定记录）
+
+### 位置
+
+`src/qrp_atlas/pipeline/system_b_asset_rank/service.py:165-218` —— `build_canonical_a_share_universe`
+（`FROM stock_info`，用 `list_date`/`delist_date` 界定目标日 A 股域，再用 `_looks_like_a_share` 排除非 A 股）。
+
+### 读取字段与逐字段判定
+
+| 字段 | 会变？ | 影响本消费点结果？ | PIT 泄漏？ |
+| --- | --- | --- | --- |
+| `ticker` | 否 | — | 否（身份键） |
+| `list_date` / `delist_date` | 否 | — | 否（不可变事件日期，界定域） |
+| `exchange` / `market` | 是 | **否** | **否** |
+| `list_status` | 是 | 否（死读取） | 否 |
+
+### 判定依据（代码 + 实测核实）
+
+- **`ticker`/`list_date`/`delist_date`**：与消费点 #5 同类，均为不可变事件/身份事实，非 current-state。
+- **`exchange`/`market`**：虽属 current-state（provider 理论可改），但**其变化不改变本消费点的结果**：
+  `_looks_like_a_share` 对标准 A 股代码（`\d{6}.SZ` 等）走 ticker 正则（第 3/4 条）直接返回 `True`，
+  `exchange`/`market` 只在 `_NON_A_MARKERS` 排除分支参与。实测：
+    - `000001.SZ` 的 `market` 由 `中小板`→`主板`、`exchange` 由 `SZSE`→`SZ`→`None`，结果恒为 `True`；
+    - 标准 A 股的 `market`/`exchange` 值（`主板`/`创业板`/`SZSE`/`SSE` 等）均不含 `_NON_A_MARKERS`
+      （`HK`/`美股`/`ETF`/`基金`/`债`…），故永不触发排除。
+  即：`exchange`/`market` 变化**不影响 A 股判定**；它们真正起作用的是排除**非 A 股**（港股/美股/ETF 等），
+  而"非 A 股"属性本身**稳定**（港股永远带 `HK`），故判定结果 PIT-稳定。
+- **`list_status`**：死读取——全文件仅 `service.py:185` 一处出现（加入 `select`），L191-218 全程零消费。
+  测试亦未构造该列（`if optional in columns` 本就跳过），删除零影响。
+
+### 结论
+
+本消费点所读字段**全部不构成 PIT 泄漏**（`exchange`/`market` 虽为 current-state，但变化不影响结果），
+故**豁免不改**。
+
+### 可选清理（未执行）
+
+`service.py:185` 的 `list_status` 死读取可安全移除（改动量 1 行、零行为影响、无需改测试），
+属代码卫生而非 PIT 修复；本次按"豁免不改"处理，未执行。
+
+### 备注（判定修正过程）
+
+本消费点的判定经两次修正：初判"含 current-state 字段 → 有 PIT 面"（未验证是否影响结果）→
+实测确认 `exchange`/`market` 变化不改变结果，且非 A 股标记稳定 → 最终判定**不构成 PIT 泄漏**。
+
+---
+
 ## 进度
 
 - 已解耦：**3 / 10**（#4、#6、#7）
-- 已豁免：**1 / 10**（#5，见改动 2）
+- 已豁免：**2 / 10**（#5 见改动 2、#8 见改动 6）
 - 降级（低优先/展示层，本次不处理）：**4 / 10**（#1、#2、#3、#10，见改动 4）
 - 附带修复：M6 fail-closed `raise` 移除（改动 5，修复 KI-010）
-- 下一个：消费点 #8 `pipeline/system_b_asset_rank/service.py:177-188`（目标日 canonical A 股域）
+- 下一个：消费点 #9 `pipeline/system_b/repository.py:225-230`（System B 域）
