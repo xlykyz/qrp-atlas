@@ -30,7 +30,7 @@ KI-013 确认 `stock_info` 是 current snapshot 表（主键 `(ticker,)`，仅 `
 | 6 | `pipeline/market_m6/service.py:107-117` | ticker,market,exchange | M6 子市场映射 | **已解耦**（见改动 3） |
 | 7 | `pipeline/market_m6/query.py:127-130` | ticker,market,exchange | M6 查询 | **已解耦**（见改动 3） |
 | 8 | `pipeline/system_b_asset_rank/service.py:177-188` | ticker,list_date,delist_date(+exchange,market,list_status 可选) | 目标日 canonical A 股域 | **豁免不改**（见改动 6） |
-| 9 | `pipeline/system_b/repository.py:225-230` | ticker,list_date,delist_date | System B 域 | 待处理 |
+| 9 | `pipeline/system_b/repository.py:225-230` | ticker,list_date,delist_date | System B 域 | **豁免不改**（见改动 7） |
 | 10 | `pipeline/daily_update/enrich.py:59-74` | ticker,name | 补全缺失股票名 | **低优先/展示层**（见改动 4，本次不处理） |
 
 ---
@@ -384,10 +384,110 @@ today_market = pd.DataFrame(
 
 ---
 
+---
+
+## 改动 7：消费点 #9 —— `standard_input_sql` 豁免不改（判定记录）
+
+- **日期**：2026-09-14
+- **结论**：**不改代码**（豁免）
+- **提交**：无（仅本判定记录）
+
+### 位置
+
+`src/qrp_atlas/pipeline/system_b/repository.py:225-230` —— `standard_input_sql` 的 `selected_stock` CTE
+（`FROM stock_info AS stock`，用 `list_date`/`delist_date` × `trading_calendar` 生成 System B 标准输入域）。
+
+### 读取字段
+
+仅 3 个：`ticker`、`list_date`、`delist_date`（grep 确认**不读** `market`/`exchange`/`list_status`/`name`）。
+
+| 字段 | 性质 | PIT 泄漏？ |
+| --- | --- | --- |
+| `ticker` | 股票代码（稳定身份键，等于 `ts_code`） | 否 |
+| `list_date` | 上市日期（不可变事件日期，域下界） | 否 |
+| `delist_date` | 退市日期（不可变事件日期，域上界） | 否 |
+
+### 判定依据
+
+与消费点 #5 完全同源：仅读"代码 + 不可变事件日期"，用于界定目标日资产域（含 `UNRESOLVED_MISSING` 缺口检测）。
+**不含任何 current-state 字段**，故不构成 PIT 泄漏。
+
+### 影响面
+
+`standard_input_sql` ← `execute_standard_input`（`repository.py:408`）← `system_b/service.py`（生产路径
+L281/L506/L661）+ `system_b/cli.py`。即它是 **System B 状态机的直接输入**——暴露面比 #5 更关键（进生产决策链），
+但所读字段不可变，故结论仍是**豁免不改**。
+
+### 残留风险（与 #5 相同）
+
+行集风险：provider 某次不再返回某只已退市股票时，`selected_stock` 会缺其历史。缓解：
+`stock_basic` 拉取含 D 状态（`STOCK_BASIC_LIST_STATUSES`），设计上保留退市股票。
+
+---
+
+## KI-013 其余高风险结构的判定（组 2 / 组 3 / 组 4）
+
+KI-013 的 `symptom` 列出 5 组高风险结构，上述改动 1-7 只覆盖**组 1（`stock_info`）**。以下为其余组的判定。
+
+### 组 3（finalized lifecycle）与组 4（日频派生快照）—— 降级
+
+涉及表：
+
+- 组 3：`system_b_episode`、`system_b_episode_segment`、`theme_custom_index_episode`；
+- 组 4：`system_b_pool_membership_daily`、`system_b_asset_rank_snapshot`、`system_b_theme_rank_snapshot`。
+
+**判定依据（代码核实）**：这些表**全部是衍生计算表，非采集/生产数据源**——其契约输入为
+`InputKind.TABLE` / `InputKind.UPSTREAM_PIPELINE`（本地表 / 上游 pipeline），**无一个 `InputKind.EXTERNAL_API`**
+（对比 `stock_info` 用 `InputKind.EXTERNAL_API` 对接 Tushare）。产出点：`system_b_episode/service.py`、
+`system_b_pools/service.py`、`system_b_asset_rank/service.py`、`system_b_theme_rank/service.py`、`theme/service.py`。
+
+**性质差异**：组 3/4 的"版本覆盖"（同日 `DELETE+INSERT`）**不引入外部 PIT 泄漏**——其输入是本地已有的表，
+**随时可重算**，旧结果不是"丢失的事实"，只是"未保留中间产物"。
+
+**结论**：组 3/4 **降级**（可重算的覆盖策略，非真实数据不可回溯），**暂不处理**。
+
+### 组 2（复权因子）—— 降级
+
+涉及表：`adj_factor_changes`、`etf_adj_factor`。
+
+**数据源**：`adj_factor_changes` ← Tushare `pro.adj_factor(trade_date=YYYYMMDD)`（`market_data_contracts.py:1647`）；
+`etf_adj_factor` ← `pro.fund_adj(trade_date=...)`（`etf_adj_factor_contracts.py:130`）。
+
+**与 `stock_info` 的关键差异**：
+
+| 维度 | `stock_info`（`stock_basic`） | 复权因子（`adj_factor`/`fund_adj`） |
+| --- | --- | --- |
+| 接口日期能力 | **无 `trade_date`**，不提供历史 | **有 `trade_date`/`start_date`/`end_date`**，可拉历史 |
+| 写入模式 | `FULL_REBUILD`（全表 DELETE+INSERT） | `REPLACE_TARGET_DATE`（`DELETE WHERE trade_date=?`+插当日） |
+| 本地是否保留历史 | 否（全表只剩当前） | **是**（每个 `trade_date` 一行保留） |
+
+**残余风险与频率**：本地按日替换的唯一隐患是"provider 回溯修正某历史日因子值时，`DELETE+INSERT` 覆盖旧版本，
+无法保留'当时已知'版本"。经查证（Tushare 官方文档 + 社区实践）：
+
+- **日常的因子"跳变"是新增事件（除权除息），非回溯修正**——除权后从当日启用新因子，历史日因子值不变，
+  变的只是"前复权价"（分母=最新因子）。A 股平均每日除权 ≤20 只，属正常增量。
+- **真正的"回溯修正历史因子"极少发生**（检索原文："数据源修正历史除权因子（极少发生）"）。
+- 官方文档（港股 `hk_daily_adj` doc 339 / 美股 `us_daily_adj` doc 338）提示"复权因子历史数据可能除权等被刷新"，
+  措辞为"除权等"——即由除权事件驱动，非随机改写。
+- 工程共识：按 `trade_date` 增量拉取 + 每日追加，默认已发布历史值稳定。
+
+**另一真实差异（非 PIT）**：`adj_factor` 与 `pro_bar`/`stk_factor` 的**前复权口径不同**
+（`stk_factor` 为"历史当日快照不更新"，`pro_bar` 为"以 end_date 动态复权"），不同接口/时点复权价可能不一致。
+属**接口口径差异**，非数据被改写，不计入 PIT。
+
+**结论**：组 2 的 PIT 风险**显著低于组 1**——provider 提供历史、本地按日保留，仅在**极少**回溯修正时无版本。
+**降级（影响面极小），暂不处理**。
+
+---
+
 ## 进度
 
-- 已解耦：**3 / 10**（#4、#6、#7）
-- 已豁免：**2 / 10**（#5 见改动 2、#8 见改动 6）
-- 降级（低优先/展示层，本次不处理）：**4 / 10**（#1、#2、#3、#10，见改动 4）
+- **组 1（`stock_info`）消费点 10 处**：
+  - 已解耦：**3 / 10**（#4、#6、#7）
+  - 已豁免：**3 / 10**（#5 见改动 2、#8 见改动 6、#9 见改动 7）
+  - 降级（低优先/展示层）：**4 / 10**（#1、#2、#3、#10，见改动 4）
+  - → **组 1 全部 10 点定性完成**
+- **组 2（复权因子）**：降级，暂不处理（见上）
+- **组 3 / 组 4（衍生表）**：降级，暂不处理（见上）
 - 附带修复：M6 fail-closed `raise` 移除（改动 5，修复 KI-010）
-- 下一个：消费点 #9 `pipeline/system_b/repository.py:225-230`（System B 域）
+- **KI-013 整体**：全部高风险结构均已定性；组 1 完成解耦/豁免/降级，组 2/3/4 降级。
