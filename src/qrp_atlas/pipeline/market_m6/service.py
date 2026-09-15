@@ -35,39 +35,47 @@ from qrp_atlas.contracts import (
     MAX_CONSECUTIVE_LIMIT_UP_HEIGHT,
     PRE_LIMIT_UP_PREMIUM,
     PRODUCTION_RUN_ID,
-    STOCK_INFO,
     SUSPEND_D,
     TICKER,
     TRADE_DATE,
     TRADING_CALENDAR,
+)
+from qrp_atlas.contracts.conventions import (
+    BOARD_BJ,
+    BOARD_CYB,
+    BOARD_KCB,
+    BOARD_SH_MAIN,
+    BOARD_SZ_MAIN,
+    get_board,
 )
 from qrp_atlas.indicators.m6 import calculate_market_m6_observations
 from qrp_atlas.orchestration.execution_control import ExecutionControl
 from qrp_atlas.pipeline.contracts import ContractError
 
 
-def resolve_canonical_market_scope(market: str | None, exchange: str | None) -> str | None:
-    """Map canonical stock_info market and exchange to one of 4 submarket scopes.
+_BOARD_TO_MARKET_SCOPE: dict[str, str] = {
+    BOARD_SH_MAIN: MARKET_SCOPE_MAIN_BOARD,
+    BOARD_SZ_MAIN: MARKET_SCOPE_MAIN_BOARD,
+    BOARD_CYB: MARKET_SCOPE_CHINEXT,
+    BOARD_KCB: MARKET_SCOPE_STAR_MARKET,
+    BOARD_BJ: MARKET_SCOPE_BSE,
+}
+
+
+def resolve_canonical_market_scope(ticker: str) -> str | None:
+    """Map a ticker to one of 4 submarket scopes via its trading-code prefix.
 
     Strict rules:
-    - MAIN_BOARD: market in ('主板', '中小板')
-    - CHINEXT: market == '创业板'
-    - STAR_MARKET: market == '科创板'
-    - BSE: market == '北交所' or exchange == 'BSE'
-    - Never infer from ticker prefix.
-    """
-    m_clean = str(market).strip() if market is not None else ""
-    e_clean = str(exchange).strip().upper() if exchange is not None else ""
+    - MAIN_BOARD: 上证主板 / 深证主板 (60 / 00)
+    - CHINEXT: 创业板 (30)
+    - STAR_MARKET: 科创板, including CDR (688 / 689)
+    - BSE: 北交所 (43 / 83 / 87 / 88 / 92)
+    - Unresolvable code -> None
 
-    if m_clean in ("主板", "中小板"):
-        return MARKET_SCOPE_MAIN_BOARD
-    if m_clean == "创业板":
-        return MARKET_SCOPE_CHINEXT
-    if m_clean == "科创板":
-        return MARKET_SCOPE_STAR_MARKET
-    if m_clean == "北交所" or e_clean == "BSE":
-        return MARKET_SCOPE_BSE
-    return None
+    The scope is derived from the canonical ticker prefix (conventions.get_board),
+    a pure function that does not depend on any stock reference table.
+    """
+    return _BOARD_TO_MARKET_SCOPE.get(get_board(ticker))
 
 
 class MarketM6PipelineService:
@@ -103,20 +111,7 @@ class MarketM6PipelineService:
         ).fetchone()
         prev_date: date | None = prev_row[0] if prev_row and prev_row[0] is not None else None
 
-        # 3. Read stock_info mapping
-        stock_info_rows = self.con.execute(
-            "SELECT ticker, market, exchange FROM stock_info"
-        ).fetchall()
-        if not stock_info_rows:
-            raise ContractError("M6_STOCK_INFO_EMPTY", "stock_info table contains no records")
-
-        ticker_to_scope: dict[str, str] = {}
-        for t, m, ex in stock_info_rows:
-            scope = resolve_canonical_market_scope(m, ex)
-            if scope:
-                ticker_to_scope[str(t).strip()] = scope
-
-        # 4. Read today's daily_market_snapshot
+        # 3. Read today's daily_market_snapshot
         today_snapshot_rows = self.con.execute(
             """
             SELECT ticker, close, is_limit_up, is_limit_down, volume
@@ -128,7 +123,7 @@ class MarketM6PipelineService:
         if not today_snapshot_rows:
             raise ContractError("M6_SNAPSHOT_EMPTY", f"daily_market_snapshot has no data for {trade_date}")
 
-        # 5. Read explicit suspensions on D
+        # 4. Read explicit suspensions on D
         today_suspensions = {
             str(r[0]).strip()
             for r in self.con.execute(
@@ -148,7 +143,7 @@ class MarketM6PipelineService:
 
         for t_raw, close_val, is_up, is_down, vol in today_snapshot_rows:
             ticker_str = str(t_raw).strip()
-            scope = ticker_to_scope.get(ticker_str)
+            scope = resolve_canonical_market_scope(ticker_str)
             if scope is None:
                 unresolved_tickers.append(ticker_str)
                 continue
@@ -178,7 +173,7 @@ class MarketM6PipelineService:
         if execution_control is not None:
             execution_control.check()
 
-        # 6. Resolve candidate limit-up stocks and compute natural streaks
+        # 5. Resolve candidate limit-up stocks and compute natural streaks
         candidate_limit_up_tickers = today_market[
             today_market[IS_LIMIT_UP] & today_market["is_trading"]
         ][TICKER].tolist()
@@ -239,7 +234,7 @@ class MarketM6PipelineService:
                         break
                 consecutive_streaks[t_cand] = streak
 
-        # 7. Read D-1 limit up facts for pre_limit_up_premium
+        # 6. Read D-1 limit up facts for pre_limit_up_premium
         yesterday_limit_up_tickers: set[str] = set()
         yesterday_closes: dict[str, float] = {}
 
@@ -264,12 +259,11 @@ class MarketM6PipelineService:
                     yesterday_limit_up_tickers.add(t_str)
                     yesterday_closes[t_str] = float(c_val)
 
-        # 8. Compute input_snapshot_id
+        # 7. Compute input_snapshot_id
         snapshot_payload = {
             "trade_date": trade_date.isoformat(),
             "prev_date": prev_date.isoformat() if prev_date else None,
             "today_rows": len(today_snapshot_rows),
-            "stock_info_count": len(stock_info_rows),
             "candidate_limit_up_count": len(candidate_limit_up_tickers),
             "yesterday_limit_up_count": len(yesterday_limit_up_tickers),
         }
@@ -277,7 +271,7 @@ class MarketM6PipelineService:
             json.dumps(snapshot_payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
 
-        # 9. Pure calculation
+        # 8. Pure calculation
         observations_df = calculate_market_m6_observations(
             trade_date=trade_date,
             today_market=today_market,

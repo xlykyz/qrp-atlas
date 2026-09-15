@@ -121,13 +121,13 @@ def _seed_base_data(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_market_scope_resolver() -> None:
-    assert resolve_canonical_market_scope("主板", "SSE") == MARKET_SCOPE_MAIN_BOARD
-    assert resolve_canonical_market_scope("中小板", "SZSE") == MARKET_SCOPE_MAIN_BOARD
-    assert resolve_canonical_market_scope("创业板", "SZSE") == MARKET_SCOPE_CHINEXT
-    assert resolve_canonical_market_scope("科创板", "SSE") == MARKET_SCOPE_STAR_MARKET
-    assert resolve_canonical_market_scope("北交所", "BSE") == MARKET_SCOPE_BSE
-    assert resolve_canonical_market_scope("未知", "BSE") == MARKET_SCOPE_BSE
-    assert resolve_canonical_market_scope("未知", "SZSE") is None
+    assert resolve_canonical_market_scope("600519.SH") == MARKET_SCOPE_MAIN_BOARD
+    assert resolve_canonical_market_scope("000001.SZ") == MARKET_SCOPE_MAIN_BOARD
+    assert resolve_canonical_market_scope("300750.SZ") == MARKET_SCOPE_CHINEXT
+    assert resolve_canonical_market_scope("688981.SH") == MARKET_SCOPE_STAR_MARKET
+    assert resolve_canonical_market_scope("689009.SH") == MARKET_SCOPE_STAR_MARKET  # CDR -> 科创板
+    assert resolve_canonical_market_scope("830799.BJ") == MARKET_SCOPE_BSE
+    assert resolve_canonical_market_scope("999999.ZZ") is None
 
 
 def test_m6_pipeline_contract_metadata() -> None:
