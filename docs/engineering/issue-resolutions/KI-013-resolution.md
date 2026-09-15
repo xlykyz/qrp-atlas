@@ -22,16 +22,16 @@ KI-013 确认 `stock_info` 是 current snapshot 表（主键 `(ticker,)`，仅 `
 
 | # | 位置 | 依赖字段 | 用途 | 状态 |
 | --- | --- | --- | --- | --- |
-| 1 | `api/routes/stock.py:39-44` | ticker,name,exchange,market,list_date,delist_date,is_active | 股票列表 API | 待处理 |
-| 2 | `api/routes/stock.py:57-61` | 同上 + updated_at | 股票详情 API | 待处理 |
-| 3 | `api/routes/system_b.py:306-307` | ticker,name | System B 活跃 episode 取显示名 | 待处理 |
+| 1 | `api/routes/stock.py:39-44` | ticker,name,exchange,market,list_date,delist_date,is_active | 股票列表 API | **低优先/展示层**（见改动 4，本次不处理） |
+| 2 | `api/routes/stock.py:57-61` | 同上 + updated_at | 股票详情 API | **低优先/展示层**（见改动 4，本次不处理） |
+| 3 | `api/routes/system_b.py:306-307` | ticker,name | System B 活跃 episode 取显示名 | **低优先/展示层**（见改动 4，本次不处理） |
 | 4 | `stock_collections/repository.py:179-183` | ticker | 校验资产为有效 EQUITY | **已解耦** |
 | 5 | `pipeline/market_facts.py:60-77` | ticker,list_date,delist_date | 市场事实域 | **豁免不改**（见改动 2） |
 | 6 | `pipeline/market_m6/service.py:107-117` | ticker,market,exchange | M6 子市场映射 | **已解耦**（见改动 3） |
 | 7 | `pipeline/market_m6/query.py:127-130` | ticker,market,exchange | M6 查询 | **已解耦**（见改动 3） |
 | 8 | `pipeline/system_b_asset_rank/service.py:177-188` | ticker,list_date,delist_date(+exchange,market,list_status 可选) | 目标日 canonical A 股域 | 待处理 |
 | 9 | `pipeline/system_b/repository.py:225-230` | ticker,list_date,delist_date | System B 域 | 待处理 |
-| 10 | `pipeline/daily_update/enrich.py:59-74` | ticker,name | 补全缺失股票名 | 待处理 |
+| 10 | `pipeline/daily_update/enrich.py:59-74` | ticker,name | 补全缺失股票名 | **低优先/展示层**（见改动 4，本次不处理） |
 
 ---
 
@@ -211,8 +211,48 @@ def check_is_equity(self, asset_id: str) -> bool:
 
 ---
 
+## 改动 4：name 相关消费点（#1 / #2 / #3 / #10）判定为低优先/展示层，本次不处理
+
+- **日期**：2026-09-14
+- **结论**：**本次不处理**，降级为"低优先/展示层"
+- **提交**：无（仅本判定记录）
+
+### 涉及消费点
+
+| # | 位置 | name 用法 |
+| --- | --- | --- |
+| 1 | `api/routes/stock.py:39-44` | 列表 API 返回 `name`，并支持 `name LIKE` 模糊搜索 |
+| 2 | `api/routes/stock.py:57-61` | 详情 API 返回 `name` |
+| 3 | `api/routes/system_b.py:306-307` | `si.name AS name` 取显示名 |
+| 10 | `pipeline/daily_update/enrich.py:59-74` | 用 `stock_info.name` 回填 `daily_market_snapshot` 缺失名称 |
+
+### 判定依据（代码核实）
+
+- **`name` 是 current-state 字段**：`stock_info` 每日被 `stock_basic` 全量覆盖，只保留最新名称；
+  项目调研报告亦明确警告"不要假设 `stock_basic.name` 可回溯历史"（`Tushare_Pro数据调研报告_QRP_v1.0.md:349`），
+  并列出 `namechange`（doc_id=100）为历史曾用名来源。
+- **但 `name` 不参与任何关联/键**：全库检索确认，股票 `name` 只用于①展示返回、②`LIKE` 模糊搜索；
+  **无任何 JOIN / 精确匹配 / 分组键**依赖股票名称，所有关联一律走 `ticker`（代码）。
+- **主键无问题**：`stock_info.primary_key = (ticker,)`（`schema.py:437`），主键已是稳定代码，非名称。
+
+### 风险定性
+
+- **危害限于展示层**：历史查询会显示"当前名称"而非"当时名称"（如查历史记录却显示改名后的新名），
+  属**观感/标注错误**，不造成数据关联错误、不破坏计算。
+- **`enrich.py` 的特殊性**：它把 current `name` **写入** `daily_market_snapshot` 历史行，
+  使历史行的展示名固化为当前名；但同样只影响展示，不影响任何计算/关联。
+- 因无键依赖，"改名导致找不到数据"的场景**在当前代码中不存在**（仅当未来新增以名称为键的消费点才会出现）。
+
+### 与 KI-013 的关系
+
+- `name` 确属 current-state 字段，其"历史版本不可查"是 KI-013 所指"表不保留 revision"的表现之一；
+- 但因不影响计算/关联，**不构成实质性 PIT 风险**，故本次不纳入解耦范围。
+
+---
+
 ## 进度
 
 - 已解耦：**3 / 10**（#4、#6、#7）
 - 已豁免：**1 / 10**（#5，见改动 2）
+- 降级（低优先/展示层，本次不处理）：**4 / 10**（#1、#2、#3、#10，见改动 4）
 - 下一个：消费点 #8 `pipeline/system_b_asset_rank/service.py:177-188`（目标日 canonical A 股域）
