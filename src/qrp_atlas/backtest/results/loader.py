@@ -87,7 +87,8 @@ class BacktestRunsLoader:
         _validate_run_id(run_id)
         for root in self.roots:
             path = root / run_id
-            if path.is_dir():
+            # 软链（如 results/latest -> run_xxx）不作为独立 run，避免重复与歧义。
+            if path.is_dir() and not path.is_symlink():
                 return path
         raise RunNotFoundError(run_id)
 
@@ -98,6 +99,9 @@ class BacktestRunsLoader:
             if not root.is_dir():
                 continue
             for path in root.iterdir():
+                # 排除软链：results/latest 指向最新 run，否则会在列表中重复出现。
+                if path.is_symlink():
+                    continue
                 if path.is_dir() and _RUN_ID_PATTERN.match(path.name) and not path.name.startswith("."):
                     ids.add(path.name)
         return sorted(ids)
