@@ -113,6 +113,46 @@ def sortino_ratio(
     return mean / downside_std * math.sqrt(periods_per_year)
 
 
+def annualized_return_pct(
+    total_return: Any,
+    start_date: Any,
+    end_date: Any,
+) -> float | None:
+    """Geometric annualization over the actual calendar span (365-day base).
+
+    Used by non-persistent research runs (sandbox). The production result writer
+    keeps its own ``_annual_return_pct`` implementation and failure semantics.
+    Full loss (total_return == -1.0) is a valid outcome and returns -100.0. Only
+    values strictly below -1.0, non-finite inputs, or a non-positive span are
+    invalid and return None.
+    """
+
+    value = _finite(total_return)
+    if value is None:
+        return None
+    try:
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(start) or pd.isna(end):
+        return None
+    days = (end - start).days
+    if days <= 0:
+        return None
+    if value < -1.0:
+        return None
+    if value == -1.0:
+        return -100.0
+    try:
+        annual = ((1.0 + value) ** (365.0 / days) - 1.0) * 100.0
+    except (OverflowError, ValueError, ZeroDivisionError):
+        return None
+    if not math.isfinite(annual):
+        return None
+    return float(annual)
+
+
 def calmar_ratio(
     annual_return_pct: float | None,
     max_drawdown_pct: float | None,
@@ -510,6 +550,7 @@ __all__ = [
     "daily_returns_from_equity",
     "sharpe_ratio",
     "sortino_ratio",
+    "annualized_return_pct",
     "calmar_ratio",
     "rolling_performance",
     "align_benchmark_series",

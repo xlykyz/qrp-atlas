@@ -20,6 +20,7 @@ from qrp_atlas.api.routes import (
     backtest,
     backtest_tasks,
     catalog,
+    custom_strategies,
     daily,
     dev,
     index,
@@ -86,6 +87,7 @@ app.include_router(backtest.router)
 app.include_router(backtest_tasks.router)
 app.include_router(catalog.router)
 app.include_router(declarative_strategies.router)
+app.include_router(custom_strategies.router)
 app.include_router(system_b.router)
 app.include_router(system_b_pools.router)
 
