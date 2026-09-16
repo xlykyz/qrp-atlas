@@ -35,7 +35,7 @@ import time
 import traceback
 from queue import Empty
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, MutableSequence
+from typing import Any, Callable, Iterable, Mapping, MutableSequence, Sequence
 
 import pandas as pd
 
@@ -73,6 +73,19 @@ SANDBOX_RUN_ID = "sandbox_unpersisted"
 _FIELD_ALIASES: dict[str, str] = {"money": "amount"}
 
 _TARGET_COLUMNS = ("trade_date", "asset_id", "target_weight")
+
+# 与 ``BacktestSummary`` 同名的基准/超额字段；切换基准时前端直接覆盖这 9 个键。
+BENCHMARK_SUMMARY_KEYS: tuple[str, ...] = (
+    "benchmark_total_return_pct",
+    "portfolio_total_return_pct",
+    "excess_percentage_point_pct",
+    "relative_return_pct",
+    "excess_total_return_pct",
+    "full_range_excess_available",
+    "benchmark_sharpe",
+    "excess_sharpe",
+    "daily_active_sharpe",
+)
 
 
 class SandboxMarketData:
@@ -256,6 +269,28 @@ def _duckdb_price_loader(
     return load
 
 
+def _duckdb_index_loader(
+    start_date: str,
+    end_date: str,
+) -> Callable[[Iterable[str] | None], pd.DataFrame]:
+    """构造只读指数加载器；``codes=None`` 表示同区间全部指数。
+
+    正常重算只查目标单个指数；仅当目标缺失时才回退到全量指数查询，
+    以便如实列出可用指数，不加载任何股票行情。
+    """
+
+    def load(codes: Iterable[str] | None) -> pd.DataFrame:
+        db_path = get_settings().paths.duckdb_path
+        return load_index_prices(
+            db_path=db_path,
+            codes=codes,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    return load
+
+
 def _combine_price_frames(
     stocks: pd.DataFrame,
     indices: pd.DataFrame,
@@ -312,6 +347,26 @@ def _select_benchmark(
         )
         return resolved, None
     return resolved, subset
+
+
+def _select_benchmark_readonly(
+    benchmark_id: str | None,
+    *,
+    index_loader: Callable[[Iterable[str] | None], pd.DataFrame],
+    log: MutableSequence[str],
+) -> tuple[str | None, pd.DataFrame | None]:
+    """只读解析基准：优先单代码精确查询，缺失时补查可用指数后如实记录。"""
+
+    if not benchmark_id:
+        return None, None
+    resolved = str(benchmark_id).strip().upper() or None
+    if resolved is None:
+        return None, None
+    target = index_loader([resolved])
+    if target is not None and not target.empty:
+        return _select_benchmark(target, resolved, log=log)
+    # 目标基准缺失：补查同区间全部指数，避免把“不存在”误报成“无数据”。
+    return _select_benchmark(index_loader(None), resolved, log=log)
 
 
 def _build_summary(
@@ -576,6 +631,54 @@ def run_strategy(
     }
 
 
+def recompute_benchmark(
+    *,
+    equity_points: Sequence[Mapping[str, Any]],
+    benchmark_id: str | None,
+    index_loader: Callable[[Iterable[str] | None], pd.DataFrame] | None = None,
+    notes: MutableSequence[str] | None = None,
+) -> dict[str, Any]:
+    """只重算基准/超额指标，不执行任何策略代码。
+
+    完全复用 ``_select_benchmark`` / ``align_benchmark_series`` /
+    ``benchmark_summary``，与 ``sandbox-run`` 基准口径一致。输入只有组合净值
+    曲线（来自既有 ``equity_points``）与基准代码，后者按区间只读查询指数行情。
+
+    返回 ``BacktestSummary`` 中同名的 9 个基准字段 + ``benchmark_id`` + ``logs``；
+    基准不在库时 9 个字段全为 ``None``，由 ``logs`` 如实说明可用指数。
+    """
+
+    log: MutableSequence[str] = notes if notes is not None else []
+    if not equity_points:
+        raise ValueError("equity_points 不能为空。")
+
+    dates = [str(point.get("date")) for point in equity_points]
+    start_date, end_date = min(dates), max(dates)
+    load = (
+        index_loader
+        if index_loader is not None
+        else _duckdb_index_loader(start_date, end_date)
+    )
+    resolved_id, benchmark_frame = _select_benchmark_readonly(
+        benchmark_id, index_loader=load, log=log
+    )
+
+    daily_returns = [
+        row.get("daily_return")
+        for row in daily_returns_from_equity(equity_points)
+    ]
+
+    summary: dict[str, Any] = {key: None for key in BENCHMARK_SUMMARY_KEYS}
+    if benchmark_frame is not None and not benchmark_frame.empty:
+        aligned, _diagnostics = align_benchmark_series(
+            dates, benchmark_frame, portfolio_returns=daily_returns
+        )
+        bench = benchmark_summary(aligned)
+        summary = {key: bench[key] for key in BENCHMARK_SUMMARY_KEYS}
+
+    return json_safe({"benchmark_id": resolved_id, **summary, "logs": list(log)})
+
+
 def _worker(payload: dict[str, Any], result_queue: Any) -> None:
     """子进程入口：隔离执行用户代码并回传结果。"""
 
@@ -673,9 +776,11 @@ def execute_sandbox_code(
 
 
 __all__ = [
+    "BENCHMARK_SUMMARY_KEYS",
     "DEFAULT_TIMEOUT_SEC",
     "SANDBOX_RUN_ID",
     "SandboxMarketData",
     "execute_sandbox_code",
+    "recompute_benchmark",
     "run_strategy",
 ]
