@@ -1,0 +1,38 @@
+id: KI-014
+date: 2026-09-16
+status: open
+title: 策略沙盒关键回测参数仍被固定在实现层，缺少“默认值 + 策略/Run 显式覆盖”的统一配置契约，限制研究自由度。
+symptom: |
+  对当前 develop/v1.1 沙盒实现核实：
+    - SandboxMarketData.get_history(...) 仅支持 tickers / field / bars；不能显式传入历史
+      start_date / end_date。其可见数据又来自 _duckdb_price_loader(start_date, end_date)，
+      后者严格只加载回测区间，因此策略需要 MA/滚动窗口等历史数据时，回测起点前没有统一 warmup
+      历史可读能力。
+    - run_strategy(...) 在内部直接构造 PortfolioBacktestConfig：
+      max_positions=100、max_weight_per_asset=1.0，
+      CostRule 固定 commission_rate=0.0003、stamp_tax_rate=0.001、
+      slippage_bps=2.0，execution 使用 PortfolioExecutionRule() 默认值。
+      当前策略代码与 sandbox-run 请求都不能按单次研究需要覆盖这些参数。
+    - 2026-09-16 与 JoinQuant 的对账测试已验证：在撮合时点、滑点和数据预热口径显式对齐后，
+      9 笔交易的日期、方向、成交价和数量可以完全一致；当前主要差异之一来自预热机制，
+      而不是底层 PortfolioBacktestEngine 撮合失真。
+  因此目前“简单策略开箱即用”成立，但高级研究如果要切换历史观察窗口、滑点、费用、
+  撮合/执行参数，只能修改沙盒实现或接受固定默认值，策略表达能力被实现层硬编码限制。
+mitigation: |
+  在统一配置契约落地前：
+    - 需要长窗口历史的策略只能显式扩大回测起始区间，并在策略内部跳过前 N 个交易日；
+    - 需要不同滑点、费用或执行口径的跨平台对账，应在独立测试/临时代码中修改配置，
+      不应把当前沙盒固定值误认为不可变的引擎规则。
+  后续改造建议采用“可选覆盖、缺省走默认值”的方式，而不是让策略直接修改引擎内部状态：
+    - 历史数据：get_history 可保留 bars 默认用法，同时允许显式 start_date / end_date；
+      未显式提供时使用系统 warmup 规则。无论何种形式，T 日策略只能看到 <= T 的数据。
+    - 回测参数：slippage、commission、stamp_tax、execution/price_field、max_positions 等
+      作为可选 Run/Strategy 配置；未提供时沿用当前系统默认值，提供时仅对本次回测生效。
+    - 配置应在回测启动/initialize 阶段解析并冻结，进入逐日 handle_bar 后不得动态改写，
+      以保持可复现性、PIT 边界与撮合语义稳定。
+root_cause: |
+  当前 Strategy Sandbox 最初按“最小可运行研究闭环”建设：策略协议只负责返回目标权重，
+  沙盒负责装载固定回测区间行情并用一组预设 PortfolioBacktestConfig 执行。
+  随着沙盒开始承担真实研究与跨平台对账，原先适合 MVP 的固定参数已经成为研究能力边界。
+  缺少一层独立的 Strategy/Run Config 解析与冻结机制，导致“系统默认值”和“研究者显式参数”
+  尚未形成稳定、可审计的优先级契约。
