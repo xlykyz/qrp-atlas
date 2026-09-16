@@ -398,6 +398,7 @@ def test_http_contract_shape_is_unchanged_for_errors():
         "success",
         "summary",
         "equity_points",
+        "series",
         "logs",
         "error_message",
         "duration_ms",
@@ -466,6 +467,58 @@ def test_recompute_benchmark_matches_full_run():
     assert recomputed["logs"] == []
     for key in BENCHMARK_SUMMARY_KEYS:
         assert recomputed[key] == summary[key]
+    assert recomputed["series"] == outcome["series"]
+
+
+def test_benchmark_series_aligns_dates_and_scales_to_pct():
+    """series 与 equity_points 日期一一对应，且为 ×100 的百分数口径。"""
+
+    outcome = _run(HOLD_A, benchmark_id=INDEX)
+    recomputed = recompute_benchmark(
+        equity_points=outcome["equity_points"],
+        benchmark_id=INDEX,
+        index_loader=_index_loader(_indices_two()),
+    )
+
+    series = recomputed["series"]
+    assert [row["date"] for row in series] == [
+        point["date"] for point in outcome["equity_points"]
+    ]
+    assert series[0] == {
+        "date": outcome["equity_points"][0]["date"],
+        "benchmark_cumulative_return_pct": 0.0,
+        "portfolio_cumulative_return_pct": 0.0,
+        "excess_percentage_point_pct": 0.0,
+    }
+    assert series[-1]["benchmark_cumulative_return_pct"] == pytest.approx(
+        recomputed["benchmark_total_return_pct"]
+    )
+
+
+def test_benchmark_series_keeps_gaps_null():
+    """基准缺口日期对应字段如实为 null，不跨缺口填充。"""
+
+    indices = _indices()
+    gap_date = str(indices["trade_date"].unique()[10])
+    gapped = indices[indices["trade_date"] != gap_date].reset_index(drop=True)
+
+    outcome = _run(HOLD_A)  # 先取无基准的净值曲线
+    recomputed = recompute_benchmark(
+        equity_points=outcome["equity_points"],
+        benchmark_id=INDEX,
+        index_loader=_index_loader(gapped),
+    )
+
+    by_date = {row["date"]: row for row in recomputed["series"]}
+    assert by_date[gap_date]["benchmark_cumulative_return_pct"] is None
+    assert by_date[gap_date]["excess_percentage_point_pct"] is None
+    # 组合累计收益与基准无关，缺口日仍如实给出
+    assert by_date[gap_date]["portfolio_cumulative_return_pct"] is not None
+
+
+def test_run_series_is_empty_without_benchmark():
+    outcome = _run(HOLD_A)
+    assert outcome["series"] == []
 
 
 def test_recompute_benchmark_missing_index_lists_available():
@@ -498,7 +551,7 @@ def test_recompute_benchmark_changes_only_benchmark_fields():
         equity_points=points, benchmark_id=INDEX_B, index_loader=_index_loader(_indices_two())
     )
 
-    assert set(first) == {"benchmark_id", *BENCHMARK_SUMMARY_KEYS, "logs"}
+    assert set(first) == {"benchmark_id", *BENCHMARK_SUMMARY_KEYS, "series", "logs"}
     assert first["portfolio_total_return_pct"] == second["portfolio_total_return_pct"]
     assert first["benchmark_total_return_pct"] != second["benchmark_total_return_pct"]
     assert outcome["equity_points"] == points
@@ -542,6 +595,7 @@ def test_http_sandbox_benchmark_recomputes(monkeypatch):
     assert body["benchmark_id"] == INDEX
     for key in BENCHMARK_SUMMARY_KEYS:
         assert body[key] == outcome["summary"][key]
+    assert body["series"] == outcome["series"]
 
 
 def test_http_sandbox_benchmark_missing_index_returns_nulls(monkeypatch):
@@ -557,6 +611,7 @@ def test_http_sandbox_benchmark_missing_index_returns_nulls(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert all(body[key] is None for key in BENCHMARK_SUMMARY_KEYS)
+    assert body["series"] == []
     assert "不存在" in " ".join(body["logs"])
 
 

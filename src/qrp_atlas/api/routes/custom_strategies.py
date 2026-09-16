@@ -35,10 +35,24 @@ class SandboxRunRequest(BaseModel):
     benchmark_id: str | None = Field(default=None, description="基准指数代码")
 
 
+class SandboxBenchmarkSeriesPoint(BaseModel):
+    date: str = Field(..., description="交易日 YYYY-MM-DD")
+    benchmark_cumulative_return_pct: float | None = Field(
+        default=None, description="基准累计收益（%）"
+    )
+    portfolio_cumulative_return_pct: float | None = Field(
+        default=None, description="组合累计收益（%）"
+    )
+    excess_percentage_point_pct: float | None = Field(
+        default=None, description="超额收益（百分点，%）"
+    )
+
+
 class SandboxRunResponse(BaseModel):
     success: bool
     summary: dict[str, Any] | None = None
     equity_points: list[dict[str, Any]] = Field(default_factory=list)
+    series: list[SandboxBenchmarkSeriesPoint] = Field(default_factory=list)
     logs: list[str] = Field(default_factory=list)
     error_message: str | None = None
     duration_ms: int = 0
@@ -69,6 +83,7 @@ class SandboxBenchmarkResponse(BaseModel):
     benchmark_sharpe: float | None = None
     excess_sharpe: float | None = None
     daily_active_sharpe: float | None = None
+    series: list[SandboxBenchmarkSeriesPoint] = Field(default_factory=list)
     logs: list[str] = Field(default_factory=list)
 
 

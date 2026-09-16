@@ -87,6 +87,30 @@ BENCHMARK_SUMMARY_KEYS: tuple[str, ...] = (
     "daily_active_sharpe",
 )
 
+# ``align_benchmark_series`` 逐日结果 → 前端画线用的对齐序列字段（×100 百分数）。
+_SERIES_KEYS: tuple[str, ...] = (
+    "benchmark_cumulative_return",
+    "portfolio_cumulative_return",
+    "excess_percentage_point",
+)
+
+
+def _benchmark_series(aligned: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """把 ``aligned`` 基准序列转成对齐序列（×100 百分数，与 ``*_pct`` 口径一致）。
+
+    日期与传入的组合净值曲线一一对应；基准缺口处对应字段如实返回 ``None``，
+    不做任何填充。
+    """
+
+    series: list[dict[str, Any]] = []
+    for point in aligned:
+        row: dict[str, Any] = {"date": point.get("date")}
+        for key in _SERIES_KEYS:
+            value = point.get(key)
+            row[f"{key}_pct"] = None if value is None else float(value) * 100.0
+        series.append(row)
+    return series
+
 
 class SandboxMarketData:
     """交给用户策略代码的只读行情门面。
@@ -375,11 +399,14 @@ def _build_summary(
     daily_returns: list[float | None],
     benchmark_id: str | None,
     benchmark_frame: pd.DataFrame | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """组装与前端 ``BacktestSummary`` 对齐的绩效摘要。
 
     绩效口径全部复用既有实现：引擎 summary、``results.analytics`` 公共纯函数、
     ``portfolio_fills_to_trades`` 成交配对，不新建第二套算法。
+
+    返回 ``(summary, series)``：``series`` 为对齐后的基准/组合/超额逐日序列，
+    与 ``equity_points`` 日期一一对应；无基准时为 ``[]``。
     """
 
     trades = portfolio_fills_to_trades(result)
@@ -448,6 +475,7 @@ def _build_summary(
         "daily_active_sharpe": None,
     }
 
+    series: list[dict[str, Any]] = []
     if benchmark_frame is not None and not benchmark_frame.empty:
         aligned, _diagnostics = align_benchmark_series(
             [point["date"] for point in equity_curve],
@@ -455,6 +483,7 @@ def _build_summary(
             portfolio_returns=daily_returns,
         )
         bench = benchmark_summary(aligned)
+        series = _benchmark_series(aligned)
         summary.update(
             {
                 "benchmark_total_return_pct": bench["benchmark_total_return_pct"],
@@ -468,7 +497,7 @@ def _build_summary(
                 "daily_active_sharpe": bench["daily_active_sharpe"],
             }
         )
-    return json_safe(summary)
+    return json_safe(summary), json_safe(series)
 
 
 def _engine_panel(
@@ -619,15 +648,17 @@ def run_strategy(
         f"累计收益 {float(result.summary['total_return_pct']):.2f}%。"
     )
 
+    summary, series = _build_summary(
+        result,
+        equity_curve,
+        daily_returns,
+        resolved_benchmark_id,
+        benchmark_frame,
+    )
     return {
-        "summary": _build_summary(
-            result,
-            equity_curve,
-            daily_returns,
-            resolved_benchmark_id,
-            benchmark_frame,
-        ),
+        "summary": summary,
         "equity_points": json_safe(equity_curve),
+        "series": series,
     }
 
 
@@ -644,8 +675,9 @@ def recompute_benchmark(
     ``benchmark_summary``，与 ``sandbox-run`` 基准口径一致。输入只有组合净值
     曲线（来自既有 ``equity_points``）与基准代码，后者按区间只读查询指数行情。
 
-    返回 ``BacktestSummary`` 中同名的 9 个基准字段 + ``benchmark_id`` + ``logs``；
-    基准不在库时 9 个字段全为 ``None``，由 ``logs`` 如实说明可用指数。
+    返回 ``BacktestSummary`` 中同名的 9 个基准字段 + ``benchmark_id`` + ``series``
+    + ``logs``；基准不在库时 9 个字段全为 ``None`` 且 ``series`` 为空，由 ``logs``
+    如实说明可用指数。
     """
 
     log: MutableSequence[str] = notes if notes is not None else []
@@ -669,14 +701,18 @@ def recompute_benchmark(
     ]
 
     summary: dict[str, Any] = {key: None for key in BENCHMARK_SUMMARY_KEYS}
+    series: list[dict[str, Any]] = []
     if benchmark_frame is not None and not benchmark_frame.empty:
         aligned, _diagnostics = align_benchmark_series(
             dates, benchmark_frame, portfolio_returns=daily_returns
         )
         bench = benchmark_summary(aligned)
         summary = {key: bench[key] for key in BENCHMARK_SUMMARY_KEYS}
+        series = _benchmark_series(aligned)
 
-    return json_safe({"benchmark_id": resolved_id, **summary, "logs": list(log)})
+    return json_safe(
+        {"benchmark_id": resolved_id, **summary, "series": series, "logs": list(log)}
+    )
 
 
 def _worker(payload: dict[str, Any], result_queue: Any) -> None:
@@ -703,6 +739,7 @@ def _worker(payload: dict[str, Any], result_queue: Any) -> None:
                 "success": True,
                 "summary": produced["summary"],
                 "equity_points": produced["equity_points"],
+                "series": produced["series"],
                 "logs": [],
                 "error_message": None,
             }
@@ -711,6 +748,7 @@ def _worker(payload: dict[str, Any], result_queue: Any) -> None:
             "success": False,
             "summary": None,
             "equity_points": [],
+            "series": [],
             "logs": [],
             "error_message": traceback.format_exc(),
         }
@@ -750,6 +788,7 @@ def execute_sandbox_code(
             "success": False,
             "summary": None,
             "equity_points": [],
+            "series": [],
             "logs": [
                 f"[沙盒超时] 策略运行超过 {timeout_sec} 秒上限，子进程已强制中断"
                 f"（{confirmed}）。请检查是否存在死循环或过重的全市场计算。"
@@ -767,6 +806,7 @@ def execute_sandbox_code(
             "success": False,
             "summary": None,
             "equity_points": [],
+            "series": [],
             "logs": ["[沙盒异常] 子进程已退出但未返回任何结果。"],
             "error_message": "SandboxError: 沙盒子进程异常退出，未产出结果。",
             "duration_ms": 0,
