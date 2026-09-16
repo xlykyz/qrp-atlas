@@ -120,10 +120,11 @@ def annualized_return_pct(
 ) -> float | None:
     """Geometric annualization over the actual calendar span (365-day base).
 
-    Shared by the result writer and non-persistent research runs so there is a
-    single annualization convention. Full loss (total_return == -1.0) is a valid
-    outcome and returns -100.0. Only values strictly below -1.0, non-finite
-    inputs, or a non-positive span are invalid and return None.
+    Used by non-persistent research runs (sandbox). The production result writer
+    keeps its own ``_annual_return_pct`` implementation and failure semantics.
+    Full loss (total_return == -1.0) is a valid outcome and returns -100.0. Only
+    values strictly below -1.0, non-finite inputs, or a non-positive span are
+    invalid and return None.
     """
 
     value = _finite(total_return)
