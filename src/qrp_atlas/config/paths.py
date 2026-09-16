@@ -29,6 +29,7 @@ WEB_DIR = _EFFECTIVE.paths.web_dir
 BACKTEST_RUNS_DIR = _EFFECTIVE.paths.backtest_runs_dir
 BACKTEST_TASKS_DIR = _EFFECTIVE.paths.backtest_tasks_dir
 ROBUSTNESS_RUNS_DIR = _EFFECTIVE.paths.robustness_runs_dir
+RESEARCH_RUNS_DIR = _EFFECTIVE.paths.research_runs_dir
 DECLARATIVE_STRATEGIES_DIR = _EFFECTIVE.paths.declarative_strategies_dir
 LOG_DIR = _EFFECTIVE.paths.log_dir
 TMP_DIR = _EFFECTIVE.paths.tmp_dir

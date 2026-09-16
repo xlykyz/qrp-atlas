@@ -26,6 +26,7 @@ from qrp_atlas.api.routes import (
     index,
     phase,
     research,
+    research_runs,
     stock,
     system_b,
     system_b_pools,
@@ -81,6 +82,7 @@ app.include_router(index.router)
 app.include_router(zt_pool.router)
 app.include_router(adj_factor.router)
 app.include_router(research.router)
+app.include_router(research_runs.router)
 app.include_router(backtest.router)
 app.include_router(backtest_tasks.router)
 app.include_router(catalog.router)
