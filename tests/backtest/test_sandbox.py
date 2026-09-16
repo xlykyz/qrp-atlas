@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from qrp_atlas.api.server import app
+from qrp_atlas.backtest import sandbox as sandbox_module
 from qrp_atlas.backtest.models import CostRule
 from qrp_atlas.backtest.portfolio.engine import PortfolioBacktestEngine
 from qrp_atlas.backtest.portfolio.models import (
@@ -22,10 +23,12 @@ from qrp_atlas.backtest.portfolio.models import (
     PortfolioExecutionRule,
 )
 from qrp_atlas.backtest.sandbox import (
+    BENCHMARK_SUMMARY_KEYS,
     DEFAULT_TIMEOUT_SEC,
     SandboxMarketData,
     _engine_panel,
     execute_sandbox_code,
+    recompute_benchmark,
     run_strategy,
 )
 from qrp_atlas.config.settings import get_settings
@@ -34,6 +37,7 @@ from tests.api.asgi_client import ASGITestClient
 STOCK_A = "000001.SZ"
 STOCK_B = "600519.SH"
 INDEX = "000001.SH"
+INDEX_B = "399001.SZ"
 DAYS = 40
 
 
@@ -81,6 +85,45 @@ def _indices(days: int = DAYS) -> pd.DataFrame:
     return pd.DataFrame(
         _rows(INDEX, "上证综指", "index", 3000.0, days=days, amount_base=0.0)
     )
+
+
+def _indices_two(days: int = DAYS) -> pd.DataFrame:
+    """两个基准：INDEX 每日 +0.5%，INDEX_B 持平，便于区分基准字段变化。"""
+
+    flat = _rows(INDEX_B, "深证成指", "index", 10000.0, days=days, amount_base=0.0)
+    for row in flat:
+        row["close"] = 10000.0
+    return pd.DataFrame(
+        _rows(INDEX, "上证综指", "index", 3000.0, days=days, amount_base=0.0) + flat
+    )
+
+
+def _index_loader(indices: pd.DataFrame):
+    """构造可按 code 过滤的指数加载器，模拟只读查库。"""
+
+    def load(codes=None) -> pd.DataFrame:
+        if not codes:
+            return indices
+        wanted = {str(code) for code in codes}
+        return indices[indices["asset_id"].isin(wanted)].reset_index(drop=True)
+
+    return load
+
+
+def _fake_load_index_prices(
+    *,
+    con=None,
+    db_path=None,
+    codes=None,
+    start_date=None,
+    end_date=None,
+    limit=None,
+) -> pd.DataFrame:
+    frame = _indices_two()
+    if codes:
+        wanted = {str(code) for code in codes}
+        frame = frame[frame["asset_id"].isin(wanted)]
+    return frame.reset_index(drop=True)
 
 
 def _loader(stocks: pd.DataFrame | None = None, indices: pd.DataFrame | None = None):
@@ -402,3 +445,127 @@ def test_worker_process_is_daemonic():
 
 def test_timeout_default_is_thirty_minutes():
     assert DEFAULT_TIMEOUT_SEC == 1800
+
+
+# ────────────────────────────────────────────────────────────
+# 5. 基准切换：只重算后处理，不重跑策略
+# ────────────────────────────────────────────────────────────
+def test_recompute_benchmark_matches_full_run():
+    """重算出的 9 个基准字段必须与整跑策略时完全一致。"""
+
+    outcome = _run(HOLD_A, benchmark_id=INDEX)
+    summary = outcome["summary"]
+
+    recomputed = recompute_benchmark(
+        equity_points=outcome["equity_points"],
+        benchmark_id=INDEX,
+        index_loader=_index_loader(_indices_two()),
+    )
+
+    assert recomputed["benchmark_id"] == INDEX
+    assert recomputed["logs"] == []
+    for key in BENCHMARK_SUMMARY_KEYS:
+        assert recomputed[key] == summary[key]
+
+
+def test_recompute_benchmark_missing_index_lists_available():
+    outcome = _run(HOLD_A, benchmark_id=INDEX)
+
+    recomputed = recompute_benchmark(
+        equity_points=outcome["equity_points"],
+        benchmark_id="999999.SH",
+        index_loader=_index_loader(_indices_two()),
+    )
+
+    assert recomputed["benchmark_id"] == "999999.SH"
+    assert all(recomputed[key] is None for key in BENCHMARK_SUMMARY_KEYS)
+    joined = " ".join(recomputed["logs"])
+    assert "不存在" in joined
+    assert INDEX in joined and INDEX_B in joined
+
+
+def test_recompute_benchmark_changes_only_benchmark_fields():
+    """换基准只改基准/超额字段，组合收益口径与净值曲线不受影响。"""
+
+    outcome = _run(HOLD_A)  # 无基准
+    assert outcome["summary"]["benchmark_total_return_pct"] is None
+    points = outcome["equity_points"]
+
+    first = recompute_benchmark(
+        equity_points=points, benchmark_id=INDEX, index_loader=_index_loader(_indices_two())
+    )
+    second = recompute_benchmark(
+        equity_points=points, benchmark_id=INDEX_B, index_loader=_index_loader(_indices_two())
+    )
+
+    assert set(first) == {"benchmark_id", *BENCHMARK_SUMMARY_KEYS, "logs"}
+    assert first["portfolio_total_return_pct"] == second["portfolio_total_return_pct"]
+    assert first["benchmark_total_return_pct"] != second["benchmark_total_return_pct"]
+    assert outcome["equity_points"] == points
+
+
+def test_recompute_benchmark_empty_points_raises():
+    with pytest.raises(ValueError, match="不能为空"):
+        recompute_benchmark(
+            equity_points=[],
+            benchmark_id=INDEX,
+            index_loader=_index_loader(_indices()),
+        )
+
+
+def test_recompute_benchmark_creates_no_persisted_run():
+    runs_dir = get_settings().paths.backtest_runs_dir
+    before = _listing(runs_dir)
+
+    outcome = _run(HOLD_A)
+    recompute_benchmark(
+        equity_points=outcome["equity_points"],
+        benchmark_id=INDEX,
+        index_loader=_index_loader(_indices()),
+    )
+
+    assert _listing(runs_dir) == before
+
+
+def test_http_sandbox_benchmark_recomputes(monkeypatch):
+    monkeypatch.setattr(sandbox_module, "load_index_prices", _fake_load_index_prices)
+    outcome = _run(HOLD_A, benchmark_id=INDEX)
+
+    client = ASGITestClient(app)
+    response = client.post(
+        "/api/custom-strategies/sandbox-benchmark",
+        json={"equity_points": outcome["equity_points"], "benchmark_id": INDEX},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["benchmark_id"] == INDEX
+    for key in BENCHMARK_SUMMARY_KEYS:
+        assert body[key] == outcome["summary"][key]
+
+
+def test_http_sandbox_benchmark_missing_index_returns_nulls(monkeypatch):
+    monkeypatch.setattr(sandbox_module, "load_index_prices", _fake_load_index_prices)
+    outcome = _run(HOLD_A)
+
+    client = ASGITestClient(app)
+    response = client.post(
+        "/api/custom-strategies/sandbox-benchmark",
+        json={"equity_points": outcome["equity_points"], "benchmark_id": "999999.SH"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert all(body[key] is None for key in BENCHMARK_SUMMARY_KEYS)
+    assert "不存在" in " ".join(body["logs"])
+
+
+def test_http_sandbox_benchmark_rejects_empty_points():
+    client = ASGITestClient(app)
+    response = client.post(
+        "/api/custom-strategies/sandbox-benchmark",
+        json={"equity_points": [], "benchmark_id": INDEX},
+    )
+
+    assert response.status_code == 400
+    assert "不能为空" in response.json()["detail"]
