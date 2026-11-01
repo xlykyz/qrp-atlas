@@ -72,3 +72,23 @@ def test_schedule_targets_current_shanghai_date_and_is_disabled():
                                                                          tzinfo=ZoneInfo("Asia/Shanghai")))
     request = schedule(context)
     assert request.partition_key == "2026-11-02"
+
+
+def test_reexecution_keeps_root_invocation_but_new_launch_can_refresh(tmp_path):
+    from dagster._core.storage.tags import ROOT_RUN_ID_TAG, PARENT_RUN_ID_TAG
+    calls = []
+    def launch(task, partition, run_id, inputs):
+        calls.append(run_id)
+        return {"snapshot_id": 1, "publication_id": "bound-" + run_id}
+    defs = build_definitions(domain="core", tasks=[AssetTask("trading_calendar")], launcher=launch)
+    job = defs.resolve_job_def("qrp_lake_core")
+    with dg.DagsterInstance.local_temp(str(tmp_path)) as instance:
+        first = job.execute_in_process(instance=instance, partition_key="2026-10-30")
+        retry = job.execute_in_process(instance=instance, partition_key="2026-10-30",
+            tags={ROOT_RUN_ID_TAG: first.run_id, PARENT_RUN_ID_TAG: first.run_id})
+        fresh = job.execute_in_process(instance=instance, partition_key="2026-10-30")
+    assert first.success and retry.success and fresh.success
+    assert first.run_id != retry.run_id
+    assert calls == [first.run_id, first.run_id, fresh.run_id]
+    event = retry.asset_materializations_for_node("core__trading_calendar")[0]
+    assert event.metadata["publication"].value["dagster_run_id"] == retry.run_id

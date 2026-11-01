@@ -129,7 +129,7 @@ class SystemBStatePlugin:
             "history_start": pd.to_datetime(prepared["trade_date"]).min().date().isoformat(),
             "input_versions": dict(context.input_versions),
             "history_hashes": {name: _semantic_input_identity(frame) for name, frame in inputs.items()},
-            "output_hash": frame_identity(output),
+            "output_hash": frame_identity(output.loc[output.trade_date.eq(context.target_date)].reset_index(drop=True)),
             "previous_checkpoint_id": previous["checkpoint_id"] if previous else None,
             "replay_from": context.replay_from.isoformat() if context.replay_from else None,
             "recovery_mode": "FULL_HISTORY_RECOMPUTE",

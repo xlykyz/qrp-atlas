@@ -25,6 +25,7 @@ def configured_store(settings: AppSettings, domain: str, *, read_only=False):
 
 
 def load_inputs(settings, names, manifest, snapshot=None, *, target_date=None):
+    from .plugins import identity
     frames, versions, receipts = {}, {}, {}
     for dataset in names:
         entry = manifest.get(dataset)
@@ -49,24 +50,55 @@ def load_inputs(settings, names, manifest, snapshot=None, *, target_date=None):
                 raise ValueError("target partition is absent in pinned snapshot")
             receipts[dataset] = asdict(source.recover(row[0]))
         frames[dataset] = DataPortal(source, version).read(dataset, publication_id=publication_id)
-        versions[dataset] = receipts[dataset]["publication_id"]
+        read_identity = {"domain": domain, "dataset": dataset, "snapshot_id": version,
+                         "publication_id": receipts[dataset]["publication_id"]}
+        receipts[dataset]["read_identity"] = read_identity
+        versions[dataset] = identity(read_identity)
     return frames, versions, receipts
 
 
 def run(args, settings):
     if settings.runtime.read_only:
         raise PermissionError("read-only configuration cannot run production")
+    if args.domain != "core":
+        return _run(args, settings)
+    from copy import copy
+    import uuid
+    from .invocation import bind_invocation
+    if settings.lake.root is None:
+        raise ValueError("explicit QRP_LAKE_ROOT is required")
+    invocation_id = getattr(args, "invocation_id", None) or uuid.uuid4().hex
+    scope = {"domain": args.domain, "dataset": args.dataset, "date": args.date}
+    def request():
+        return {"manifest": json.loads(Path(args.input_manifest).read_text(encoding="utf-8")) if args.input_manifest else {},
+                "input_snapshot": args.input_snapshot, "raw_batch": args.raw_batch}
+    with bind_invocation(settings.lake.root, invocation_id, scope, request) as binding:
+        bound_args = copy(args)
+        bound_args._binding = binding
+        if binding.data.get("publication_id"):
+            receipt = configured_store(settings, "core", read_only=True).recover(binding.data["publication_id"])
+            if receipt is None:
+                raise ValueError("bound invocation receipt is missing")
+            return {**asdict(receipt), "domain": "core"}
+        payload = _run(bound_args, settings)
+        binding.data["publication_id"] = payload["publication_id"]
+        binding.save()
+        return payload
+
+
+def _run(args, settings):
     target = date.fromisoformat(args.date)
     store = configured_store(settings, args.domain)
-    manifest = json.loads(Path(args.input_manifest).read_text(encoding="utf-8")) if args.input_manifest else {}
+    binding = getattr(args, "_binding", None)
+    manifest = binding.data["request"]["manifest"] if binding else (json.loads(Path(args.input_manifest).read_text(encoding="utf-8")) if args.input_manifest else {})
     if args.domain == "core":
         from .core import CORE_INPUTS, CoreRunner
         from qrp_atlas.contracts.lake_core import CORE_DATASETS
         from .raw import RawStore
         spec = CORE_DATASETS[args.dataset]
-        previous = store.current_publication(args.dataset, args.date, whole_table=not spec.date_field)
+        previous = binding.value("expected_previous", lambda: store.current_publication(args.dataset, args.date, whole_table=not spec.date_field))
         frames, versions, receipts = load_inputs(settings, CORE_INPUTS.get(args.dataset, ()), manifest,
-                                                args.input_snapshot, target_date=target)
+                                                binding.data["request"]["input_snapshot"], target_date=target)
         import pandas as pd
         for name in ("suspend_d", "daily_market_snapshot"):
             if name in frames:
@@ -75,14 +107,21 @@ def run(args, settings):
         runner = CoreRunner(raw, store)
         kwargs = dict(inputs=frames, lineage={"input_snapshots": versions, "input_receipts": receipts},
                       expected_previous=previous)
-        if args.raw_batch:
-            publication = runner.replay(args.dataset, args.raw_batch, target_date=target, **kwargs)
+        if args.dataset == "stock_info":
+            kwargs["expected_historical_previous"] = binding.value("expected_historical_previous",
+                lambda: store.current_publication("stock_info_historical_identity", args.date, whole_table=True))
+        batch = binding.data.get("raw_batch") or binding.data["request"]["raw_batch"]
+        if batch:
+            publication = runner.replay(args.dataset, batch, target_date=target, **kwargs)
         else:
             from qrp_atlas.config.tushare_client import get_tushare_pro
             from .provider import SDKProvider
             import tushare
             runner.provider = SDKProvider(get_tushare_pro(settings=settings), raw, sdk_version=tushare.__version__)
-            publication = runner.acquire_and_publish(args.dataset, target, **kwargs)
+            def on_acquired(batch_id):
+                binding.data["raw_batch"] = batch_id
+                binding.save()
+            publication = runner.acquire_and_publish(args.dataset, target, on_acquired=on_acquired, **kwargs)
     else:
         if settings.lake.core_catalog:
             raise PermissionError("extension environment must not contain core write catalog credentials")
@@ -103,20 +142,32 @@ def run(args, settings):
         checkpoint = json.loads(Path(args.checkpoint).read_text(encoding="utf-8")) if args.checkpoint else None
         if checkpoint is None and plugin.spec.mode == "state":
             with store.connect() as con:
-                old = con.execute("SELECT lineage FROM lake._qrp_publications WHERE dataset=? AND partition_id < ? ORDER BY partition_id DESC,published_at DESC LIMIT 1", [plugin.spec.output_dataset,args.date]).fetchone()
+                old = con.execute("SELECT lineage,partition_id FROM lake._qrp_publications WHERE dataset=? AND partition_id < ? ORDER BY partition_id DESC,published_at DESC LIMIT 1", [plugin.spec.output_dataset,args.date]).fetchone()
             if old:
                 checkpoint = json.loads(old[0]).get("checkpoint")
+                if checkpoint is None or checkpoint.get("target_date") != old[1]:
+                    raise ValueError("stored checkpoint does not match its publication date; explicit replay is required")
         params = json.loads(args.parameters)
         result = plugin.run(PluginContext(target, frames, versions, parameters=params, checkpoint=checkpoint,
                            replay_from=date.fromisoformat(args.replay_from) if args.replay_from else None,
                            strict_pit=False))
-        lineage = dict(result.metadata, input_receipts=receipts, checkpoint=result.checkpoint,
-                       time_policy="observed_not_historical_pit")
         outputs = []
         for day, frame in result.frame.groupby(plugin.spec.partition_column, sort=True):
             partition = pd.Timestamp(day).date().isoformat()
             if partition not in previous_by_date:
                 raise ValueError("plugin emitted outside requested replay window")
+            day_result = result
+            if plugin.spec.mode == "state" and partition != args.date:
+                # Recompute each recovery boundary with that day's bounded
+                # history/adjustment anchor. Relabelling the terminal checkpoint
+                # would leave its hashes, state and identity inconsistent.
+                day_result = plugin.run(PluginContext(date.fromisoformat(partition), frames, versions,
+                    parameters=params, checkpoint=checkpoint, replay_from=replay_start, strict_pit=False))
+                frame = day_result.frame.loc[pd.to_datetime(day_result.frame[plugin.spec.partition_column]).dt.date == date.fromisoformat(partition)]
+            if plugin.spec.mode == "state" and (not day_result.checkpoint or day_result.checkpoint.get("target_date") != partition):
+                raise ValueError("plugin checkpoint does not match output date")
+            lineage = dict(day_result.metadata, input_receipts=receipts, checkpoint=day_result.checkpoint,
+                           time_policy="observed_not_historical_pit")
             publication = store.publish(plugin.schema, frame,
                 partition=partition, idempotency_key=identity({"plugin":plugin.spec.code_version,
                     "inputs":versions,"parameters":params,"target":args.date,"partition":partition,
@@ -142,6 +193,7 @@ def parser():
     r.add_argument("--dataset", required=True)
     r.add_argument("--date", required=True)
     r.add_argument("--raw-batch")
+    r.add_argument("--invocation-id", help="stable caller identity for core retries; use a new identity for an intentional revision")
     r.add_argument("--input-manifest")
     r.add_argument("--input-snapshot", type=int)
     r.add_argument("--plugins", help="operator-owned explicit enabled plugin JSON")

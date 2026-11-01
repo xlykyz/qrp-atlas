@@ -24,7 +24,40 @@ MA20 解析公式核对及固定快照回读均通过。结果状态为 `measure
 完整原始结果保存在本机忽略目录 `.lake-test/benchmark-250/benchmark-results.json`，
 运行日志为 `.lake-test/benchmark-run.log`，未把生成数据或连接配置纳入版本控制。
 
-以下为复现实测的方法及边界。
+## 2026-11-02 Linux 隔离实测（审查修复后）
+
+在 `myserver` 的独立目录 `/home/claire/qrp-lake-tests/review-86fb751-20261102` 运行，
+未使用生产数据库、行情或服务配置。主机为 i7-9750H、6 物理核心/12 逻辑 CPU、约 60.4 GiB RAM；
+Python 3.13.13、DuckDB 2.0.0、pandas 3.1.0、独立 PostgreSQL 18.4（端口 55439）。
+基准进程组限制为 CPUQuota=400%、MemoryMax=8G，测试 PostgreSQL 另限 CPUQuota=100%、MemoryMax=2G；
+每连接 2 线程、4GB DuckDB 预算。主机原有服务保持运行，测试不是独占整机测量。
+
+命令参数仍为 `--history-days 250 --days 20 --assets 1000`：250,000 行初始历史，每轮 20 个日期，
+每日期 1,000 行。完整回归结束后才开始性能测量。
+
+| 测量 | 仅核心 | 扩展并发 |
+| --- | ---: | ---: |
+| 核心端到端 P50 | 2.852 s | 5.870 s |
+| 核心端到端 P95 | 4.213 s | 6.819 s |
+| 输入读取 P95 | 2.559 s | 3.940 s |
+| 计算 P95 | 1.059 s | 3.309 s |
+| 发布 P95（含校验、锁与回执） | 1.966 s | 3.974 s |
+| 核心进程峰值 RSS | 356.0 MiB | 358.5 MiB |
+| 进程树峰值 RSS | 371.4 MiB | 644.9 MiB |
+| 采样临时文件峰值 | 14,438 bytes | 28,770 bytes |
+
+扩展并发轮完成 49 次扫描/发布。核心 P95 比值为 1.6184，即增加约 61.8%；
+不能据此宣称扩展对核心无影响。两轮输出哈希一致、解析公式核对及固定快照回读通过，
+性能状态仍为 `measurement_only_no_thresholds`。Windows 与 Linux 的版本、资源预算不同，不能直接据此比较平台优劣。
+各阶段 P95 不可相加；RSS 是采样值，进程树求和可能重复计入共享页，不等于 cgroup 实占。
+未测调度排队、独立锁等待或 PostgreSQL CPU/RSS，也未与旧 pipeline 对照。
+该滚动均值负载不衡量 System B 按日期重放的全历史计算成本，真实规模与性能门槛仍需单独约定。
+
+原始结果保留于测试节点 `benchmark-250/benchmark-results.json`（相对上述隔离目录），
+本机副本为 `.lake-test/linux-review/benchmark-results.json`，另有 `linux-benchmark.log` 和 `runtime-freeze.txt`。
+生成数据、日志、配置和凭据不提交；下面的复现方法及统计边界同样适用。
+
+## 基准方法
 
 `tools/lake_benchmark.py` 在专用空 PostgreSQL 数据库与新目录中测量两轮相同核心计算：无扩展，以及一个扩展进程同时扫描固定历史快照并发布到独立 catalog。测试只产生 `benchmark_*` 合成数据，不调用数据供应商，不读取或改写旧数据库，不代表生产性能验收。
 

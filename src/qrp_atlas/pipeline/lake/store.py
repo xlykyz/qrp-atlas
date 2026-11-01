@@ -194,6 +194,8 @@ mode or key. No acquisition or computation runs inside this lock.
             if not col.nullable and payload[col.name].isna().any():
                 raise ValueError("null in required column " + col.name)
         if partition_column:
+            if partition_column not in schema.primary_key:
+                raise ValueError("dataset contract changed or invalid: partition column must belong to primary key")
             if partition_column not in payload:
                 raise ValueError("partition column absent")
             if next(column.dtype.upper() for column in schema.columns if column.name == partition_column) != "DATE":

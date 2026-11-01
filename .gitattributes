@@ -1,0 +1,2 @@
+# Keep opt-in Linux acceptance scripts runnable after a Windows checkout.
+tests/pipeline/lake/*.sh text eol=lf

@@ -8,6 +8,9 @@ CREATE ROLE qrp_lake_dagster LOGIN;
 CREATE DATABASE qrp_lake_core OWNER qrp_lake_core_writer;
 CREATE DATABASE qrp_lake_extension OWNER qrp_lake_extension_writer;
 CREATE DATABASE qrp_lake_dagster OWNER qrp_lake_dagster;
+-- Set before Dagster creates/writes its timestamp-without-time-zone metadata.
+-- Business schedules retain Asia/Shanghai independently of metadata time.
+ALTER DATABASE qrp_lake_dagster SET timezone TO 'UTC';
 REVOKE ALL ON DATABASE qrp_lake_core FROM PUBLIC;
 REVOKE ALL ON DATABASE qrp_lake_extension FROM PUBLIC;
 REVOKE ALL ON DATABASE qrp_lake_dagster FROM PUBLIC;

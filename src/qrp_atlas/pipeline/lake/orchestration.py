@@ -47,6 +47,10 @@ class CliLauncher:
             json.dump(inputs, stream, sort_keys=True)
         argv = [self.python, "-m", "qrp_atlas.pipeline.lake.cli", "--env-file", str(self.env_file.resolve()),
                 "run", "--domain", task.domain, "--dataset", task.dataset, "--date", partition]
+        if task.domain == "core":
+            from .plugins import identity
+            argv.extend(["--invocation-id", identity({"run_id": run_id, "dataset": task.dataset,
+                                                     "domain": task.domain, "partition": partition})])
         if inputs:
             argv.extend(["--input-manifest", str(manifest.resolve())])
         if task.dataset in self.recorded_batches:
@@ -115,7 +119,11 @@ def build_definitions(*, domain: str, tasks: Sequence[AssetTask], launcher: Call
                 if dep[1] in inputs:
                     raise dg.Failure(description="AMBIGUOUS_INPUT_DATASET")
                 inputs[dep[1]] = {**receipt, "domain": dep[0], "partition": context.partition_key}
-            receipt = dict(launcher(task, context.partition_key, context.run.run_id, inputs))
+            # Run-level retries get new run IDs but retain the acquisition
+            # binding of their root run. A new user launch has no root.
+            logical_run_id = context.run.root_run_id or context.run.get_root_run_id() or context.run.run_id
+            receipt = dict(launcher(task, context.partition_key, logical_run_id, inputs))
+            receipt.update(dagster_run_id=context.run.run_id, logical_run_id=logical_run_id)
             if not {"snapshot_id", "publication_id"} <= receipt.keys():
                 raise dg.Failure(description="PUBLICATION_RECEIPT_MISSING")
             return dg.MaterializeResult(metadata={"publication": dg.MetadataValue.json(receipt)})
@@ -187,4 +195,5 @@ def configured_definitions(domain: str):
                                tuple(("core", name) for name in load_plugin(plugin_id, enabled=enabled).spec.inputs),
                                "qrp_extension") for plugin_id in enabled)
     return build_definitions(domain=domain, tasks=tasks,
-                             launcher=launcher, start_date=lake.partition_start_date)
+                             launcher=launcher, start_date=lake.partition_start_date,
+                             schedule_hour=lake.schedule_hour)

@@ -6,16 +6,16 @@ storage:
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
-  config:
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+concurrency:
+  runs:
     max_concurrent_runs: 2
     tag_concurrency_limits:
       - key: qrp/domain
         value: extension
         limit: 1
-run_launcher:
-  module: dagster.core.launcher
-  class: DefaultRunLauncher
-concurrency:
   pools:
     granularity: op
     default_limit: 1
@@ -24,6 +24,9 @@ run_monitoring:
   start_timeout_seconds: 180
   cancel_timeout_seconds: 30
   max_resume_run_attempts: 0
+  # DefaultRunLauncher has no worker-health implementation. Bound orphaned
+  # STARTED runs so their slots are eventually reclaimed after location loss.
+  max_runtime_seconds: 7200
   poll_interval_seconds: 15
   free_slots_after_run_end_seconds: 30
 run_retries:

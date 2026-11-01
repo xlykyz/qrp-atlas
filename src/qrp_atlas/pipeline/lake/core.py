@@ -214,9 +214,14 @@ def _input_scope(dataset: str, target: date, inputs: dict[str, pd.DataFrame],
     opened = bool(row.iloc[0].is_open)
     if dataset == "daily_market_snapshot":
         stock = inputs["stock_info"]
-        if stock.ticker.duplicated().any() or stock.list_date.isna().any():
+        # G (not yet listed) may legitimately lack a listing date. Other
+        # statuses need dated identity, including later-delisted historical
+        # securities: current is_active alone cannot define a past universe.
+        missing_listing = stock.list_date.isna()
+        not_yet_listed = stock.list_status.eq("G").fillna(False)
+        if stock.ticker.duplicated().any() or (missing_listing & ~not_yet_listed).any():
             raise CoreQualityError("STOCK_REFERENCE_INVALID")
-        listed = _dates(stock.list_date) <= target
+        listed = _dates(stock.list_date).map(lambda value: pd.notna(value) and value <= target)
         delisted = _dates(stock.delist_date)
         still_listed = delisted.map(lambda value: pd.isna(value) or value >= target)
         eligible = set(stock.loc[listed & still_listed, "ticker"])
@@ -299,7 +304,7 @@ class CoreRunner:
             expected_previous=expected_previous,
             lineage=evidence, time_model="observed", quality="legal_empty" if frame.empty else "complete")
 
-    def acquire_and_publish(self, dataset: str, target_date: date, **kwargs: Any) -> Any:
+    def acquire_and_publish(self, dataset: str, target_date: date, *, on_acquired=None, **kwargs: Any) -> Any:
         if self.provider is None:
             raise ValueError("provider required for acquisition")
         if dataset == "stock_info" and "expected_historical_previous" not in kwargs:
@@ -313,4 +318,6 @@ class CoreRunner:
         else:
             query = {"trade_date": target_date.strftime("%Y%m%d")}
         acquired = self.provider.acquire(dataset, query)
+        if on_acquired is not None:
+            on_acquired(acquired.batch_id)
         return self.replay(dataset, acquired.batch_id, target_date=target_date, **kwargs)

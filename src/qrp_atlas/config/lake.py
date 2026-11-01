@@ -7,7 +7,7 @@ LAKE_ENV_VARS = frozenset({"QRP_LAKE_ROOT", "QRP_LAKE_CORE_CATALOG", "QRP_LAKE_E
     "QRP_LAKE_CORE_READ_CATALOG", "QRP_LAKE_THREADS", "QRP_LAKE_MEMORY_LIMIT",
     "QRP_LAKE_DAILY_SOURCE", "QRP_LAKE_DAILY_SNAPSHOT", "QRP_LAKE_WORKER_TIMEOUT_SECONDS",
     "QRP_LAKE_WORKER_MEMORY_BYTES", "QRP_LAKE_WORKER_TEMP_BYTES", "QRP_LAKE_PARTITION_START_DATE",
-    "QRP_LAKE_PLUGINS_FILE", "QRP_LAKE_ALLOW_OBSERVED", "QRP_LAKE_RELOCATED"})
+    "QRP_LAKE_PLUGINS_FILE", "QRP_LAKE_ALLOW_OBSERVED", "QRP_LAKE_RELOCATED", "QRP_LAKE_SCHEDULE_HOUR"})
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,7 @@ class LakeSettings:
     plugins_file: Path | None = None
     allow_observed: bool = False
     relocated: bool = False
+    schedule_hour: int = 18
 
     @classmethod
     def parse(cls, reader):
@@ -67,9 +68,12 @@ class LakeSettings:
         relocated = (reader.optional("QRP_LAKE_RELOCATED") or "false").lower()
         if relocated not in {"true", "false"}:
             raise ValueError("QRP_LAKE_RELOCATED must be true or false")
+        schedule_hour = int(reader.optional("QRP_LAKE_SCHEDULE_HOUR") or "18")
+        if not 0 <= schedule_hour <= 23:
+            raise ValueError("QRP_LAKE_SCHEDULE_HOUR must be 0..23")
         return cls(Path(root) if root else None, core, ext,
                    reader.optional("QRP_LAKE_CORE_READ_CATALOG"), threads, memory, source,
                    int(snapshot) if snapshot is not None else None,
                    timeout, worker_memory, worker_temp, start_date,
                    Path(plugins) if plugins else None, observed == "true",
-                   relocated == "true")
+                   relocated == "true", schedule_hour)

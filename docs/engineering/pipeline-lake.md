@@ -2,6 +2,8 @@
 
 日期：2026-11-02。基线：`6d777ec`；任务分支：`feature/v1.1-pipeline-lake`。
 本轮交付隔离工程候选，不代表生产切换。旧 API 默认连接旧 DuckDB，旧调度器不变。
+`86fb751` 为首次交付记录；其后的审查修复和 Linux 隔离验证见本文末尾。初版未验收项
+不能被当作后续验证结论，后续测试也不代表生产已经切换。
 
 ## 覆盖范围
 
@@ -125,6 +127,8 @@ python -m qrp_atlas.pipeline.lake.cli --env-file <empty-restore.env> restore --d
 恢复要求空 catalog 与新目录；校验备份 checksum，并通过旧 snapshot 查询验证。恢复环境需显式
 `QRP_LAKE_RELOCATED=true`，将 catalog 读取重定向至恢复文件目录，不去读原文件冒充恢复成功。
 backup 不包含供应商 Raw 或 Dagster 元数据；它们需要独立保留/备份，不能把湖仓备份等同整系统备份。
+同一逻辑调用恢复所需的 `core-runtime/invocations/` 也应与其引用的 Raw 一起保留，
+不属于当前 catalog/files 备份命令的覆盖范围。
 
 读取切换仅针对已验证数据集：`QRP_LAKE_DAILY_SOURCE=lake`、固定 `QRP_LAKE_DAILY_SNAPSHOT`
 及只读 catalog 配置。旧接口字段保持兼容。不存在自动 latest 路由；新版本验收后由操作者显式更新固定版本。
@@ -141,7 +145,7 @@ backup 不包含供应商 Raw 或 Dagster 元数据；它们需要独立保留/�
 
 本轮不迁移 Episode/三池算法或消费者，不宣称它们已获得新的存储与隔离保证。
 
-## 验证证据与限制
+## 验证证据与限制（86fb751 首次交付）
 
 `tests/pipeline/lake` 覆盖 Raw、清洗与完整性、类型转换后键校验、CAS、固定快照、
 真正进程强退、PostgreSQL 并发、备份恢复、原 System B 对照、修订重放、外部插件、
@@ -195,7 +199,7 @@ $env:QRP_TEST_PG_BIN=(Resolve-Path '.lake-test/tools/pgsql/bin').Path
 53 个候选文本文件通过 UTF-8、代码块闭合与凭据模式检查，39 个 Python 模块编译检查通过，
 `pyproject.toml` 可解析，`git diff --check` 通过。
 
-### Old Contract Change 与部署交接
+### Old Contract Change 与部署交接（首次交付）
 
 - `config.settings` 新增可选 lake 配置；未配置时保留 legacy 默认行为，诊断不输出 catalog 凭据。
 - daily 两个 API 入口通过连接适配器切换；URL、响应字段及旧价格调整规则不变。独立前端无需为本轮修改字段契约。
@@ -212,11 +216,68 @@ $env:QRP_TEST_PG_BIN=(Resolve-Path '.lake-test/tools/pgsql/bin').Path
 
 本轮代码、测试和文档通过 `feature/v1.1-pipeline-lake` 任务分支提交供远端审查，
 开发基线为 `6d777ecc096bd891a307e9f6bef552c073b05f23`。审查范围是该基线与任务分支之间的差异；
-没有合并或直接更新 `develop/v1.1`、`main`，也没有部署到 Linux。
+没有合并或直接更新 `develop/v1.1`、`main`，也没有部署到 Linux 生产环境。
 原先未跟踪的 `2026-09-16-sandbox-joinquant-parity-test-report.md` 保留，没有并入本轮修改。
 本机 `.venv-lake/`、`.lake-test/` 已忽略；测试 PostgreSQL 在交付前停止，测试证据和临时数据保留供复查。
-下一步为审查候选 diff 并约定 Linux 隔离验收范围，按部署文档准备环境后再验证；不应直接替换生产环境。
+审查后的 Linux 隔离验证及尚未完成的上线验收见下文；不应直接替换生产环境。
 
 官方 API 依据：[DuckLake 连接](https://ducklake.select/docs/stable/duckdb/usage/connecting)、
 [Time travel](https://ducklake.select/docs/stable/duckdb/usage/time_travel)、
 [备份恢复](https://ducklake.select/docs/stable/duckdb/guides/backups_and_recovery)。
+
+## 86fb751 审查后的定点修复
+
+依据用户提供的 `QRP_Pipeline_Lake_86fb751_Review.md` 核对后，R1–R8 均成立。
+保留已有架构、System B 算法、observed/legacy/PIT 边界及旧 API 默认路径。
+
+| 条目 | 修复与回归 |
+| --- | --- |
+| R1 | core unit 开放 Raw 的可写例外，权限表要求预建 core 独占目录。Linux 探针必须同时验证原配置拒绝、修复后真实 Raw 保存、扩展身份拒绝；不能以配置解析成功替代权限实测 |
+| R2 | 范围重放为每个日期重新计算完整 checkpoint 和该日输出身份；自动续算检查 checkpoint 与分区日期一致。回归覆盖范围中途提交后中断、恢复、普通重跑末日及幂等 |
+| R3 | 输入身份记录实际 domain/dataset/snapshot/publication；目标日 receipt 未变但历史窗口修订时产生正确新输出，重复相同输入仍幂等 |
+| R4 | `--invocation-id` 持久绑定首次 manifest、Raw 与 CAS 基线；Dagster 同一 root run/dataset/partition 的 step/run 级重试沿用身份，提交后丢回执先恢复，不再访问 Provider；主动新运行仍可产生 revision |
+| R5 | G 状态缺失上市日不进入应交易域；其他缺失关键身份仍拒绝，后来退市但目标日仍上市的证券继续纳入 |
+| R6 | 同业务指纹的 legacy 重试先核对已有映射/内容证据并回读对照，复用原 receipt；本次文件名/大小作为独立观察返回。无关表增长、重新导出可重试，真实内容修订仍受 CAS 限制 |
+| R7 | 日期分区列必须属于声明主键，在插件准入和发布边界同时检查；全表快照仍按完整替换规则运行 |
+| R8 | 真实 configured_definitions 从统一配置读取 `QRP_LAKE_SCHEDULE_HOUR`，默认 18 时、Asia/Shanghai、STOPPED；空插件列表没有可运行任务或 schedule |
+
+新增业务回归位于 `test_review_regressions.py`，范围恢复用例扩展 `test_state_cli.py`。
+Windows 初次针对性验证为 8 passed；相关已有回归 57 passed；部署模板解析另 1 passed。
+这些命令覆盖范围有说明，不把它们冒充完整套件结果。
+
+### Linux 实测暴露的部署配置补充
+
+1. Dagster 的运行并发限制移动到 `concurrency.runs`，避免与 pools 的新配置冲突。
+2. Dagster PostgreSQL URL 显式使用 `postgresql+psycopg2://`，避免 SQLAlchemy 2.1 默认驱动变化导致 NOTIFY 参数绑定失败。
+3. 新建 Dagster 元数据库首次写入前设为 UTC；Asia/Shanghai 的数据库默认时区会使 naive 元数据被错误解释，实测导致已结束任务的槽位无法按时回收。业务 schedule 仍是 Asia/Shanghai。
+4. DefaultRunLauncher 没有 worker 健康检查实现，因此增加整个 run 的 7,200 秒截止时间。Linux 演练使用 30 秒，验证 code location 强退后的终态与槽位回收；不宣称即时探测或自动续跑。
+
+真实 daemon 重启 → code location 强退 → 子进程消失 → 任务 FAILURE → 槽位释放 → 下一任务 SUCCESS
+已在独立 PostgreSQL 元数据库和临时 user units 中通过，入口 `linux_dagster_recovery.py`。
+`linux_acceptance.py` 实测 128 MiB cgroup 内存限制触发 OOM kill；但用户级文件系统限制的反向测试未生效，
+该项明确不算通过，需 `linux_system_acceptance.sh` 的系统级临时服务补验。
+
+### 本轮 Linux 验证记录
+
+隔离根目录为 `/home/claire/qrp-lake-tests/review-86fb751-20261102`，源码来自 `86fb751` 加本轮修复，
+使用独立 Python 3.13.13 虚拟环境、PostgreSQL 18.4 新集群（端口 55439）和临时 systemd user units。
+DuckDB 2.0.0、Dagster 1.13.28、dagster-postgres 0.29.28；生产 checkout 与虚拟环境未改动。
+
+- 全量 `python -m pytest -q --tb=short -rs`：**1700 passed，126 warnings，830.50 秒**，无失败或跳过。
+- 最后补充 root-run 重试绑定及模板配置检查后，运行 `test_runtime_dagster.py` 与 `test_review_regressions.py`：**14 passed，23 warnings，25.47 秒**。这是末次改动的针对性回归，未重复整套测试，不能与 1700 相加计为独立用例数。
+- 实际 PostgreSQL reader 角色可以 SELECT，执行不影响行的 DELETE 仍被权限拒绝。
+- daemon 重启、进程退出后的截止回收、后续任务成功，以及内核 OOM kill 通过；Raw 系统级写权限仍待 sudo 补验，未计通过。
+- 合成基准正确性通过，扩展并发下核心 P95 从 4.213 秒升至 6.819 秒（+61.8%），未设性能门槛；详见 [性能报告](pipeline-lake-benchmark.md)。
+
+日志与结果保留在本机忽略目录 `.lake-test/linux-review/` 及远端隔离根目录；没有将测试数据或连接配置加入 Git。
+测试结束后，所有 `qrp-lake-review*` 临时 user units 均已停止，测试端口 55439/14261 无监听；
+生产仓库仍干净且停留在 `1da3eb1`，API/jobs 保持原进程运行。隔离数据与环境保留供复查。
+远端审查可结合本节与已提交测试入口复核，不能把本轮结果等同于最终生产服务身份、真实供应商和生产数据的验收。
+
+### 兼容与运维变化
+
+- 旧数据库、旧 API 响应和旧 System B 算法未变化，没有生产数据迁移或补数。
+- 已发布的旧快照保留；新输入身份会产生新 publication 身份。旧的日期不匹配 checkpoint 在自动续算时拒绝，应使用保留的末日 checkpoint 做显式范围重放，不能改写历史 checkpoint 日期。
+- 为保证每日期 checkpoint 的完整性，状态范围重放按日期重复全历史计算，成本高于单次范围计算；滚动均值 benchmark 不代表状态重放性能。
+- 新增调用绑定需要持久保留及单独备份；同一运行失败后不要删除绑定或 Raw。手动重新采集使用新 invocation ID。
+- Linux 测试授权仅用于独立测试资源；未同步或重启生产 checkout、API、旧 jobs 或前端。正式服务身份与最终 `/opt`、`ProtectHome=true` 布局仍需部署前验收。

@@ -45,11 +45,22 @@ def import_legacy(source: Path, store: DuckLakeStore, dataset: str, *, start: da
                         "rows": len(frame), "row_fingerprint": checksum,
                         "pit_limit": "No new publication or observation history is inferred"}
             row = {"dataset": dataset, "partition": str(partition), "rows": len(frame),
-                   "fingerprint": checksum, "dry_run": dry_run}
+                   "fingerprint": checksum, "dry_run": dry_run, "source_observation": evidence}
             if not dry_run:
-                publication = store.publish(schema, frame, partition=str(partition),
-                    partition_column="trade_date" if is_dated else None,
-                    idempotency_key="legacy-v1:"+checksum, lineage=evidence, time_model="legacy")
+                key = "legacy-v1:" + checksum
+                identity = hashlib.sha256((dataset + "\0" + str(partition) + "\0" + key).encode()).hexdigest()
+                publication = store.recover(identity)
+                if publication is not None:
+                    # Only migration's file observation is allowed to differ.
+                    # Verify stable mapping/content, then compare actual rows
+                    # below; never weaken the general publisher lineage check.
+                    stable = ("source_kind", "mapping_version", "rows", "row_fingerprint", "pit_limit")
+                    if publication.time_model != "legacy" or any(publication.lineage.get(k) != evidence[k] for k in stable):
+                        raise ValueError("legacy import identity conflicts with existing evidence")
+                else:
+                    publication = store.publish(schema, frame, partition=str(partition),
+                        partition_column="trade_date" if is_dated else None,
+                        idempotency_key=key, lineage=evidence, time_model="legacy")
                 restored = DataPortal(store, publication.snapshot_id).read(dataset)
                 if is_dated:
                     restored = restored.loc[pd.to_datetime(restored.trade_date).dt.date == partition]

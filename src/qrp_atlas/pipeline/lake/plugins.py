@@ -44,6 +44,8 @@ class PluginSpec:
             raise PluginError("unsupported calculation mode")
         if not self.primary_key or not self.plugin_id or not self.code_version:
             raise PluginError("plugin identity and output primary key are required")
+        if self.partition_column not in self.primary_key:
+            raise PluginError("partition column must belong to primary key")
 
 
 @dataclass(frozen=True)

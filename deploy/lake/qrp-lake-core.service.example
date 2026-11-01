@@ -21,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/qrp-lake/core /var/lib/qrp-lake/core-runtime /var/lib/qrp-lake/dagster
+ReadWritePaths=/var/lib/qrp-lake/core /var/lib/qrp-lake/raw /var/lib/qrp-lake/core-runtime /var/lib/qrp-lake/dagster
 InaccessiblePaths=/etc/qrp-lake/extension.env
 
 [Install]

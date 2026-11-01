@@ -28,7 +28,7 @@ def _typed(name, frame):
         return con.execute(f"SELECT * FROM {name}").fetchdf()
 
 
-def test_cli_state_initial_next_and_revision_replay(tmp_path):
+def test_cli_state_initial_next_and_revision_replay(tmp_path, monkeypatch):
     root = tmp_path / "lake"
     core_catalog = str(tmp_path / "core.ducklake")
     ext_catalog = str(tmp_path / "extension.ducklake")
@@ -93,7 +93,21 @@ def test_cli_state_initial_next_and_revision_replay(tmp_path):
     publish_inputs(next_day, 3)
     with pytest.raises(PluginError, match="explicit replay"):
         cli.run(args(next_day), settings)
+    # Crash after the first revised date is actually committed, then recover
+    # the same frozen range. No terminal checkpoint may be stored on day one.
+    original_publish = DuckLakeStore.publish
+    interrupted = []
+    def publish_then_interrupt(self, schema, *a, **kw):
+        receipt = original_publish(self, schema, *a, **kw)
+        if schema.name == "system_b_state" and kw["partition"] == str(first_day) and not interrupted:
+            interrupted.append(receipt)
+            raise RuntimeError("interrupted range")
+        return receipt
+    monkeypatch.setattr(DuckLakeStore, "publish", publish_then_interrupt)
+    with pytest.raises(RuntimeError, match="interrupted range"):
+        cli.run(args(next_day, replay_from=first_day), settings)
     replayed = cli.run(args(next_day, replay_from=first_day), settings)
+    assert replayed["replayed_publications"][0]["publication_id"] == interrupted[0].publication_id
     assert len(replayed["replayed_publications"]) == 2
     assert replayed["lineage"]["checkpoint"]["recovery_mode"] == "FULL_HISTORY_RECOMPUTE"
     old = DataPortal(extension, second["snapshot_id"]).read("system_b_state")
@@ -102,3 +116,14 @@ def test_cli_state_initial_next_and_revision_replay(tmp_path):
     assert revised.close.tolist() == [3., 11.]
     repeated = cli.run(args(next_day, replay_from=first_day), settings)
     assert [item["publication_id"] for item in repeated["replayed_publications"]] == [item["publication_id"] for item in replayed["replayed_publications"]]
+    from qrp_atlas.pipeline.lake.plugins import frame_identity
+    for item in replayed["replayed_publications"]:
+        cp = item["lineage"]["checkpoint"]
+        assert cp["target_date"] == item["partition"]
+        frame = DataPortal(extension, item["snapshot_id"]).read("system_b_state")
+        frame = frame.loc[pd.to_datetime(frame.trade_date).dt.date == date.fromisoformat(item["partition"])].reset_index(drop=True)
+        frame["trade_date"] = pd.to_datetime(frame.trade_date).dt.date
+        assert cp["output_hash"] == frame_identity(frame)
+    ordinary = cli.run(args(next_day), settings)
+    assert ordinary["lineage"]["checkpoint"]["target_date"] == str(next_day)
+    assert cli.run(args(next_day), settings)["publication_id"] == ordinary["publication_id"]
