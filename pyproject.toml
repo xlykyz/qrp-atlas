@@ -34,9 +34,20 @@ qrp-atlas-system-b = "qrp_atlas.pipeline.system_b.cli:main"
 qrp-atlas-system-b-episode = "qrp_atlas.pipeline.system_b_episode.cli:main"
 qrp-atlas-system-b-pools = "qrp_atlas.pipeline.system_b_pools.cli:main"
 qrp-atlas-jobs = "qrp_atlas.jobs_cli:main"
+qrp-atlas-lake = "qrp_atlas.pipeline.lake.cli:main"
 qrp-atlas-backtest = "qrp_atlas.backtest.harness.cli:main"
 
 [project.optional-dependencies]
+lake = [
+    "duckdb==2.0.0",
+    "pyarrow>=19,<24",
+    "dagster==1.13.28",
+    "psutil>=7,<8",
+]
+lake-server = [
+    "dagster-webserver==1.13.28",
+    "dagster-postgres==0.29.28",
+]
 test = [
     "pytest",
     "fastapi",

@@ -1,0 +1,21 @@
+[Unit]
+Description=QRP lake isolated Dagster daemon
+After=network.target qrp-lake-core.service qrp-lake-extension.service
+
+[Service]
+Type=simple
+User=qrp-lake-daemon
+WorkingDirectory=/opt/qrp-lake
+EnvironmentFile=/etc/qrp-lake/dagster.env
+ExecStart=/opt/qrp-lake/.venv/bin/dagster-daemon run -w /etc/qrp-lake/workspace.yaml
+Restart=on-failure
+KillMode=control-group
+MemoryMax=2G
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qrp-lake/dagster
+InaccessiblePaths=/etc/qrp-lake/core.env /etc/qrp-lake/extension.env
+
+[Install]
+WantedBy=multi-user.target

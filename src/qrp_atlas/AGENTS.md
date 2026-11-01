@@ -74,6 +74,8 @@ frontend → api
 
 正式 `PipelineContract` 通过 `in_process_executor` 在 `qrp-atlas-jobs serve` 进程的线程 worker 内执行；只有普通兼容 Definition 可以通过 argv 子进程执行。正式 executor 不得自行启动写同一 QRP DuckDB 的子进程。
 
+上述执行与共享 DuckDB writer lock 规则约束现有生产运行域。经授权的新 `pipeline/lake` 运行域使用独立进程、固定输入快照、DuckLake 发布事务和 Dagster 编排；不经旧 Job claim/lease/retry，不写现有生产 DuckDB。其核心与扩展采用独立加载和发布域，不能为新路径删除旧路径的锁与取消保证。运行配置仍统一由 `config.settings` 解析，持久化契约仍归属 `contracts`。迁移期间默认保留旧读取路径，任何正式数据集不得有两个同时生效的生产触发权。
+
 正式 `PipelineContract` 的 `resource_reads` 和 `manual_execution_allowed` 是一等字段：前者声明共享只读资源，`duckdb://<database>#<object>` 表级资源只能用于读取；后者控制 `run`/人工依赖提交，部署 selection 不得覆盖。写入同一 DuckDB 文件必须使用其 canonical 数据库级 writer lock，例如 `quant_db_writer`。通用 Orchestration 锁引擎仍可为兼容 JSON Definition 提供表级资源锁，但该兼容能力不改变正式 Contract 的生产写锁规则。
 
 职责必须保持单一：Orchestration 负责 dependency、claim、resource lease、heartbeat、deadline/timeout、retry、恢复和最终 Job 状态；`pipeline.execution.execute_pipeline_contract` 负责目标日期解析、参数校验、输入结构、freshness、业务 executor、completion、质量检查和 `PipelineResult`。不得在任一侧复制另一侧的生命周期。

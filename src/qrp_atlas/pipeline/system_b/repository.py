@@ -119,10 +119,12 @@ def open_database(path: Path, *, read_only: bool) -> duckdb.DuckDBPyConnection:
 
 
 def table_exists(connection: duckdb.DuckDBPyConnection, name: str) -> bool:
+    # Consume the one-row aggregate completely before callers replace a
+    # registered relation. DuckDB 2 keeps fetchone() results active until EOF.
     row = connection.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
         [name],
-    ).fetchone()
+    ).fetchall()[0]
     return bool(row and row[0])
 
 

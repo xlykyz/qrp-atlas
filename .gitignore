@@ -18,6 +18,8 @@ venv/
 ENV/
 .env/
 .venv/
+.venv-lake/
+.lake-test/
 *.egg-info/
 *.pyc
 .pytest_cache/

@@ -315,6 +315,7 @@ class AppSettings:
     external_services: ExternalServicesSettings
     logging: LoggingSettings
     runtime: RuntimeSettings
+    lake: "LakeSettings" = field(default_factory=lambda: LakeSettings())
     sources: Mapping[str, str] = field(
         default_factory=dict,
         repr=False,
@@ -630,6 +631,7 @@ class AppSettings:
                 no_proxy=reader.optional("QRP_NO_PROXY"),
             ),
             logging=LoggingSettings(level=log_level),
+            lake=LakeSettings.parse(reader),
             runtime=RuntimeSettings(
                 environment=runtime_environment,
                 read_only=read_only,
@@ -715,6 +717,17 @@ class AppSettings:
                 ),
             },
             "logging": {"level": self.logging.level},
+            "lake": {
+                "root": str(self.lake.root) if self.lake.root else None,
+                "core_catalog": "configured" if self.lake.core_catalog else "not configured",
+                "core_read_catalog": "configured" if self.lake.core_read_catalog else "not configured",
+                "extension_catalog": "configured" if self.lake.extension_catalog else "not configured",
+                "daily_source": self.lake.daily_source,
+                "daily_snapshot": self.lake.daily_snapshot,
+                "threads": self.lake.threads,
+                "memory_limit": self.lake.memory_limit,
+                "allow_observed": self.lake.allow_observed,
+            },
             "runtime": {
                 "environment": self.runtime.environment.value,
                 "read_only": self.runtime.read_only,
@@ -748,6 +761,9 @@ def redact_secrets(text: str, settings: AppSettings | None = None) -> str:
     secrets = (
         effective.external_services.tushare_token,
         effective.authentication.postgres_dsn,
+        effective.lake.core_catalog,
+        effective.lake.extension_catalog,
+        effective.lake.core_read_catalog,
         effective.external_services.http_proxy,
         effective.external_services.https_proxy,
     )
@@ -845,6 +861,9 @@ SUPPORTED_ENV_VARS = frozenset(
         "QRP_POOL_DB_PATH",
     }
 )
+
+from qrp_atlas.config.lake import LakeSettings, LAKE_ENV_VARS
+SUPPORTED_ENV_VARS = SUPPORTED_ENV_VARS | LAKE_ENV_VARS
 
 LEGACY_ENV_ALIASES = frozenset(
     {

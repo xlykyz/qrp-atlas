@@ -1,0 +1,10 @@
+# Independent gRPC servers also give each location a separate Linux identity.
+load_from:
+  - grpc_server:
+      host: 127.0.0.1
+      port: 4261
+      location_name: qrp_lake_core
+  - grpc_server:
+      host: 127.0.0.1
+      port: 4262
+      location_name: qrp_lake_extension

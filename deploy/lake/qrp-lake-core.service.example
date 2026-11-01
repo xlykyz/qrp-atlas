@@ -1,0 +1,28 @@
+[Unit]
+Description=QRP lake isolated core code location
+After=network.target
+
+[Service]
+Type=simple
+User=qrp-lake-core
+Group=qrp-lake-readers
+WorkingDirectory=/opt/qrp-lake
+EnvironmentFile=/etc/qrp-lake/core.env
+ExecStart=/opt/qrp-lake/.venv/bin/dagster api grpc -h 127.0.0.1 -p 4261 -m qrp_atlas.pipeline.lake.core_location
+Restart=on-failure
+KillMode=control-group
+TimeoutStopSec=30
+MemoryHigh=20G
+MemoryMax=24G
+CPUQuota=400%
+TasksMax=128
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qrp-lake/core /var/lib/qrp-lake/core-runtime /var/lib/qrp-lake/dagster
+InaccessiblePaths=/etc/qrp-lake/extension.env
+
+[Install]
+WantedBy=multi-user.target

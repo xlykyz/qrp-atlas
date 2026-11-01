@@ -122,8 +122,15 @@ def upsert_interaction_qa(
     SELECT {col_names} FROM tmp_irm_qa_df
     """
 
+    # As with execute(), this write operation replaces the caller's preceding
+    # result. Explicitly finish a tiny query instead of draining a potentially
+    # large caller result: DuckDB 2 forbids register() with an active result.
+    con.execute("SELECT 1").fetchall()
     con.register("tmp_irm_qa_df", df)
-    con.execute(sql)
+    try:
+        con.execute(sql).fetchall()
+    finally:
+        con.unregister("tmp_irm_qa_df")
     count = len(df)
 
     print(f"Loaded {count} records into {table_name}", file=sys.stderr)

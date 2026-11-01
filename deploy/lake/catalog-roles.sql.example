@@ -1,0 +1,22 @@
+-- Isolated PostgreSQL databases, never the production auth database.
+-- Run only after deployment approval. Configure passwords separately; do not
+-- put them in shell arguments, this file, or checked-in environment files.
+CREATE ROLE qrp_lake_core_writer LOGIN;
+CREATE ROLE qrp_lake_core_reader LOGIN;
+CREATE ROLE qrp_lake_extension_writer LOGIN;
+CREATE ROLE qrp_lake_dagster LOGIN;
+CREATE DATABASE qrp_lake_core OWNER qrp_lake_core_writer;
+CREATE DATABASE qrp_lake_extension OWNER qrp_lake_extension_writer;
+CREATE DATABASE qrp_lake_dagster OWNER qrp_lake_dagster;
+REVOKE ALL ON DATABASE qrp_lake_core FROM PUBLIC;
+REVOKE ALL ON DATABASE qrp_lake_extension FROM PUBLIC;
+REVOKE ALL ON DATABASE qrp_lake_dagster FROM PUBLIC;
+GRANT CONNECT ON DATABASE qrp_lake_core TO qrp_lake_core_writer, qrp_lake_core_reader;
+GRANT CONNECT ON DATABASE qrp_lake_extension TO qrp_lake_extension_writer;
+GRANT CONNECT ON DATABASE qrp_lake_dagster TO qrp_lake_dagster;
+-- After core DuckLake initialization, connect to qrp_lake_core as owner:
+-- GRANT USAGE ON SCHEMA public TO qrp_lake_core_reader;
+-- GRANT SELECT ON ALL TABLES IN SCHEMA public TO qrp_lake_core_reader;
+-- ALTER DEFAULT PRIVILEGES FOR ROLE qrp_lake_core_writer IN SCHEMA public
+--   GRANT SELECT ON TABLES TO qrp_lake_core_reader;
+-- If DuckLake is configured with a different metadata schema, use that schema.

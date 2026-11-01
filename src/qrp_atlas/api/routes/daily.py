@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from qrp_atlas.api.db import get_db
+from qrp_atlas.pipeline.lake.consumer import daily_connection
 from qrp_atlas.contracts.conventions import get_board
 
 router = APIRouter(prefix="/api/daily", tags=["行情数据"])
@@ -126,8 +127,7 @@ def query_daily(
     offset: int = Query(0, ge=0, description="跳过行数"),
 ):
     """查询每日行情数据"""
-    con = get_db()
-    try:
+    with daily_connection(get_db) as con:
         has_adj_factor = _table_exists(con, "adj_factor_changes")
         where_clauses = []
         params = []
@@ -213,8 +213,6 @@ def query_daily(
         result = [row for row in result if not (row.get("name") and "退市" in str(row.get("name", "")))]
 
         return result
-    finally:
-        con.close()
 
 
 @router.get("/dates")
@@ -224,8 +222,7 @@ def query_trade_dates(
     limit: int = Query(100, ge=1, le=10000, description="最大返回天数"),
 ):
     """查询交易日列表（从 trading_calendar 表）"""
-    con = get_db()
-    try:
+    with daily_connection(get_db) as con:
         where_clauses = []
         params = []
         if start_date:
@@ -244,5 +241,3 @@ def query_trade_dates(
             params + [limit],
         ).fetchall()
         return [row[0] for row in rows]
-    finally:
-        con.close()
