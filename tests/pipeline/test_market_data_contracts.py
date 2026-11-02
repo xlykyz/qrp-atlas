@@ -1181,3 +1181,34 @@ def test_daily_basic_coverage_still_fails_closed_when_traded_ticker_missing(tmp_
 
     assert result.status is ResultStatus.FAILED
     assert any(d.code == "DAILY_BASIC_API_PARTIAL" for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("contract", [DAILY_BASIC_UPDATE, ADJ_FACTOR_DAILY])
+def test_indicator_coverage_excludes_provider_zero_volume_rows(tmp_path, monkeypatch, contract):
+    """A provider may retain zero-trade daily rows while omitting indicators."""
+    item = settings(tmp_path)
+    initialise_database(item)
+    with duckdb.connect(str(item.paths.duckdb_path)) as con:
+        for ticker in ("000001.SZ", "600000.SH"):
+            con.execute("INSERT INTO daily_market_snapshot (trade_date,ticker,close) VALUES (?,?,?)",
+                        [TARGET, ticker, 10.0])
+    client = FakeTushare()
+    client.daily_frame.loc[1, ["vol", "amount"]] = 0
+    client.daily_basic_frame = client.daily_basic_frame.iloc[[0]]
+    client.adj_factor_frame = client.adj_factor_frame.iloc[[0]]
+    original = client.daily_frame.copy(deep=True)
+    monkeypatch.setattr("qrp_atlas.pipeline.market_data_contracts.get_tushare_pro", lambda **_kwargs: client)
+    result = run(contract, item)
+    assert result.status is ResultStatus.SUCCESS
+    assert result.metrics.rows_written == 1
+    pd.testing.assert_frame_equal(client.daily_frame, original)
+
+
+@pytest.mark.parametrize("bad_volume", [None, "invalid", -1, float("inf"), float("-inf")])
+def test_trade_coverage_rejects_invalid_provider_volume(bad_volume):
+    from qrp_atlas.pipeline.market_data_contracts import _tushare_traded_tickers
+    client = FakeTushare()
+    client.daily_frame["vol"] = client.daily_frame["vol"].astype(object)
+    client.daily_frame.loc[1, "vol"] = bad_volume
+    with pytest.raises(ContractError, match="TUSHARE_DAILY_REFERENCE_INVALID"):
+        _tushare_traded_tickers(client, TARGET)

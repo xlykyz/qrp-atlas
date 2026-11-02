@@ -391,13 +391,20 @@ def _tushare_traded_tickers(client: Any, target: date) -> set[str]:
     from the previous trading day by enrichment.  Tushare date-bound
     indicators (``daily_basic``, ``adj_factor``) only return rows for
     stocks that traded on the target date, so coverage must be measured
-    against the traded set, not the enriched snapshot set.
+    against the traded set, not the enriched snapshot set. Some providers also
+    retain zero-volume rows in daily; those rows do not prove actual trading.
     """
 
     raw = client.daily(trade_date=target.strftime("%Y%m%d"))
     if raw is None or raw.empty:
         return set()
-    return {normalize_ticker(value) for value in raw["ts_code"].dropna().astype(str)}
+    code = "TUSHARE_DAILY_REFERENCE_INVALID"
+    _required_columns(raw, ("ts_code", "trade_date", "vol"), code)
+    _ensure_target_rows(raw, target, code)
+    volume = pd.to_numeric(raw["vol"], errors="coerce")
+    if volume.isna().any() or (~volume.between(0, float("inf"), inclusive="left")).any():
+        raise ContractError(code, "daily volume must be finite and non-negative")
+    return {normalize_ticker(value) for value in raw.loc[volume > 0, "ts_code"].dropna().astype(str)}
 
 
 def _external_target_freshness(error_code: str, input_id: str):
