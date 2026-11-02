@@ -232,7 +232,7 @@ $env:QRP_TEST_PG_BIN=(Resolve-Path '.lake-test/tools/pgsql/bin').Path
 
 | 条目 | 修复与回归 |
 | --- | --- |
-| R1 | core unit 开放 Raw 的可写例外，权限表要求预建 core 独占目录。Linux 探针必须同时验证原配置拒绝、修复后真实 Raw 保存、扩展身份拒绝；不能以配置解析成功替代权限实测 |
+| R1 | core unit 开放 Raw 的可写例外，权限表要求预建 core 独占目录。系统级临时服务已实测原配置拒绝、修复后真实 Raw 保存、不同 Unix 身份拒绝写入；最终部署身份和路径仍需验收 |
 | R2 | 范围重放为每个日期重新计算完整 checkpoint 和该日输出身份；自动续算检查 checkpoint 与分区日期一致。回归覆盖范围中途提交后中断、恢复、普通重跑末日及幂等 |
 | R3 | 输入身份记录实际 domain/dataset/snapshot/publication；目标日 receipt 未变但历史窗口修订时产生正确新输出，重复相同输入仍幂等 |
 | R4 | `--invocation-id` 持久绑定首次 manifest、Raw 与 CAS 基线；Dagster 同一 root run/dataset/partition 的 step/run 级重试沿用身份，提交后丢回执先恢复，不再访问 Provider；主动新运行仍可产生 revision |
@@ -255,7 +255,7 @@ Windows 初次针对性验证为 8 passed；相关已有回归 57 passed；部�
 真实 daemon 重启 → code location 强退 → 子进程消失 → 任务 FAILURE → 槽位释放 → 下一任务 SUCCESS
 已在独立 PostgreSQL 元数据库和临时 user units 中通过，入口 `linux_dagster_recovery.py`。
 `linux_acceptance.py` 实测 128 MiB cgroup 内存限制触发 OOM kill；但用户级文件系统限制的反向测试未生效，
-该项明确不算通过，需 `linux_system_acceptance.sh` 的系统级临时服务补验。
+用户级权限测试明确不算通过；随后已通过 `linux_system_acceptance.sh` 的系统级临时服务补验，证据见下文。
 
 ### 本轮 Linux 验证记录
 
@@ -266,13 +266,27 @@ DuckDB 2.0.0、Dagster 1.13.28、dagster-postgres 0.29.28；生产 checkout 与�
 - 全量 `python -m pytest -q --tb=short -rs`：**1700 passed，126 warnings，830.50 秒**，无失败或跳过。
 - 最后补充 root-run 重试绑定及模板配置检查后，运行 `test_runtime_dagster.py` 与 `test_review_regressions.py`：**14 passed，23 warnings，25.47 秒**。这是末次改动的针对性回归，未重复整套测试，不能与 1700 相加计为独立用例数。
 - 实际 PostgreSQL reader 角色可以 SELECT，执行不影响行的 DELETE 仍被权限拒绝。
-- daemon 重启、进程退出后的截止回收、后续任务成功，以及内核 OOM kill 通过；Raw 系统级写权限仍待 sudo 补验，未计通过。
+- daemon 重启、进程退出后的截止回收、后续任务成功，以及内核 OOM kill 通过；Raw 系统级权限补验也已通过。
 - 合成基准正确性通过，扩展并发下核心 P95 从 4.213 秒升至 6.819 秒（+61.8%），未设性能门槛；详见 [性能报告](pipeline-lake-benchmark.md)。
 
 日志与结果保留在本机忽略目录 `.lake-test/linux-review/` 及远端隔离根目录；没有将测试数据或连接配置加入 Git。
 测试结束后，所有 `qrp-lake-review*` 临时 user units 均已停止，测试端口 55439/14261 无监听；
 生产仓库仍干净且停留在 `1da3eb1`，API/jobs 保持原进程运行。隔离数据与环境保留供复查。
 远端审查可结合本节与已提交测试入口复核，不能把本轮结果等同于最终生产服务身份、真实供应商和生产数据的验收。
+
+### R1 系统级权限补验（2026-11-02）
+
+用户以 sudo 执行已提交脚本后，通过 SSH 复核了 `result.json` 与三份原始日志。
+证据位于隔离根目录下的 `privileged-raw.VR7T4Q/`：
+
+- `old.log`：缺少 Raw 可写例外时，真实 Raw 保存返回 `errno=30`（只读文件系统），服务退出码 30。
+- `fixed.log`：按修复后的模板开放 Raw 后，真实 Raw 保存返回 batch ID，服务退出码 0；目录中恰有一个 `batch.json`。
+- `extension.log`：以 `nobody` 执行的 touch 返回 `Permission denied`，退出码 1，未创建 `raw/forbidden`；拒绝来自文件权限，不是服务启动失败。
+
+三项结果均通过，关闭此前待 sudo 补验项。三个 `qrp-lake-review-system-*` 临时服务已自动回收，
+生产 API/jobs 仍为原进程，生产仓库保持干净。日志副本仅保留在本机忽略目录 `.lake-test/linux-review/privileged-raw.VR7T4Q/`。
+此次使用 `User=claire/nobody`、`ProtectSystem=strict` 和 `ProtectHome=read-only`，
+验证了修复的可写例外与不同身份拒绝写入；最终 `/opt` 布局、`ProtectHome=true` 及正式服务账号仍需部署前验收。
 
 ### 兼容与运维变化
 
