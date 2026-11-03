@@ -124,12 +124,6 @@ class MarketM6QueryService:
             prev_date: date | None = prev_row[0] if prev_row and prev_row[0] is not None else None
 
             from qrp_atlas.pipeline.market_m6.service import resolve_canonical_market_scope
-            stock_info_rows = self.con.execute("SELECT ticker, market, exchange FROM stock_info").fetchall()
-            ticker_to_scope = {
-                str(t).strip(): resolve_canonical_market_scope(m, ex)
-                for t, m, ex in stock_info_rows
-                if resolve_canonical_market_scope(m, ex)
-            }
 
             today_snapshot_rows = self.con.execute(
                 "SELECT ticker, close, is_limit_up, is_limit_down, volume FROM daily_market_snapshot WHERE trade_date = ?",
@@ -147,7 +141,7 @@ class MarketM6QueryService:
             market_rows = []
             for t_raw, close_val, is_up, is_down, vol in today_snapshot_rows:
                 t_str = str(t_raw).strip()
-                scope = ticker_to_scope.get(t_str)
+                scope = resolve_canonical_market_scope(t_str)
                 if not scope:
                     continue
                 is_suspended = (t_str in today_suspensions) or (vol is not None and vol == 0)

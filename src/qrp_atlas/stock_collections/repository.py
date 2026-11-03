@@ -168,20 +168,12 @@ class StockCollectionRepository:
         ]
 
     def check_is_equity(self, asset_id: str) -> bool:
-        """Verify asset is a valid EQUITY in stock_info (if stock_info exists)."""
-        # If stock_info exists in database, check it; otherwise treat as valid if properly formatted
-        tables = [
-            t[0]
-            for t in self.con.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
-            ).fetchall()
-        ]
-        if "stock_info" in tables:
-            row = self.con.execute(
-                "SELECT COUNT(*) FROM stock_info WHERE ticker = ?", [asset_id]
-            ).fetchone()
-            return bool(row and row[0] > 0)
-        # Fallback check on asset_id format (e.g. 600519.SH, 000001.SZ, 300750.SZ, 688981.SH, 830000.BJ)
+        """Verify asset_id has a valid EQUITY trading-code format.
+
+        The check is intentionally decoupled from any stock reference table: it
+        only validates the standard A-share code shape (``600519.SH``,
+        ``000001.SZ``, ``300750.SZ``, ``688981.SH``, ``830000.BJ``).
+        """
         return isinstance(asset_id, str) and len(asset_id) >= 6 and (
             asset_id.endswith(".SH") or asset_id.endswith(".SZ") or asset_id.endswith(".BJ")
         )
